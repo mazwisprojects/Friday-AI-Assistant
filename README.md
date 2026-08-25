@@ -86,7 +86,7 @@ graph TB
 git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git && cd Friday-AI-Assistant
 
 # 2. Create Python environment (Python 3.11)
-conda create -n ada_v2 python=3.11 -y && conda activate ada_v2
+conda create -n friday python=3.11 -y && conda activate friday
 brew install portaudio  # macOS only (for PyAudio)
 pip install -r requirements.txt
 playwright install chromium
@@ -98,7 +98,7 @@ npm install
 echo "GEMINI_API_KEY=your_key_here" > .env
 
 # 5. Run!
-conda activate ada_v2 && npm run dev
+conda activate friday && npm run dev
 ```
 
 </details>
