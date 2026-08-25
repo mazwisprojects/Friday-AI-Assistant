@@ -1,5 +1,6 @@
 #youtube_video.py
 import json
+import os
 import re
 import sys
 import time
@@ -58,8 +59,7 @@ _YT_VIDEO_FILTER = "EgIQAQ%3D%3D"
 
 
 def _get_api_key() -> str:
-    with open(API_CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)["gemini_api_key"]
+    return os.getenv("GEMINI_API_KEY", "")
 
 
 def _open_url(url: str) -> None:

@@ -1,6 +1,7 @@
 #computer_control.py
 import io
 import json
+import os
 import platform
 import re
 import string
@@ -55,7 +56,7 @@ def _get_os() -> str:
 
 
 def _get_api_key() -> str:
-    return _load_config().get("gemini_api_key", "")
+    return os.getenv("GEMINI_API_KEY", "")
 
 _SAFE_SCREENSHOT_ROOTS = (
     Path.home(),
