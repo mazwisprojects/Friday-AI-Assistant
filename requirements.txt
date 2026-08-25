@@ -10,6 +10,10 @@ pyaudio
 pillow
 mss
 # Browser Automation
+# After `pip install -r requirements.txt`, also run:
+#   playwright install chromium firefox
+# (skip WebKit - it needs a native libxml2.dll not present by default on Windows,
+# and this project only ever launches Chromium/Firefox-based browsers anyway)
 playwright
 # Smart Home
 python-kasa
