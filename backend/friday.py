@@ -39,6 +39,9 @@ from actions import youtube_video as youtube_video_module
 # them at this project's GEMINI_API_KEY (.env) instead.
 load_dotenv()
 _GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+computer_control_module._get_api_key = lambda: _GEMINI_API_KEY
+computer_settings_module._get_api_key = lambda: _GEMINI_API_KEY
+desktop_module._get_api_key = lambda: _GEMINI_API_KEY
 web_search_module._get_api_key = lambda: _GEMINI_API_KEY
 youtube_video_module._get_api_key = lambda: _GEMINI_API_KEY
 # _ask_for_url shows a blocking Tkinter dialog and ignores any 'url' already passed in.
