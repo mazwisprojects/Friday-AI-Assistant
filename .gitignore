@@ -7,9 +7,10 @@ venv/
 .venv/
 env/
 
-# ADA Specific Local Data
+# FRIDAY Specific Local Data
 backend/reference.jpg
 backend/settings.json
+settings.json
 backend/last_cad_generation.json
 long_term_memory/
 projects/
