@@ -83,7 +83,7 @@ graph TB
 
 ```bash
 # 1. Clone and enter
-git clone https://github.com/nazirlouis/ada_v2.git && cd ada_v2
+git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git && cd Friday-AI-Assistant
 
 # 2. Create Python environment (Python 3.11)
 conda create -n ada_v2 python=3.11 -y && conda activate ada_v2
@@ -126,7 +126,7 @@ If you have never coded before, follow these steps first!
 1. Open your terminal (or Command Prompt on Windows).
 2. Type this command and hit Enter:
    ```bash
-   git clone https://github.com/nazirlouis/ada_v2.git
+   git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git
    ```
 3. This creates a folder named `ada_v2`.
 
