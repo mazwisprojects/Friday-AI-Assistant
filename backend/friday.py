@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import json
 import os
 import sys
 import traceback
@@ -34,6 +35,15 @@ from actions import desktop as desktop_module
 from actions import web_search as web_search_module
 from actions import send_message as send_message_module
 from actions import youtube_video as youtube_video_module
+from actions import browser_control as browser_control_module
+from actions import code_helper as code_helper_module
+from actions import dev_agent as dev_agent_module
+from actions import flight_finder as flight_finder_module
+from actions import game_updater as game_updater_module
+from actions import file_processor as file_processor_module
+from actions import background_monitor as background_monitor_module
+from actions.proactive import ProactiveEngine
+from memory.memory_manager import load_memory as load_legacy_memory
 
 # youtube_video's _ask_for_url shows a blocking Tkinter dialog and ignores any 'url'
 # already passed in. We require 'url' explicitly in the tool schema instead of prompting.
@@ -130,6 +140,8 @@ class AudioLoop:
         self.kasa_agent = kasa_agent if kasa_agent else KasaAgent()
         self.printer_agent = PrinterAgent()
         self.system_monitor = system_monitor_module.SystemMonitor()
+        self.proactive_engine = ProactiveEngine()
+        self._last_user_speech = time.monotonic()
 
         self.send_text_task = None
         self.stop_event = asyncio.Event()
@@ -174,6 +186,10 @@ class AudioLoop:
         # Reset transcription tracking for new turn
         self._last_input_transcription = ""
         self._last_output_transcription = ""
+
+    def notify_activity(self):
+        """Resets the proactive-speech silence timer; call this whenever the user sends text input."""
+        self._last_user_speech = time.monotonic()
 
     def update_permissions(self, new_perms):
         print(f"[FRIDAY DEBUG] [CONFIG] Updating tool permissions: {new_perms}")
@@ -322,6 +338,7 @@ class AudioLoop:
                     if not self._is_speaking:
                         # NEW Speech Utterance Started
                         self._is_speaking = True
+                        self._last_user_speech = time.monotonic()
                         print(f"[FRIDAY DEBUG] [VAD] Speech Detected (RMS: {rms}). Sending Video Frame.")
                         
                         # Send ONE frame
@@ -598,7 +615,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
@@ -1136,6 +1153,91 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "browser_control":
+                                    action = fc.args.get("action", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'browser_control' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    fields_raw = params.get("fields")
+                                    if isinstance(fields_raw, str) and fields_raw.strip():
+                                        try:
+                                            params["fields"] = json.loads(fields_raw)
+                                        except json.JSONDecodeError:
+                                            pass
+                                    result_str = await asyncio.to_thread(browser_control_module.browser_control, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "code_helper":
+                                    action = fc.args.get("action", "auto")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'code_helper' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(code_helper_module.code_helper, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "build_project":
+                                    description_arg = fc.args.get("description", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'build_project' description='{description_arg}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(dev_agent_module.dev_agent, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "find_flights":
+                                    origin = fc.args.get("origin", "")
+                                    destination = fc.args.get("destination", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'find_flights' {origin} -> {destination}")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(flight_finder_module.flight_finder, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "game_updater":
+                                    action = fc.args.get("action", "update")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'game_updater' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(game_updater_module.game_updater, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "process_file":
+                                    file_path_arg = fc.args.get("file_path", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'process_file' file_path='{file_path_arg}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(file_processor_module.file_processor, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "manage_monitors":
+                                    action = fc.args.get("action", "")
+                                    topic = fc.args.get("topic", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'manage_monitors' action='{action}' topic='{topic}'")
+                                    if action == "add":
+                                        result_str = await asyncio.to_thread(background_monitor_module.add_monitor, topic)
+                                    elif action == "remove":
+                                        result_str = await asyncio.to_thread(background_monitor_module.remove_monitor, topic)
+                                    elif action == "list":
+                                        monitors = await asyncio.to_thread(background_monitor_module.list_monitors)
+                                        result_str = ", ".join(monitors) if monitors else "No topics are being monitored."
+                                    else:
+                                        result_str = f"Unknown manage_monitors action: '{action}'"
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
                         if function_responses:
                             await self.session.send_tool_response(function_responses=function_responses)
                 
@@ -1228,6 +1330,26 @@ class AudioLoop:
                 except Exception as e:
                     print(f"[FRIDAY DEBUG] [ERR] Failed to send system alert: {e}")
 
+    async def proactive_loop(self):
+        """Periodically checks if enough silence has passed to let the model speak unprompted."""
+        while True:
+            await asyncio.sleep(60)
+            if not self.session or not self.proactive_engine.should_trigger(self._last_user_speech):
+                continue
+            try:
+                alerts = await asyncio.to_thread(background_monitor_module.check_all)
+                memory = await asyncio.to_thread(load_legacy_memory)
+                monitors = await asyncio.to_thread(background_monitor_module.list_monitors)
+                prompt = self.proactive_engine.build_prompt(memory, monitors=monitors)
+                if alerts:
+                    prompt += "\n\nNew monitor alerts:\n" + "\n".join(alerts)
+                print(f"[FRIDAY DEBUG] [PROACTIVE] Triggering unprompted message.")
+                await self.session.send(input=prompt, end_of_turn=True)
+                self.proactive_engine.mark_triggered()
+            except Exception as e:
+                print(f"[FRIDAY DEBUG] [ERR] Proactive loop failed: {e}")
+
+
     async def run(self, start_message=None):
         retry_delay = 1
         is_reconnect = False
@@ -1256,6 +1378,7 @@ class AudioLoop:
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
                     tg.create_task(self.monitor_system())
+                    tg.create_task(self.proactive_loop())
 
                     # Handle Startup vs Reconnect Logic
                     if not is_reconnect:

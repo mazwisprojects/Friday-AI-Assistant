@@ -79,7 +79,14 @@ DEFAULT_SETTINGS = {
         "desktop_control": True,
         "web_search": False,
         "send_message": True,
-        "youtube_video": True
+        "youtube_video": True,
+        "browser_control": True,
+        "code_helper": True,
+        "build_project": True,
+        "find_flights": True,
+        "game_updater": True,
+        "process_file": True,
+        "manage_monitors": True
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
@@ -476,6 +483,9 @@ async def user_input(sid, data):
         # Log User Input to Global Memory (not project-scoped, never cleared)
         if audio_loop and audio_loop.memory_manager:
             audio_loop.memory_manager.append_message("User", text, project=audio_loop.project_manager.current_project)
+
+        # Reset the proactive-speech silence timer
+        audio_loop.notify_activity()
 
         # Use the same 'send' method that worked for audio, as 'send_realtime_input' and 'send_client_content' seem unstable in this env
         # INJECT VIDEO FRAME IF AVAILABLE (VAD-style logic for Text Input)

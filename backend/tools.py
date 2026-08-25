@@ -325,6 +325,127 @@ youtube_video_tool = {
     }
 }
 
+browser_control_tool = {
+    "name": "browser_control",
+    "description": "Controls a real web browser (Chrome, Firefox, Edge, Brave, using the user's own profile): navigate, search, open tabs, click, type, scroll, fill forms, read page text, screenshot, and manage multiple browser sessions.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: go_to, search, new_tab, switch, list_browsers, close, close_all, click, type, scroll, fill_form, smart_click, smart_type, get_text, get_url, press, close_tab, screenshot, back, forward, reload."},
+            "url": {"type": "STRING", "description": "URL for go_to/new_tab."},
+            "query": {"type": "STRING", "description": "Search query, for the 'search' action."},
+            "engine": {"type": "STRING", "description": "Search engine, e.g. 'google', 'bing'. Defaults to google."},
+            "browser": {"type": "STRING", "description": "Browser name, e.g. chrome, firefox, edge, brave. Uses the active/default browser if omitted."},
+            "selector": {"type": "STRING", "description": "CSS selector, for 'click'/'type'."},
+            "text": {"type": "STRING", "description": "Text to type, or button text to click."},
+            "description": {"type": "STRING", "description": "Natural-language element description, for 'smart_click'/'smart_type'."},
+            "fields": {"type": "STRING", "description": "JSON object string of {selector: value} pairs, for 'fill_form'."},
+            "direction": {"type": "STRING", "description": "Scroll direction, for 'scroll'."},
+            "amount": {"type": "INTEGER", "description": "Scroll amount, for 'scroll'."},
+            "key": {"type": "STRING", "description": "Keyboard key, for 'press'."},
+            "path": {"type": "STRING", "description": "Save path, for 'screenshot'."},
+            "clear_first": {"type": "BOOLEAN", "description": "Clear the field before typing, for 'type'."}
+        },
+        "required": ["action"]
+    }
+}
+
+code_helper_tool = {
+    "name": "code_helper",
+    "description": "AI-powered code generation, editing, execution, and debugging. Writes new code files, runs/builds code with iterative auto-fixing, or explains/optimizes existing code. Can execute code on the user's machine.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: write, edit, explain, run, build, optimize, auto. Defaults to 'auto' (intent is auto-detected)."},
+            "description": {"type": "STRING", "description": "What the code should do, or what change to make, or what problem to analyze."},
+            "language": {"type": "STRING", "description": "Programming language. Defaults to 'python'."},
+            "output_path": {"type": "STRING", "description": "Where to save the generated file."},
+            "file_path": {"type": "STRING", "description": "Path to an existing file, for edit/explain/run/build/optimize."},
+            "code": {"type": "STRING", "description": "Raw code string, for explain/optimize without a file."},
+            "args": {"type": "ARRAY", "items": {"type": "STRING"}, "description": "CLI arguments, for run/build."},
+            "timeout": {"type": "INTEGER", "description": "Execution timeout in seconds. Defaults to 30."}
+        },
+        "required": ["action", "description"]
+    }
+}
+
+build_project_tool = {
+    "name": "build_project",
+    "description": "Creates a complete, runnable software project from a natural language description: plans files, writes code, installs dependencies, and can open it in VS Code. Higher risk: this installs packages and executes code on the user's machine.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "description": {"type": "STRING", "description": "What the project should do."},
+            "language": {"type": "STRING", "description": "Programming language. Defaults to 'python'."},
+            "project_name": {"type": "STRING", "description": "Name for the project folder."},
+            "timeout": {"type": "INTEGER", "description": "Execution timeout in seconds. Defaults to 30."}
+        },
+        "required": ["description"]
+    }
+}
+
+find_flights_tool = {
+    "name": "find_flights",
+    "description": "Searches Google Flights for flights between two cities on a given date.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "origin": {"type": "STRING", "description": "Departure city or airport."},
+            "destination": {"type": "STRING", "description": "Arrival city or airport."},
+            "date": {"type": "STRING", "description": "Departure date."},
+            "return_date": {"type": "STRING", "description": "Return date, for round trips."},
+            "passengers": {"type": "INTEGER", "description": "Number of passengers. Defaults to 1."},
+            "cabin": {"type": "STRING", "description": "Cabin class, e.g. economy, business. Defaults to economy."},
+            "save": {"type": "BOOLEAN", "description": "Save results to Desktop."}
+        },
+        "required": ["origin", "destination", "date"]
+    }
+}
+
+game_updater_tool = {
+    "name": "game_updater",
+    "description": "Lists, installs, or updates games on Steam/Epic, checks download status, or schedules a nightly auto-update.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: list, install, update, download_status, schedule, cancel_schedule, schedule_status. Defaults to 'update'."},
+            "platform": {"type": "STRING", "description": "One of: steam, epic, both. Defaults to 'both'."},
+            "game_name": {"type": "STRING", "description": "Name of the game."},
+            "app_id": {"type": "STRING", "description": "Steam app ID, if known."},
+            "hour": {"type": "INTEGER", "description": "Hour (0-23) for 'schedule'."},
+            "minute": {"type": "INTEGER", "description": "Minute (0-59) for 'schedule'."},
+            "shutdown_when_done": {"type": "BOOLEAN", "description": "Shut down the computer after the update completes."}
+        },
+        "required": ["action"]
+    }
+}
+
+process_file_tool = {
+    "name": "process_file",
+    "description": "Analyzes or transforms a file with AI: describe/OCR/resize images, summarize/extract PDFs and documents, analyze CSV/Excel, explain/review/fix code files, and more.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "file_path": {"type": "STRING", "description": "Path to the file to process."},
+            "action": {"type": "STRING", "description": "The action to perform, e.g. describe, ocr, summarize, extract_text, analyze, explain, review, fix. Depends on file type."},
+            "instruction": {"type": "STRING", "description": "Additional natural-language instruction for the action."}
+        },
+        "required": ["file_path"]
+    }
+}
+
+manage_monitors_tool = {
+    "name": "manage_monitors",
+    "description": "Adds, removes, or lists topics to passively monitor for news updates (checked once per day). Never monitors crypto or financial topics.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: add, remove, list."},
+            "topic": {"type": "STRING", "description": "The topic name, required for add/remove."}
+        },
+        "required": ["action"]
+    }
+}
 
 generate_cad_prototype_tool = {
     "name": "generate_cad_prototype",
@@ -417,7 +538,14 @@ tools_list = [{"function_declarations": [
     desktop_control_tool,
     web_search_tool,
     send_message_tool,
-    youtube_video_tool
+    youtube_video_tool,
+    browser_control_tool,
+    code_helper_tool,
+    build_project_tool,
+    find_flights_tool,
+    game_updater_tool,
+    process_file_tool,
+    manage_monitors_tool
 ]}]
 
 

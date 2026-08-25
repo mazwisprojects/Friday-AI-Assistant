@@ -32,3 +32,9 @@ plyer
 ddgs
 requests
 youtube_transcript_api
+# OS Actions (file processing: PDFs, docs, spreadsheets)
+pdfplumber
+PyPDF2
+python-docx
+pandas
+openpyxl

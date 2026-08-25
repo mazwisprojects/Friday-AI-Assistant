@@ -28,6 +28,13 @@ const TOOLS = [
     { id: 'web_search', label: 'Web Search' },
     { id: 'send_message', label: 'Send Message' },
     { id: 'youtube_video', label: 'YouTube Video' },
+    { id: 'browser_control', label: 'Browser Control' },
+    { id: 'code_helper', label: 'Code Helper' },
+    { id: 'build_project', label: 'Build Project' },
+    { id: 'find_flights', label: 'Find Flights' },
+    { id: 'game_updater', label: 'Game Updater' },
+    { id: 'process_file', label: 'Process File' },
+    { id: 'manage_monitors', label: 'Manage Monitors' },
 ];
 
 const SettingsWindow = ({
