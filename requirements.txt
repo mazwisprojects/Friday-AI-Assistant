@@ -27,3 +27,8 @@ psutil
 pyautogui
 pyperclip
 send2trash
+# OS Actions (weather, reminders, desktop, web search, messaging, youtube)
+plyer
+ddgs
+requests
+youtube_transcript_api

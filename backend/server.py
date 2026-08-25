@@ -73,7 +73,13 @@ DEFAULT_SETTINGS = {
         "computer_settings": True,
         "manage_files": True,
         "open_application": True,
-        "get_system_status": False
+        "get_system_status": False,
+        "get_weather": False,
+        "set_reminder": True,
+        "desktop_control": True,
+        "web_search": False,
+        "send_message": True,
+        "youtube_video": True
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}

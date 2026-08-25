@@ -11,11 +11,23 @@ const TOOLS = [
     { id: 'create_project', label: 'Create Project' },
     { id: 'switch_project', label: 'Switch Project' },
     { id: 'list_projects', label: 'List Projects' },
+    { id: 'search_memory', label: 'Search Memory' },
     { id: 'list_smart_devices', label: 'List Devices' },
     { id: 'control_light', label: 'Control Light' },
     { id: 'discover_printers', label: 'Discover Printers' },
     { id: 'print_stl', label: 'Print 3D Model' },
     { id: 'iterate_cad', label: 'Iterate CAD' },
+    { id: 'computer_control', label: 'Computer Control' },
+    { id: 'computer_settings', label: 'Computer Settings' },
+    { id: 'manage_files', label: 'Manage Files' },
+    { id: 'open_application', label: 'Open Application' },
+    { id: 'get_system_status', label: 'System Status' },
+    { id: 'get_weather', label: 'Get Weather' },
+    { id: 'set_reminder', label: 'Set Reminder' },
+    { id: 'desktop_control', label: 'Desktop Control' },
+    { id: 'web_search', label: 'Web Search' },
+    { id: 'send_message', label: 'Send Message' },
+    { id: 'youtube_video', label: 'YouTube Video' },
 ];
 
 const SettingsWindow = ({

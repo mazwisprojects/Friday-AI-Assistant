@@ -28,6 +28,22 @@ from actions import computer_settings as computer_settings_module
 from actions import file_controller as file_controller_module
 from actions import open_app as open_app_module
 from actions import system_monitor as system_monitor_module
+from actions import weather_report as weather_report_module
+from actions import reminder as reminder_module
+from actions import desktop as desktop_module
+from actions import web_search as web_search_module
+from actions import send_message as send_message_module
+from actions import youtube_video as youtube_video_module
+
+# These action modules were written for a project with config/api_keys.json; point
+# them at this project's GEMINI_API_KEY (.env) instead.
+load_dotenv()
+_GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+web_search_module._get_api_key = lambda: _GEMINI_API_KEY
+youtube_video_module._get_api_key = lambda: _GEMINI_API_KEY
+# _ask_for_url shows a blocking Tkinter dialog and ignores any 'url' already passed in.
+# We require 'url' explicitly in the tool schema instead of prompting for it.
+youtube_video_module._ask_for_url = lambda *args, **kwargs: None
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -41,247 +57,7 @@ DEFAULT_MODE = "camera"
 load_dotenv()
 client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
 
-# Function definitions
-generate_cad = {
-    "name": "generate_cad",
-    "description": "Generates a 3D CAD model based on a prompt.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "prompt": {"type": "STRING", "description": "The description of the object to generate."}
-        },
-        "required": ["prompt"]
-    },
-    "behavior": "NON_BLOCKING"
-}
-
-run_web_agent = {
-    "name": "run_web_agent",
-    "description": "Opens a web browser and performs a task according to the prompt.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "prompt": {"type": "STRING", "description": "The detailed instructions for the web browser agent."}
-        },
-        "required": ["prompt"]
-    },
-    "behavior": "NON_BLOCKING"
-}
-
-create_project_tool = {
-    "name": "create_project",
-    "description": "Creates a new project folder to organize files.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "name": {"type": "STRING", "description": "The name of the new project."}
-        },
-        "required": ["name"]
-    }
-}
-
-switch_project_tool = {
-    "name": "switch_project",
-    "description": "Switches the current active project context.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "name": {"type": "STRING", "description": "The name of the project to switch to."}
-        },
-        "required": ["name"]
-    }
-}
-
-list_projects_tool = {
-    "name": "list_projects",
-    "description": "Lists all available projects.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {},
-    }
-}
-
-search_memory_tool = {
-    "name": "search_memory",
-    "description": "Searches all long-term memory (every conversation ever had, across all projects and server restarts) for a keyword or topic. Use this when the user references something from a past conversation that isn't in the current context, e.g. 'what did we talk about last year' or 'do you remember when I mentioned...'.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "query": {"type": "STRING", "description": "Keywords describing what to search for in past conversations."}
-        },
-        "required": ["query"]
-    }
-}
-
-list_smart_devices_tool = {
-    "name": "list_smart_devices",
-    "description": "Lists all available smart home devices (lights, plugs, etc.) on the network.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {},
-    }
-}
-
-control_light_tool = {
-    "name": "control_light",
-    "description": "Controls a smart light device.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "target": {
-                "type": "STRING",
-                "description": "The IP address of the device to control. Always prefer the IP address over the alias for reliability."
-            },
-            "action": {
-                "type": "STRING",
-                "description": "The action to perform: 'turn_on', 'turn_off', or 'set'."
-            },
-            "brightness": {
-                "type": "INTEGER",
-                "description": "Optional brightness level (0-100)."
-            },
-            "color": {
-                "type": "STRING",
-                "description": "Optional color name (e.g., 'red', 'cool white') or 'warm'."
-            }
-        },
-        "required": ["target", "action"]
-    }
-}
-
-discover_printers_tool = {
-    "name": "discover_printers",
-    "description": "Discovers 3D printers available on the local network.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {},
-    }
-}
-
-print_stl_tool = {
-    "name": "print_stl",
-    "description": "Prints an STL file to a 3D printer. Handles slicing the STL to G-code and uploading to the printer.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "stl_path": {"type": "STRING", "description": "Path to STL file, or 'current' for the most recent CAD model."},
-            "printer": {"type": "STRING", "description": "Printer name or IP address."},
-            "profile": {"type": "STRING", "description": "Optional slicer profile name."}
-        },
-        "required": ["stl_path", "printer"]
-    }
-}
-
-get_print_status_tool = {
-    "name": "get_print_status",
-    "description": "Gets the current status of a 3D printer including progress, time remaining, and temperatures.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "printer": {"type": "STRING", "description": "Printer name or IP address."}
-        },
-        "required": ["printer"]
-    }
-}
-
-iterate_cad_tool = {
-    "name": "iterate_cad",
-    "description": "Modifies or iterates on the current CAD design based on user feedback. Use this when the user asks to adjust, change, modify, or iterate on the existing 3D model (e.g., 'make it taller', 'add a handle', 'reduce the thickness').",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "prompt": {"type": "STRING", "description": "The changes or modifications to apply to the current design."}
-        },
-        "required": ["prompt"]
-    },
-    "behavior": "NON_BLOCKING"
-}
-
-computer_control_tool = {
-    "name": "computer_control",
-    "description": "Controls the mouse and keyboard: type text, click, drag, scroll, press hotkeys, take screenshots, read/write clipboard. Use for direct desktop input automation.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "action": {"type": "STRING", "description": "One of: type, smart_type, click, double_click, right_click, move, drag, hotkey, press, scroll, copy, paste, screenshot, wait, clear_field, focus_window, random_data, user_data."},
-            "text": {"type": "STRING", "description": "Text to type or paste."},
-            "x": {"type": "INTEGER", "description": "X coordinate for click/move/drag."},
-            "y": {"type": "INTEGER", "description": "Y coordinate for click/move/drag."},
-            "x1": {"type": "INTEGER", "description": "Drag start X."},
-            "y1": {"type": "INTEGER", "description": "Drag start Y."},
-            "x2": {"type": "INTEGER", "description": "Drag end X."},
-            "y2": {"type": "INTEGER", "description": "Drag end Y."},
-            "button": {"type": "STRING", "description": "Mouse button: 'left' or 'right'."},
-            "keys": {"type": "STRING", "description": "Hotkey combo, e.g. 'ctrl+c'."},
-            "key": {"type": "STRING", "description": "Single key name, e.g. 'enter'."},
-            "direction": {"type": "STRING", "description": "Scroll direction: up, down, left, right."},
-            "amount": {"type": "INTEGER", "description": "Scroll amount."},
-            "seconds": {"type": "NUMBER", "description": "Seconds to wait for the 'wait' action."},
-            "title": {"type": "STRING", "description": "Window title fragment for focus_window."},
-            "clear_first": {"type": "BOOLEAN", "description": "Clear the field before typing (smart_type)."},
-            "path": {"type": "STRING", "description": "Save path for screenshot (must be inside the home directory)."}
-        },
-        "required": ["action"]
-    }
-}
-
-computer_settings_tool = {
-    "name": "computer_settings",
-    "description": "Controls OS-level settings: volume, brightness, window management (minimize/maximize/snap), browser tab/page navigation, dark mode, wifi toggle, lock screen, and restart/shutdown (requires confirmed='yes').",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "action": {"type": "STRING", "description": "e.g. volume_up, volume_down, volume_set, mute, brightness_up, brightness_down, close_window, minimize, maximize, snap_left, snap_right, switch_window, show_desktop, new_tab, close_tab, next_tab, prev_tab, go_back, go_forward, zoom_in, zoom_out, dark_mode, toggle_wifi, lock_screen, restart, shutdown."},
-            "value": {"type": "STRING", "description": "Value for actions like volume_set (0-100)."},
-            "confirmed": {"type": "STRING", "description": "Must be 'yes' to actually execute restart/shutdown."}
-        },
-        "required": ["action"]
-    }
-}
-
-manage_files_tool = {
-    "name": "manage_files",
-    "description": "Manages real files/folders on the user's computer (Desktop, Downloads, Documents, Pictures, Music, Videos, or any path) - list, create, delete, move, copy, rename, read, write, find, and disk usage. This is distinct from the project-scoped write_file/read_file tools.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "action": {"type": "STRING", "description": "One of: list, create_file, create_folder, delete, move, copy, rename, read, write, find, largest, disk_usage, organize_desktop, info."},
-            "path": {"type": "STRING", "description": "Folder shortcut (desktop, downloads, documents, pictures, music, videos, home) or an absolute path. Defaults to 'desktop'."},
-            "name": {"type": "STRING", "description": "File or folder name relative to path."},
-            "content": {"type": "STRING", "description": "Content for create_file/write."},
-            "destination": {"type": "STRING", "description": "Destination path for move/copy."},
-            "new_name": {"type": "STRING", "description": "New name for rename."},
-            "append": {"type": "BOOLEAN", "description": "Append instead of overwrite for write."},
-            "extension": {"type": "STRING", "description": "File extension filter for find, e.g. '.pdf'."},
-            "max_results": {"type": "INTEGER", "description": "Max results for find."},
-            "count": {"type": "INTEGER", "description": "Number of results for largest."}
-        },
-        "required": ["action"]
-    }
-}
-
-open_application_tool = {
-    "name": "open_application",
-    "description": "Opens a desktop application by name, e.g. Chrome, Spotify, VS Code, Notepad, Steam, Discord.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {
-            "app_name": {"type": "STRING", "description": "The name of the application to open."}
-        },
-        "required": ["app_name"]
-    }
-}
-
-get_system_status_tool = {
-    "name": "get_system_status",
-    "description": "Gets the current CPU, RAM, and GPU usage, CPU temperature, uptime, and process count of the user's computer.",
-    "parameters": {
-        "type": "OBJECT",
-        "properties": {},
-    }
-}
-
-tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, search_memory_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool, computer_control_tool, computer_settings_tool, manage_files_tool, open_application_tool, get_system_status_tool] + tools_list[0]['function_declarations'][1:]}]
+tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:]}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
@@ -827,7 +603,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
@@ -1269,6 +1045,97 @@ class AudioLoop:
                                         f"({status['ram_used_gb']}/{status['ram_total_gb']} GB), "
                                         f"GPU: {status['gpu_percent']}%, CPU Temp: {status['cpu_temp_c']}°C, "
                                         f"Uptime: {status['uptime']}, Processes: {status['process_count']}"
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "get_weather":
+                                    city = fc.args.get("city", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_weather' city='{city}'")
+                                    result_str = await asyncio.to_thread(
+                                        weather_report_module.weather_action,
+                                        {"city": city, "time": fc.args.get("time", "today")}
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "set_reminder":
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'set_reminder' date='{fc.args.get('date')}' time='{fc.args.get('time')}'")
+                                    result_str = await asyncio.to_thread(
+                                        reminder_module.reminder,
+                                        {"date": fc.args.get("date", ""), "time": fc.args.get("time", ""), "message": fc.args.get("message", "Reminder")}
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "desktop_control":
+                                    action = fc.args.get("action", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'desktop_control' action='{action}'")
+                                    # Dispatch to an explicit whitelist of safe functions only - deliberately
+                                    # bypassing desktop_control()'s fallback that generates and exec()s AI code.
+                                    if action == "wallpaper":
+                                        result_str = await asyncio.to_thread(desktop_module.set_wallpaper, fc.args.get("path", ""))
+                                    elif action == "wallpaper_url":
+                                        result_str = await asyncio.to_thread(desktop_module.set_wallpaper_from_url, fc.args.get("url", ""))
+                                    elif action == "current_wallpaper":
+                                        result_str = await asyncio.to_thread(desktop_module.get_current_wallpaper)
+                                    elif action == "organize":
+                                        result_str = await asyncio.to_thread(desktop_module.organize_desktop, fc.args.get("mode", "by_type"))
+                                    elif action == "clean":
+                                        result_str = await asyncio.to_thread(desktop_module.clean_desktop)
+                                    elif action == "list":
+                                        result_str = await asyncio.to_thread(desktop_module.list_desktop)
+                                    elif action == "stats":
+                                        result_str = await asyncio.to_thread(desktop_module.get_desktop_stats)
+                                    else:
+                                        result_str = f"Unknown desktop action: '{action}'"
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "web_search":
+                                    query = fc.args.get("query", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'web_search' query='{query}'")
+                                    result_str = await asyncio.to_thread(
+                                        web_search_module.web_search,
+                                        {"query": query, "mode": fc.args.get("mode", "search"), "items": fc.args.get("items", []), "aspect": fc.args.get("aspect", "general")}
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "send_message":
+                                    receiver = fc.args.get("receiver", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'send_message' receiver='{receiver}'")
+                                    result_str = await asyncio.to_thread(
+                                        send_message_module.send_message,
+                                        {"receiver": receiver, "message_text": fc.args.get("message_text", ""), "platform": fc.args.get("platform", "whatsapp")}
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "youtube_video":
+                                    action = fc.args.get("action", "play")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'youtube_video' action='{action}'")
+                                    result_str = await asyncio.to_thread(
+                                        youtube_video_module.youtube_video,
+                                        {
+                                            "action": action,
+                                            "query": fc.args.get("query", ""),
+                                            "url": fc.args.get("url", ""),
+                                            "region": fc.args.get("region", "TR"),
+                                            "save": fc.args.get("save", False),
+                                        }
                                     )
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": result_str}
