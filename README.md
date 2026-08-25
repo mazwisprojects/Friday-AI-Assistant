@@ -86,7 +86,7 @@ graph TB
 git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git && cd Friday-AI-Assistant
 
 # 2. Create Python environment (Python 3.11)
-conda create -n F.R.I.D.A.Y python=3.11 -y && conda activate F.R.I.D.A.Y
+conda create -n friday python=3.11 -y && conda activate friday
 brew install portaudio  # macOS only (for PyAudio)
 pip install -r requirements.txt
 playwright install chromium
@@ -98,7 +98,7 @@ npm install
 echo "GEMINI_API_KEY=your_key_here" > .env
 
 # 5. Run!
-conda activate F.R.I.D.A.Y && npm run dev
+conda activate friday && npm run dev
 ```
 
 </details>
@@ -156,8 +156,8 @@ brew install portaudio
 Create a single Python 3.11 environment:
 
 ```bash
-conda create -n F.R.I.D.A.Y python=3.11
-conda activate F.R.I.D.A.Y
+conda create -n friday python=3.11
+conda activate friday
 
 # Install all dependencies
 pip install -r requirements.txt
@@ -182,7 +182,7 @@ To use the secure voice features, FRIDAY needs to know what you look like.
 
 1. Take a clear photo of your face (or use an existing one).
 2. Rename the file to `reference.jpg`.
-3. Drag and drop this file into the `F.R.I.D.A.Y/backend` folder.
+3. Drag and drop this file into the `friday/backend` folder.
 4. (Optional) You can toggle this feature on/off in `settings.json` by changing `"face_auth_enabled": true/false`.
 
 ---
@@ -229,7 +229,7 @@ FRIDAY uses Google's Gemini API for voice and intelligence. You need a free API 
 1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
 2. Sign in with your Google account.
 3. Click **"Create API Key"** and copy the generated key.
-4. Create a file named `.env` in the `F.R.I.D.A.Y` folder (same level as `README.md`).
+4. Create a file named `.env` in the `friday` folder (same level as `README.md`).
 5. Add this line to the file:
    ```
    GEMINI_API_KEY=your_api_key_here
@@ -242,12 +242,12 @@ FRIDAY uses Google's Gemini API for voice and intelligence. You need a free API 
 
 ## 🚀 Running FRIDAY V2
 
-You have two options to run the app. Ensure your `F.R.I.D.A.Y` environment is active!
+You have two options to run the app. Ensure your `friday` environment is active!
 
 ### Option 1: The "Easy" Way (Single Terminal)
 The app is smart enough to start the backend for you.
-1. Open your terminal in the `F.R.I.D.A.Y` folder.
-2. Activate your environment: `conda activate F.R.I.D.A.Y`
+1. Open your terminal in the `friday` folder.
+2. Activate your environment: `conda activate friday`
 3. Run:
    ```bash
    npm run dev
@@ -259,7 +259,7 @@ Use this if you want to see the Python logs (recommended for debugging).
 
 **Terminal 1 (Backend):**
 ```bash
-conda activate F.R.I.D.A.Y
+conda activate friday
 python backend/server.py
 ```
 
@@ -322,7 +322,7 @@ npm run dev
 **Symptoms**: Backend crashes on startup with "API key not found".
 
 **Solution**:
-1. Make sure your `.env` file is in the root `F.R.I.D.A.Y` folder (not inside `backend/`).
+1. Make sure your `.env` file is in the root `friday` folder (not inside `backend/`).
 2. Verify the format is exactly: `GEMINI_API_KEY=your_key` (no quotes, no spaces).
 3. Restart the backend after editing the file.
 
