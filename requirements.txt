@@ -22,3 +22,8 @@ python-dotenv
 mediapipe
 # CAD Generation
 build123d
+# OS Actions (computer control, settings, file management, system monitor)
+psutil
+pyautogui
+pyperclip
+send2trash

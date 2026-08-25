@@ -23,6 +23,11 @@ if sys.version_info < (3, 11, 0):
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
 from tools import tools_list
+from actions import computer_control as computer_control_module
+from actions import computer_settings as computer_settings_module
+from actions import file_controller as file_controller_module
+from actions import open_app as open_app_module
+from actions import system_monitor as system_monitor_module
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -192,7 +197,91 @@ iterate_cad_tool = {
     "behavior": "NON_BLOCKING"
 }
 
-tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, search_memory_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool] + tools_list[0]['function_declarations'][1:]}]
+computer_control_tool = {
+    "name": "computer_control",
+    "description": "Controls the mouse and keyboard: type text, click, drag, scroll, press hotkeys, take screenshots, read/write clipboard. Use for direct desktop input automation.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: type, smart_type, click, double_click, right_click, move, drag, hotkey, press, scroll, copy, paste, screenshot, wait, clear_field, focus_window, random_data, user_data."},
+            "text": {"type": "STRING", "description": "Text to type or paste."},
+            "x": {"type": "INTEGER", "description": "X coordinate for click/move/drag."},
+            "y": {"type": "INTEGER", "description": "Y coordinate for click/move/drag."},
+            "x1": {"type": "INTEGER", "description": "Drag start X."},
+            "y1": {"type": "INTEGER", "description": "Drag start Y."},
+            "x2": {"type": "INTEGER", "description": "Drag end X."},
+            "y2": {"type": "INTEGER", "description": "Drag end Y."},
+            "button": {"type": "STRING", "description": "Mouse button: 'left' or 'right'."},
+            "keys": {"type": "STRING", "description": "Hotkey combo, e.g. 'ctrl+c'."},
+            "key": {"type": "STRING", "description": "Single key name, e.g. 'enter'."},
+            "direction": {"type": "STRING", "description": "Scroll direction: up, down, left, right."},
+            "amount": {"type": "INTEGER", "description": "Scroll amount."},
+            "seconds": {"type": "NUMBER", "description": "Seconds to wait for the 'wait' action."},
+            "title": {"type": "STRING", "description": "Window title fragment for focus_window."},
+            "clear_first": {"type": "BOOLEAN", "description": "Clear the field before typing (smart_type)."},
+            "path": {"type": "STRING", "description": "Save path for screenshot (must be inside the home directory)."}
+        },
+        "required": ["action"]
+    }
+}
+
+computer_settings_tool = {
+    "name": "computer_settings",
+    "description": "Controls OS-level settings: volume, brightness, window management (minimize/maximize/snap), browser tab/page navigation, dark mode, wifi toggle, lock screen, and restart/shutdown (requires confirmed='yes').",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "e.g. volume_up, volume_down, volume_set, mute, brightness_up, brightness_down, close_window, minimize, maximize, snap_left, snap_right, switch_window, show_desktop, new_tab, close_tab, next_tab, prev_tab, go_back, go_forward, zoom_in, zoom_out, dark_mode, toggle_wifi, lock_screen, restart, shutdown."},
+            "value": {"type": "STRING", "description": "Value for actions like volume_set (0-100)."},
+            "confirmed": {"type": "STRING", "description": "Must be 'yes' to actually execute restart/shutdown."}
+        },
+        "required": ["action"]
+    }
+}
+
+manage_files_tool = {
+    "name": "manage_files",
+    "description": "Manages real files/folders on the user's computer (Desktop, Downloads, Documents, Pictures, Music, Videos, or any path) - list, create, delete, move, copy, rename, read, write, find, and disk usage. This is distinct from the project-scoped write_file/read_file tools.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: list, create_file, create_folder, delete, move, copy, rename, read, write, find, largest, disk_usage, organize_desktop, info."},
+            "path": {"type": "STRING", "description": "Folder shortcut (desktop, downloads, documents, pictures, music, videos, home) or an absolute path. Defaults to 'desktop'."},
+            "name": {"type": "STRING", "description": "File or folder name relative to path."},
+            "content": {"type": "STRING", "description": "Content for create_file/write."},
+            "destination": {"type": "STRING", "description": "Destination path for move/copy."},
+            "new_name": {"type": "STRING", "description": "New name for rename."},
+            "append": {"type": "BOOLEAN", "description": "Append instead of overwrite for write."},
+            "extension": {"type": "STRING", "description": "File extension filter for find, e.g. '.pdf'."},
+            "max_results": {"type": "INTEGER", "description": "Max results for find."},
+            "count": {"type": "INTEGER", "description": "Number of results for largest."}
+        },
+        "required": ["action"]
+    }
+}
+
+open_application_tool = {
+    "name": "open_application",
+    "description": "Opens a desktop application by name, e.g. Chrome, Spotify, VS Code, Notepad, Steam, Discord.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "app_name": {"type": "STRING", "description": "The name of the application to open."}
+        },
+        "required": ["app_name"]
+    }
+}
+
+get_system_status_tool = {
+    "name": "get_system_status",
+    "description": "Gets the current CPU, RAM, and GPU usage, CPU temperature, uptime, and process count of the user's computer.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {},
+    }
+}
+
+tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, search_memory_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool, computer_control_tool, computer_settings_tool, manage_files_tool, open_application_tool, get_system_status_tool] + tools_list[0]['function_declarations'][1:]}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
@@ -269,6 +358,7 @@ class AudioLoop:
         self.web_agent = WebAgent()
         self.kasa_agent = kasa_agent if kasa_agent else KasaAgent()
         self.printer_agent = PrinterAgent()
+        self.system_monitor = system_monitor_module.SystemMonitor()
 
         self.send_text_task = None
         self.stop_event = asyncio.Event()
@@ -737,7 +827,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
@@ -1131,6 +1221,59 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "computer_control":
+                                    action = fc.args.get("action", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'computer_control' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(computer_control_module.computer_control, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "computer_settings":
+                                    action = fc.args.get("action", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'computer_settings' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(computer_settings_module.computer_settings, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "manage_files":
+                                    action = fc.args.get("action", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'manage_files' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(file_controller_module.file_controller, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "open_application":
+                                    app_name = fc.args.get("app_name", "")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'open_application' app_name='{app_name}'")
+                                    result_str = await asyncio.to_thread(open_app_module.open_app, {"app_name": app_name})
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "get_system_status":
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_system_status'")
+                                    status = await asyncio.to_thread(system_monitor_module.get_system_status)
+                                    result_str = (
+                                        f"CPU: {status['cpu_percent']}%, RAM: {status['ram_percent']}% "
+                                        f"({status['ram_used_gb']}/{status['ram_total_gb']} GB), "
+                                        f"GPU: {status['gpu_percent']}%, CPU Temp: {status['cpu_temp_c']}°C, "
+                                        f"Uptime: {status['uptime']}, Processes: {status['process_count']}"
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
                         if function_responses:
                             await self.session.send_tool_response(function_responses=function_responses)
                 
@@ -1211,6 +1354,18 @@ class AudioLoop:
             if self.out_queue:
                 await self.out_queue.put(frame)
 
+    async def monitor_system(self):
+        """Periodically checks CPU/RAM/GPU/temperature and voices alerts via the model."""
+        while True:
+            await asyncio.sleep(20)
+            alert = await asyncio.to_thread(self.system_monitor.check)
+            if alert and self.session:
+                print(f"[FRIDAY DEBUG] [MONITOR] {alert}")
+                try:
+                    await self.session.send(input=f"System Notification: {alert}", end_of_turn=True)
+                except Exception as e:
+                    print(f"[FRIDAY DEBUG] [ERR] Failed to send system alert: {e}")
+
     async def run(self, start_message=None):
         retry_delay = 1
         is_reconnect = False
@@ -1238,6 +1393,7 @@ class AudioLoop:
 
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
+                    tg.create_task(self.monitor_system())
 
                     # Handle Startup vs Reconnect Logic
                     if not is_reconnect:

@@ -68,7 +68,12 @@ DEFAULT_SETTINGS = {
         "create_project": True,
         "switch_project": True,
         "list_projects": True,
-        "search_memory": True
+        "search_memory": True,
+        "computer_control": True,
+        "computer_settings": True,
+        "manage_files": True,
+        "open_application": True,
+        "get_system_status": False
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
