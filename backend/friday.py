@@ -747,11 +747,12 @@ class AudioLoop:
                                     print(f"[FRIDAY DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
                                     # Skip confirmation block and jump to execution
                                     pass
+                                elif not self.on_tool_confirmation:
+                                    print(f"[FRIDAY DEBUG] [TOOL] No confirmation callback configured for '{fc.name}' -> AUTO-ALLOW")
                                 else:
                                     # Confirmation Logic
-                                    if self.on_tool_confirmation:
-                                        import uuid
-                                        request_id = str(uuid.uuid4())
+                                    import uuid
+                                    request_id = str(uuid.uuid4())
                                     print(f"[FRIDAY DEBUG] [STOP] Requesting confirmation for '{fc.name}' (ID: {request_id})")
                                     
                                     future = asyncio.Future()
@@ -771,18 +772,6 @@ class AudioLoop:
                                         self._pending_confirmations.pop(request_id, None)
 
                                     print(f"[FRIDAY DEBUG] [CONFIRM] Request {request_id} resolved. Confirmed: {confirmed}")
-
-                                    if not confirmed:
-                                        print(f"[FRIDAY DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
-                                        function_response = types.FunctionResponse(
-                                            id=fc.id,
-                                            name=fc.name,
-                                            response={
-                                                "result": "User denied the request to use this tool.",
-                                            }
-                                        )
-                                        function_responses.append(function_response)
-                                        continue
 
                                     if not confirmed:
                                         print(f"[FRIDAY DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
@@ -1172,7 +1161,9 @@ class AudioLoop:
             await asyncio.to_thread(stream.write, bytestream)
 
     async def get_frames(self):
-        cap = await asyncio.to_thread(cv2.VideoCapture, 0, cv2.CAP_AVFOUNDATION)
+        # AVFoundation is macOS-only; use DirectShow on Windows and the default backend elsewhere.
+        camera_backend = cv2.CAP_DSHOW if sys.platform == "win32" else (cv2.CAP_AVFOUNDATION if sys.platform == "darwin" else cv2.CAP_ANY)
+        cap = await asyncio.to_thread(cv2.VideoCapture, 0, camera_backend)
         while True:
             if self.paused:
                 await asyncio.sleep(0.1)
@@ -1198,10 +1189,27 @@ class AudioLoop:
         image_bytes = image_io.read()
         return {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}
 
-    async def _get_screen(self):
-        pass 
+    def _get_screen(self):
+        with mss.mss() as sct:
+            monitor = sct.monitors[0]
+            sct_img = sct.grab(monitor)
+            img = PIL.Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+            img.thumbnail([1024, 1024])
+            image_io = io.BytesIO()
+            img.save(image_io, format="jpeg")
+            image_io.seek(0)
+            image_bytes = image_io.read()
+            return {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}
+
     async def get_screen(self):
-         pass
+        while True:
+            if self.paused:
+                await asyncio.sleep(0.1)
+                continue
+            frame = await asyncio.to_thread(self._get_screen)
+            await asyncio.sleep(1.0)
+            if self.out_queue:
+                await self.out_queue.put(frame)
 
     async def run(self, start_message=None):
         retry_delay = 1
@@ -1254,9 +1262,9 @@ class AudioLoop:
                     
                     else:
                         print(f"[FRIDAY DEBUG] [RECONNECT] Connection restored.")
-                        # Restore Context
+                        # Restore Context (global memory, same source used on fresh startup)
                         print(f"[FRIDAY DEBUG] [RECONNECT] Fetching recent chat history to restore context...")
-                        history = self.project_manager.get_recent_chat_history(limit=10)
+                        history = self.memory_manager.get_recent_messages(limit=10)
                         
                         context_msg = "System Notification: Connection was lost and just re-established. Here is the recent chat history to help you resume seamlessly:\n\n"
                         for entry in history:
