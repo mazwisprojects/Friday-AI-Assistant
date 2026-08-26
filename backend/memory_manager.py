@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +20,8 @@ class MemoryManager:
         self.root_dir = Path(workspace_root) / "long_term_memory"
         self.transcript_dir = self.root_dir / "transcripts"
         self.index_file = self.root_dir / "memory_index.jsonl"
+        self.facts_file = self.root_dir / "facts.jsonl"
+        self._lock = threading.Lock()
 
         self.transcript_dir.mkdir(parents=True, exist_ok=True)
 
@@ -33,20 +36,63 @@ class MemoryManager:
 
         timestamp = datetime.now().isoformat(timespec="seconds")
 
-        # Human-readable daily transcript (append-only)
         transcript_line = f"[{timestamp}] {sender}: {text.strip()}\n"
-        with open(self._today_file(), "a", encoding="utf-8") as f:
-            f.write(transcript_line)
-
-        # Machine-readable index for later search/retrieval
         entry = {
             "timestamp": timestamp,
             "sender": sender,
             "text": text,
             "project": project,
         }
-        with open(self.index_file, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        with self._lock:
+            with open(self._today_file(), "a", encoding="utf-8") as f:
+                f.write(transcript_line)
+
+            # Machine-readable index for later search/retrieval
+            with open(self.index_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    def save_facts(self, facts: list[str], source: str = ""):
+        """Appends new durable facts, ignoring duplicates already stored."""
+        cleaned = {fact.strip() for fact in facts if isinstance(fact, str) and fact.strip()}
+        if not cleaned:
+            return
+
+        existing = set()
+        if self.facts_file.exists():
+            with open(self.facts_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        fact = json.loads(line).get("fact", "").strip().lower()
+                        if fact:
+                            existing.add(fact)
+                    except json.JSONDecodeError:
+                        continue
+
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            with open(self.facts_file, "a", encoding="utf-8") as f:
+                for fact in sorted(cleaned):
+                    if fact.lower() in existing:
+                        continue
+                    f.write(json.dumps({
+                        "timestamp": timestamp,
+                        "fact": fact,
+                        "source": source,
+                    }, ensure_ascii=False) + "\n")
+
+    def get_facts(self, limit: int = 100):
+        """Returns durable facts, newest first, without deleting older facts."""
+        if not self.facts_file.exists():
+            return []
+
+        facts = []
+        with open(self.facts_file, "r", encoding="utf-8") as f:
+            for line in f:
+                try:
+                    facts.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        return facts[-limit:]
 
     def list_transcript_files(self):
         """Returns all daily transcript filenames, oldest first."""
@@ -88,6 +134,11 @@ class MemoryManager:
 
         terms = query.lower().split()
         matches = []
+        for fact in self.get_facts(limit=limit):
+            haystack = fact.get("fact", "").lower()
+            if all(term in haystack for term in terms):
+                matches.append({**fact, "sender": "FACT", "text": fact.get("fact", "")})
+
         with open(self.index_file, "r", encoding="utf-8") as f:
             for line in f:
                 try:

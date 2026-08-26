@@ -180,8 +180,11 @@ class AudioLoop:
     def flush_chat(self):
         """Forces the current chat buffer to be written to log."""
         if self.chat_buffer["sender"] and self.chat_buffer["text"].strip():
-            self.project_manager.log_chat(self.chat_buffer["sender"], self.chat_buffer["text"])
-            self.memory_manager.append_message(self.chat_buffer["sender"], self.chat_buffer["text"], project=self.project_manager.current_project)
+            sender = self.chat_buffer["sender"]
+            text = self.chat_buffer["text"]
+            self.project_manager.log_chat(sender, text)
+            self.memory_manager.append_message(sender, text, project=self.project_manager.current_project)
+            asyncio.create_task(self.extract_important_facts(sender, text))
             self.chat_buffer = {"sender": None, "text": ""}
         # Reset transcription tracking for new turn
         self._last_input_transcription = ""
@@ -190,6 +193,36 @@ class AudioLoop:
     def notify_activity(self):
         """Resets the proactive-speech silence timer; call this whenever the user sends text input."""
         self._last_user_speech = time.monotonic()
+
+    async def extract_important_facts(self, sender: str, text: str):
+        """Ask Gemini to retain only stable facts that will help future conversations."""
+        if not text.strip():
+            return
+
+        prompt = (
+            "Extract only durable, useful facts from this conversation message. "
+            "Keep facts about the user's identity, preferences, important plans, "
+            "long-term projects, relationships, or recurring needs. Do not save "
+            "temporary requests, greetings, secrets, passwords, API keys, or "
+            "unverified guesses. Return ONLY a JSON array of concise strings. "
+            "Return [] if there are no important facts.\n\n"
+            f"Speaker: {sender}\nMessage: {text}"
+        )
+
+        try:
+            response = await asyncio.to_thread(
+                client.models.generate_content,
+                model="gemini-2.5-flash-lite",
+                contents=prompt,
+            )
+            raw = (response.text or "").strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+            facts = json.loads(raw)
+            if isinstance(facts, list):
+                self.memory_manager.save_facts(facts, source=text[:200])
+        except Exception as e:
+            print(f"[FRIDAY DEBUG] [MEMORY] Fact extraction failed: {e}")
 
     def update_permissions(self, new_perms):
         print(f"[FRIDAY DEBUG] [CONFIG] Updating tool permissions: {new_perms}")
@@ -1384,9 +1417,15 @@ class AudioLoop:
                     if not is_reconnect:
                         # Load global long-term memory (survives server restarts, not project-scoped)
                         past_messages = self.memory_manager.get_recent_messages(limit=50)
-                        if past_messages:
-                            print(f"[FRIDAY DEBUG] [STARTUP] Loading {len(past_messages)} messages from long-term memory...")
+                        facts = self.memory_manager.get_facts(limit=100)
+                        if past_messages or facts:
+                            print(f"[FRIDAY DEBUG] [STARTUP] Loading {len(past_messages)} messages and {len(facts)} durable facts from long-term memory...")
                             memory_msg = "System Notification: Here is your long-term memory from all previous conversations (most recent last). Use it to recall who the user is and what has happened before, but do not narrate it back:\n\n"
+                            if facts:
+                                memory_msg += "Durable facts:\n"
+                                for fact in facts:
+                                    memory_msg += f"- {fact.get('fact', '')}\n"
+                                memory_msg += "\nRecent conversation:\n"
                             for entry in past_messages:
                                 sender = entry.get('sender', 'Unknown')
                                 text = entry.get('text', '')

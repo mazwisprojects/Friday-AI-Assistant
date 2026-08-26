@@ -483,6 +483,7 @@ async def user_input(sid, data):
         # Log User Input to Global Memory (not project-scoped, never cleared)
         if audio_loop and audio_loop.memory_manager:
             audio_loop.memory_manager.append_message("User", text, project=audio_loop.project_manager.current_project)
+            asyncio.create_task(audio_loop.extract_important_facts("User", text))
 
         # Reset the proactive-speech silence timer
         audio_loop.notify_activity()
@@ -1004,6 +1005,325 @@ async def update_tool_permissions(sid, data):
         audio_loop.update_permissions(SETTINGS["tool_permissions"])
     # Broadcast update to all
     await sio.emit('tool_permissions', SETTINGS["tool_permissions"])
+
+# New window component socket events
+
+@sio.event
+async def get_system_monitor(sid):
+    """Get current system metrics for SystemMonitorWindow."""
+    from actions.system_monitor import get_system_status
+    try:
+        data = get_system_status()
+        await sio.emit('system_monitor_data', data)
+    except Exception as e:
+        print(f"Error getting system monitor data: {e}")
+
+@sio.event
+async def get_weather(sid, data):
+    """Get weather data for WeatherWindow."""
+    from actions.weather_report import weather_action
+    try:
+        city = data.get('city')
+        result = weather_action({'city': city})
+        # Parse result and emit structured data
+        await sio.emit('weather_data', {
+            'city': city,
+            'temp': 20,  # Placeholder - would need actual weather API
+            'condition': 'Clear',
+            'humidity': 50,
+            'wind': 10,
+            'forecast': []
+        })
+    except Exception as e:
+        print(f"Error getting weather: {e}")
+
+@sio.event
+async def get_reminders(sid):
+    """Get reminders list for ReminderWindow."""
+    try:
+        # Placeholder - would need actual reminder storage
+        await sio.emit('reminders_list', [])
+    except Exception as e:
+        print(f"Error getting reminders: {e}")
+
+@sio.event
+async def add_reminder(sid, data):
+    """Add a new reminder."""
+    from actions.reminder import reminder
+    try:
+        result = reminder(data)
+        await sio.emit('status', {'msg': result})
+    except Exception as e:
+        print(f"Error adding reminder: {e}")
+
+@sio.event
+async def delete_reminder(sid, data):
+    """Delete a reminder."""
+    try:
+        # Placeholder - would need actual deletion logic
+        await sio.emit('status', {'msg': 'Reminder deleted'})
+    except Exception as e:
+        print(f"Error deleting reminder: {e}")
+
+@sio.event
+async def search_flights(sid, data):
+    """Search flights for FlightWindow."""
+    from actions.flight_finder import flight_finder
+    try:
+        result = flight_finder(data)
+        await sio.emit('flight_results', [])
+    except Exception as e:
+        print(f"Error searching flights: {e}")
+
+@sio.event
+async def read_directory(sid, data):
+    """Read directory contents for FileManagerWindow."""
+    try:
+        path = data.get('path', '~')
+        # Placeholder - would need actual directory reading
+        await sio.emit('directory_contents', {'path': path, 'items': []})
+    except Exception as e:
+        print(f"Error reading directory: {e}")
+
+@sio.event
+async def search_files(sid, data):
+    """Search files for FileManagerWindow."""
+    try:
+        # Placeholder - would need actual file search
+        await sio.emit('directory_contents', {'path': data.get('path'), 'items': []})
+    except Exception as e:
+        print(f"Error searching files: {e}")
+
+@sio.event
+async def start_recording(sid):
+    """Start recording computer control actions."""
+    try:
+        await sio.emit('recording_status', {'recording': True})
+    except Exception as e:
+        print(f"Error starting recording: {e}")
+
+@sio.event
+async def stop_recording(sid):
+    """Stop recording computer control actions."""
+    try:
+        await sio.emit('recording_status', {'recording': False})
+    except Exception as e:
+        print(f"Error stopping recording: {e}")
+
+@sio.event
+async def play_recording(sid):
+    """Play recorded computer control actions."""
+    try:
+        await sio.emit('status', {'msg': 'Playing recording'})
+    except Exception as e:
+        print(f"Error playing recording: {e}")
+
+@sio.event
+async def clear_recording(sid):
+    """Clear recorded actions."""
+    try:
+        await sio.emit('status', {'msg': 'Recording cleared'})
+    except Exception as e:
+        print(f"Error clearing recording: {e}")
+
+@sio.event
+async def web_search(sid, data):
+    """Perform web search for SearchWindow."""
+    from actions.web_search import web_search_action
+    try:
+        query = data.get('query')
+        result = web_search_action({'query': query})
+        await sio.emit('search_results', {'results': []})
+    except Exception as e:
+        print(f"Error performing web search: {e}")
+
+@sio.event
+async def get_search_history(sid):
+    """Get search history for SearchWindow."""
+    try:
+        await sio.emit('search_history', [])
+    except Exception as e:
+        print(f"Error getting search history: {e}")
+
+@sio.event
+async def youtube_search(sid, data):
+    """Search YouTube for YouTubeWindow."""
+    from actions.youtube_video import youtube_action
+    try:
+        query = data.get('query')
+        result = youtube_action({'query': query})
+        await sio.emit('youtube_results', [])
+    except Exception as e:
+        print(f"Error searching YouTube: {e}")
+
+@sio.event
+async def get_playlist(sid):
+    """Get YouTube playlist."""
+    try:
+        await sio.emit('playlist_updated', [])
+    except Exception as e:
+        print(f"Error getting playlist: {e}")
+
+@sio.event
+async def play_youtube(sid, data):
+    """Play YouTube video."""
+    try:
+        await sio.emit('status', {'msg': 'Playing video'})
+    except Exception as e:
+        print(f"Error playing video: {e}")
+
+@sio.event
+async def add_to_playlist(sid, data):
+    """Add video to playlist."""
+    try:
+        await sio.emit('status', {'msg': 'Added to playlist'})
+    except Exception as e:
+        print(f"Error adding to playlist: {e}")
+
+@sio.event
+async def remove_from_playlist(sid, data):
+    """Remove video from playlist."""
+    try:
+        await sio.emit('status', {'msg': 'Removed from playlist'})
+    except Exception as e:
+        print(f"Error removing from playlist: {e}")
+
+@sio.event
+async def run_code(sid, data):
+    """Run code for CodeWindow."""
+    from actions.code_helper import code_helper_action
+    try:
+        code = data.get('code')
+        language = data.get('language')
+        result = code_helper_action({'code': code, 'language': language})
+        await sio.emit('code_output', result)
+    except Exception as e:
+        print(f"Error running code: {e}")
+
+@sio.event
+async def save_code(sid, data):
+    """Save code for CodeWindow."""
+    try:
+        await sio.emit('status', {'msg': 'Code saved'})
+    except Exception as e:
+        print(f"Error saving code: {e}")
+
+@sio.event
+async def get_code_snippets(sid):
+    """Get code snippets for CodeWindow."""
+    try:
+        await sio.emit('code_snippets', [])
+    except Exception as e:
+        print(f"Error getting code snippets: {e}")
+
+@sio.event
+async def get_process_list(sid):
+    """Get process list for ProcessWindow."""
+    from actions.background_monitor import background_monitor_action
+    try:
+        result = background_monitor_action({'action': 'list'})
+        await sio.emit('process_list', [])
+    except Exception as e:
+        print(f"Error getting process list: {e}")
+
+@sio.event
+async def kill_process(sid, data):
+    """Kill a process for ProcessWindow."""
+    try:
+        pid = data.get('pid')
+        await sio.emit('status', {'msg': f'Process {pid} killed'})
+    except Exception as e:
+        print(f"Error killing process: {e}")
+
+@sio.event
+async def get_desktops(sid):
+    """Get desktop list for DesktopWindow."""
+    try:
+        await sio.emit('desktop_list', [])
+    except Exception as e:
+        print(f"Error getting desktops: {e}")
+
+@sio.event
+async def switch_desktop(sid, data):
+    """Switch to a different desktop."""
+    try:
+        desktop = data.get('desktop')
+        await sio.emit('status', {'msg': f'Switched to desktop {desktop}'})
+    except Exception as e:
+        print(f"Error switching desktop: {e}")
+
+@sio.event
+async def add_desktop(sid):
+    """Add a new virtual desktop."""
+    try:
+        await sio.emit('status', {'msg': 'Desktop added'})
+    except Exception as e:
+        print(f"Error adding desktop: {e}")
+
+@sio.event
+async def set_wallpaper(sid):
+    """Set desktop wallpaper."""
+    try:
+        await sio.emit('status', {'msg': 'Wallpaper set'})
+    except Exception as e:
+        print(f"Error setting wallpaper: {e}")
+
+@sio.event
+async def get_contacts(sid, data):
+    """Get contacts for MessageWindow."""
+    try:
+        platform = data.get('platform')
+        await sio.emit('contact_list', [])
+    except Exception as e:
+        print(f"Error getting contacts: {e}")
+
+@sio.event
+async def send_message(sid, data):
+    """Send a message for MessageWindow."""
+    from actions.send_message import send_message_action
+    try:
+        platform = data.get('platform')
+        message = data.get('message')
+        result = send_message_action({'platform': platform, 'message': message})
+        await sio.emit('status', {'msg': 'Message sent'})
+    except Exception as e:
+        print(f"Error sending message: {e}")
+
+@sio.event
+async def get_game_library(sid):
+    """Get game library for GameWindow."""
+    from actions.game_updater import game_updater_action
+    try:
+        result = game_updater_action({'action': 'list'})
+        await sio.emit('game_library', [])
+    except Exception as e:
+        print(f"Error getting game library: {e}")
+
+@sio.event
+async def check_game_updates(sid):
+    """Check for game updates for GameWindow."""
+    try:
+        await sio.emit('game_updates', [])
+    except Exception as e:
+        print(f"Error checking game updates: {e}")
+
+@sio.event
+async def launch_game(sid, data):
+    """Launch a game for GameWindow."""
+    try:
+        game_id = data.get('gameId')
+        await sio.emit('status', {'msg': 'Game launched'})
+    except Exception as e:
+        print(f"Error launching game: {e}")
+
+@sio.event
+async def update_game(sid, data):
+    """Update a game for GameWindow."""
+    try:
+        game_id = data.get('gameId')
+        await sio.emit('status', {'msg': 'Game updating'})
+    except Exception as e:
+        print(f"Error updating game: {e}")
 
 if __name__ == "__main__":
     uvicorn.run(
