@@ -1,6 +1,8 @@
 import sys
 import asyncio
 
+import base64
+import tempfile
 # Fix for asyncio subprocess support on Windows
 # MUST BE SET BEFORE OTHER IMPORTS
 if sys.platform == 'win32':
@@ -23,6 +25,7 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import friday
+from contacts_manager import ContactsManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 
@@ -86,7 +89,8 @@ DEFAULT_SETTINGS = {
         "find_flights": True,
         "game_updater": True,
         "process_file": True,
-        "manage_monitors": True
+        "manage_monitors": True,
+        "contacts_manager": True
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
@@ -94,6 +98,7 @@ DEFAULT_SETTINGS = {
 }
 
 SETTINGS = DEFAULT_SETTINGS.copy()
+contacts_manager = ContactsManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def load_settings():
     global SETTINGS
@@ -146,6 +151,22 @@ async def startup_event():
 @app.get("/status")
 async def status():
     return {"status": "running", "service": "F.R.I.D.A.Y Backend"}
+
+@sio.event
+async def get_contacts(sid):
+    await sio.emit('contacts_list', {'contacts': contacts_manager.list_contacts()}, room=sid)
+
+@sio.event
+async def save_contact(sid, data):
+    result = contacts_manager.add_or_update(
+        data.get('name', ''), data.get('recipient', ''), data.get('platform', 'whatsapp')
+    )
+    await sio.emit('contacts_status', {'msg': result}, room=sid)
+
+@sio.event
+async def delete_contact(sid, data):
+    result = contacts_manager.remove(data.get('name', ''), data.get('platform', ''))
+    await sio.emit('contacts_status', {'msg': result}, room=sid)
 
 @sio.event
 async def connect(sid, environ):
@@ -586,6 +607,125 @@ async def upload_memory(sid, data):
         print(f"Error uploading memory: {e}")
         await sio.emit('error', {'msg': f"Failed to upload memory: {str(e)}"})
 
+@sio.event
+async def process_uploaded_file(sid, data):
+    """Process a file selected in the frontend without exposing its local path."""
+    uploaded_path = None
+    keep_upload = False
+    try:
+        filename = Path(str(data.get('filename', 'uploaded_file'))).name
+        encoded_file = data.get('data', '')
+        if not encoded_file:
+            await sio.emit('file_processing_result', {'error': 'No file data provided.'}, room=sid)
+            return
+
+        file_bytes = base64.b64decode(encoded_file, validate=True)
+        if len(file_bytes) > 25 * 1024 * 1024:
+            await sio.emit('file_processing_result', {'error': 'File is too large. Maximum size is 25 MB.'}, room=sid)
+            return
+
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'}
+        keep_upload = Path(filename).suffix.lower() in image_extensions
+        if keep_upload:
+            upload_dir = Path(__file__).resolve().parent.parent / 'long_term_memory' / 'uploads'
+        else:
+            upload_dir = Path(tempfile.gettempdir()) / 'friday_uploads'
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        if keep_upload:
+            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            uploaded_path = upload_dir / f'{stamp}_{filename}'
+        else:
+            uploaded_path = upload_dir / filename
+        uploaded_path.write_bytes(file_bytes)
+
+        if keep_upload and audio_loop:
+            audio_loop.last_uploaded_image = str(uploaded_path)
+
+        params = {
+            'file_path': str(uploaded_path),
+            'action': data.get('action', ''),
+            'instruction': data.get('instruction', ''),
+        }
+        result = await asyncio.to_thread(friday.file_processor_module.file_processor, params)
+        await sio.emit('file_processing_result', {
+            'filename': filename,
+            'result': result,
+            'wallpaper_ready': keep_upload,
+        }, room=sid)
+        if keep_upload and audio_loop and audio_loop.session:
+            await audio_loop.session.send(
+                input=(
+                    f"System Notification: The user uploaded an image and it is permanently available at "
+                    f"{uploaded_path}. If the user asks to set the uploaded image as wallpaper, use "
+                    f"desktop_control with action='wallpaper' and this exact path, after confirmation."
+                ),
+                end_of_turn=False,
+            )
+    except Exception as e:
+        print(f"Error processing uploaded file: {e}")
+        await sio.emit('file_processing_result', {'error': f'File processing failed: {e}'}, room=sid)
+    finally:
+        if uploaded_path and not keep_upload:
+            try:
+                uploaded_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+@sio.event
+async def upload_file_for_awareness(sid, data):
+    """Store an uploaded file and give the active model enough context to ask what to do."""
+    try:
+        filename = Path(str(data.get('filename', 'uploaded_file'))).name
+        encoded_file = data.get('data', '')
+        if not encoded_file:
+            await sio.emit('file_processing_result', {'error': 'No file data provided.'}, room=sid)
+            return
+
+        file_bytes = base64.b64decode(encoded_file, validate=True)
+        if len(file_bytes) > 25 * 1024 * 1024:
+            await sio.emit('file_processing_result', {'error': 'File is too large. Maximum size is 25 MB.'}, room=sid)
+            return
+
+        upload_dir = Path(__file__).resolve().parent.parent / 'long_term_memory' / 'uploads'
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        saved_path = upload_dir / f'{stamp}_{filename}'
+        saved_path.write_bytes(file_bytes)
+
+        mime_type = data.get('mime_type', 'application/octet-stream')
+        preview = ''
+        if mime_type.startswith('text/') or Path(filename).suffix.lower() in {'.txt', '.md', '.json', '.csv', '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.css'}:
+            preview = file_bytes.decode('utf-8', errors='ignore')[:12000]
+
+        if audio_loop:
+            audio_loop.last_uploaded_file = str(saved_path)
+            if audio_loop.session:
+                if mime_type.startswith('image/'):
+                    await audio_loop.session.send(
+                        input={'mime_type': mime_type, 'data': encoded_file},
+                        end_of_turn=False,
+                    )
+                awareness = (
+                    f"System Notification: The user uploaded a file named '{filename}' ({mime_type}, "
+                    f"{len(file_bytes)} bytes). It is permanently available at {saved_path}. "
+                    "You are now aware of this file. Ask the user what they would like you to do "
+                    "with it, such as summarize, extract text, analyze, edit, or set it as wallpaper "
+                    "if it is an image. Do not perform an action until the user specifies one and "
+                    "the normal confirmation is completed."
+                )
+                if preview:
+                    awareness += f"\n\nFile content preview:\n{preview}"
+                await audio_loop.session.send(input=awareness, end_of_turn=True)
+
+        await sio.emit('file_processing_result', {
+            'filename': filename,
+            'result': f"Friday is aware of '{filename}' and is ready for your instructions.",
+            'file_awareness': True,
+            'saved_path': str(saved_path),
+        }, room=sid)
+    except Exception as e:
+        print(f"Error uploading file for awareness: {e}")
+        await sio.emit('file_processing_result', {'error': f'File upload failed: {e}'}, room=sid)
 @sio.event
 async def discover_kasa(sid):
     print(f"Received discover_kasa request")

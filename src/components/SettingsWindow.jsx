@@ -35,6 +35,7 @@ const TOOLS = [
     { id: 'game_updater', label: 'Game Updater' },
     { id: 'process_file', label: 'Process File' },
     { id: 'manage_monitors', label: 'Manage Monitors' },
+    { id: 'contacts_manager', label: 'Contacts Manager' },
 ];
 
 const SettingsWindow = ({
@@ -125,11 +126,11 @@ const SettingsWindow = ({
                     <span className="text-cyan-100/80">Face Authentication</span>
                     <button
                         onClick={toggleFaceAuth}
-                        className={`relative w-8 h-4 rounded-full transition-colors duration-200 ${faceAuthEnabled ? 'bg-cyan-500/80' : 'bg-gray-700'}`}
+                        aria-label={`Face authentication ${faceAuthEnabled ? 'on' : 'off'}`}
+                        className={`hud-toggle ${faceAuthEnabled ? 'hud-toggle-on' : ''}`}
                     >
-                        <div
-                            className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform duration-200 ${faceAuthEnabled ? 'translate-x-4' : 'translate-x-0'}`}
-                        />
+                        <span>{faceAuthEnabled ? 'ON' : 'OFF'}</span>
+                        <i />
                     </button>
                 </div>
             </div>
@@ -206,11 +207,11 @@ const SettingsWindow = ({
                     <span className="text-cyan-100/80">Flip Camera Horizontal</span>
                     <button
                         onClick={toggleCameraFlip}
-                        className={`relative w-8 h-4 rounded-full transition-colors duration-200 ${isCameraFlipped ? 'bg-cyan-500/80' : 'bg-gray-700'}`}
+                        aria-label={`Camera flip ${isCameraFlipped ? 'on' : 'off'}`}
+                        className={`hud-toggle ${isCameraFlipped ? 'hud-toggle-on' : ''}`}
                     >
-                        <div
-                            className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform duration-200 ${isCameraFlipped ? 'translate-x-4' : 'translate-x-0'}`}
-                        />
+                        <span>{isCameraFlipped ? 'ON' : 'OFF'}</span>
+                        <i />
                     </button>
                 </div>
             </div>
@@ -226,11 +227,11 @@ const SettingsWindow = ({
                                 <span className="text-cyan-100/80">{tool.label}</span>
                                 <button
                                     onClick={() => togglePermission(tool.id)}
-                                    className={`relative w-8 h-4 rounded-full transition-colors duration-200 ${isRequired ? 'bg-cyan-500/80' : 'bg-gray-700'}`}
+                                    aria-label={`${tool.label} confirmation ${isRequired ? 'required' : 'automatic'}`}
+                                    className={`hud-toggle ${isRequired ? 'hud-toggle-on' : ''}`}
                                 >
-                                    <div
-                                        className={`absolute top-0.5 left-0.5 w-3 h-3 bg-white rounded-full transition-transform duration-200 ${isRequired ? 'translate-x-4' : 'translate-x-0'}`}
-                                    />
+                                    <span>{isRequired ? 'REQ' : 'AUTO'}</span>
+                                    <i />
                                 </button>
                             </div>
                         );

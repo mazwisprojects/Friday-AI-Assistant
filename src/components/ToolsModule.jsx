@@ -32,8 +32,8 @@ const ToolsModule = ({
         <div
             id="tools"
             onMouseDown={onMouseDown}
-            className={`absolute px-6 py-3 transition-all duration-200 
-                        backdrop-blur-xl bg-black/40 border border-white/10 shadow-2xl rounded-full`}
+            className={`hud-panel absolute px-6 py-3 transition-all duration-200 
+                        backdrop-blur-xl bg-black/75 border border-cyan-500/40 shadow-2xl rounded-none`}
             style={{
                 left: position.x,
                 top: position.y,

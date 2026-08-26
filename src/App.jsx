@@ -28,6 +28,7 @@ import SearchWindow from './components/SearchWindow';
 import SystemMonitorWindow from './components/SystemMonitorWindow';
 import WeatherWindow from './components/WeatherWindow';
 import YouTubeWindow from './components/YouTubeWindow';
+import ContactsWindow from './components/ContactsWindow';
 
 
 
@@ -87,7 +88,8 @@ function App() {
         search: false,
         system: false,
         weather: false,
-        youtube: false
+        youtube: false,
+        contacts: false
     });
     const [showActionMenu, setShowActionMenu] = useState(false);
 
@@ -138,6 +140,7 @@ function App() {
         system: { x: 520, y: 530 },
         weather: { x: 540, y: 550 },
         youtube: { x: 560, y: 570 },
+        contacts: { x: 580, y: 590 },
         tools: { x: window.innerWidth / 2, y: window.innerHeight - 100 } // Fixed bottom OFFSET
     });
 
@@ -162,7 +165,8 @@ function App() {
         search: { w: 480, h: 400 },
         system: { w: 380, h: 360 },
         weather: { w: 400, h: 300 },
-        youtube: { w: 500, h: 400 }
+        youtube: { w: 500, h: 400 },
+        contacts: { w: 420, h: 420 }
     });
     const [activeDragElement, setActiveDragElement] = useState(null);
 
@@ -170,7 +174,7 @@ function App() {
     const [zIndexOrder, setZIndexOrder] = useState([
         'visualizer', 'chat', 'tools', 'video', 'cad', 'browser', 'kasa', 'printer',
         'code', 'control', 'desktop', 'files', 'flights', 'games', 'messages',
-        'processes', 'reminders', 'search', 'system', 'weather', 'youtube'
+        'processes', 'reminders', 'search', 'system', 'weather', 'youtube', 'contacts'
     ]);
 
     // Hand Control State
@@ -1435,7 +1439,8 @@ function App() {
         { id: 'search', component: SearchWindow },
         { id: 'system', component: SystemMonitorWindow },
         { id: 'weather', component: WeatherWindow },
-        { id: 'youtube', component: YouTubeWindow }
+        { id: 'youtube', component: YouTubeWindow },
+        { id: 'contacts', component: ContactsWindow }
     ];
     const orderedActionWindowDefinitions = [...actionWindowDefinitions].sort(
         (a, b) => zIndexOrder.indexOf(a.id) - zIndexOrder.indexOf(b.id)
@@ -1444,7 +1449,7 @@ function App() {
 
 
     return (
-        <div className="h-screen w-screen bg-black text-cyan-100 font-mono overflow-hidden flex flex-col relative selection:bg-cyan-900 selection:text-white">
+        <div className="hud-shell h-screen w-screen bg-black text-cyan-100 font-mono overflow-hidden flex flex-col relative selection:bg-cyan-900 selection:text-white">
 
             {/* --- PREMIUM UI LAYER --- */}
 
@@ -1550,6 +1555,45 @@ function App() {
 
             {/* Main Content */}
             <div className="flex-1 relative z-10 flex flex-col items-center justify-center">
+                <div className="hud-scan-sweep" aria-hidden="true" />
+                <div className="hud-edge-rail hud-edge-rail-left" aria-hidden="true" />
+                <div className="hud-edge-rail hud-edge-rail-right" aria-hidden="true" />
+
+                <div className="hud-telemetry hud-telemetry-left" aria-label="System telemetry">
+                    <span className="hud-kicker">SYS // TELEMETRY</span>
+                    <span><b className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'ONLINE' : 'OFFLINE'}</b> / {status.toUpperCase()}</span>
+                    <span>MIC // {isMuted ? 'MUTED' : 'LIVE'}</span>
+                    <span>CAM // {isVideoOn ? 'ACTIVE' : 'STANDBY'}</span>
+                </div>
+
+                <div className="hud-telemetry hud-telemetry-right" aria-label="Session telemetry">
+                    <span className="hud-kicker">SESSION // {currentProject?.toUpperCase()}</span>
+                    <span>MODE // {isModularMode ? 'MODULAR' : 'CORE'}</span>
+                    <span>DEVICES // {kasaDevices.length.toString().padStart(2, '0')}</span>
+                    <span>PRINTERS // {printerCount.toString().padStart(2, '0')}</span>
+                </div>
+
+                <div className="hud-crosshair" aria-hidden="true">
+                    <span className="hud-crosshair-line hud-crosshair-top" />
+                    <span className="hud-crosshair-line hud-crosshair-right" />
+                    <span className="hud-crosshair-line hud-crosshair-bottom" />
+                    <span className="hud-crosshair-line hud-crosshair-left" />
+                    <span className="hud-crosshair-core" />
+                </div>
+
+                <div className="hud-registration hud-registration-top-left" aria-hidden="true" />
+                <div className="hud-registration hud-registration-top-right" aria-hidden="true" />
+                <div className="hud-registration hud-registration-bottom-left" aria-hidden="true" />
+                <div className="hud-registration hud-registration-bottom-right" aria-hidden="true" />
+
+                <div className="hud-diagnostics" aria-label="Friday diagnostics">
+                    <span>FRIDAY // CORE</span>
+                    <span className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'LINK STABLE' : 'LINK LOST'}</span>
+                    <span>PROJECT // {currentProject?.toUpperCase()}</span>
+                    <span>MEM // ACTIVE</span>
+                    <span>{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+                </div>
+
                 {/* Central Visualizer (AI Audio) */}
                 <div
                     id="visualizer"

@@ -1,437 +1,181 @@
-# F.R.I.D.A.Y V2 - AI Assistant
+# F.R.I.D.A.Y
 
-![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-blue?logo=python)
-![React](https://img.shields.io/badge/React-18.2-61DAFB?logo=react)
-![Electron](https://img.shields.io/badge/Electron-28-47848F?logo=electron)
-![Gemini](https://img.shields.io/badge/Google%20Gemini-Native%20Audio-4285F4?logo=google)
-![License](https://img.shields.io/badge/License-MIT-green)
+F.R.I.D.A.Y is a Windows-focused desktop AI assistant built with Electron, React, Python, FastAPI, Socket.IO, and Google's Gemini Live API. It supports real-time voice conversation, persistent memory, computer control, web automation, smart-home devices, CAD generation, 3D printing, vision, and file workflows.
 
-> **F.R.I.D.A.Y** = your personal AI assistant
+## Features
 
-FRIDAY V2 is a sophisticated AI assistant designed for multimodal interaction. It combines Google's Gemini 2.5 Native Audio with computer vision, gesture control, and 3D CAD generation in a Electron desktop application.
+- **Gemini Live voice:** streaming input/output audio, transcription, interruption handling, reconnect context, and text input.
+- **Persistent memory:** project-scoped chat history remains in each project; global conversations are written to daily files under `long_term_memory/transcripts/`, indexed in `memory_index.jsonl`, and important facts are deduplicated in `facts.jsonl`.
+- **Important facts:** Friday extracts durable identity, preference, relationship, project, routine, goal, decision, and constraint facts. It rejects passwords, API keys, tokens, credentials, and guesses.
+- **Vision:** MediaPipe face authentication, hand tracking, camera frames, and screen capture through `mss`.
+- **CAD and printing:** Gemini-assisted `build123d` CAD generation, iteration, STL preview, slicer integration, printer discovery, status, and print submission.
+- **Smart home:** TP-Link Kasa discovery and light control.
+- **Desktop actions:** mouse/keyboard/clipboard control, system settings, file management, application launching, system metrics, wallpaper control, reminders, web search, messaging, YouTube, and flight search.
+- **Action windows:** React windows for code, computer control, desktop, files, flights, games, messages, processes, reminders, search, system monitoring, weather, and YouTube. They are draggable, bounded to the app viewport, scrollable where needed, and layered above the core interface.
+- **File processing:** upload a file from the File Manager and process images, PDFs, documents, spreadsheets, JSON, code, audio, video, archives, and presentations. Images are preserved under `long_term_memory/uploads/` so you can ask Friday to set the uploaded picture as wallpaper.
+- **Proactive monitoring:** system resource alerts and optional daily topic monitoring with cooldowns. Crypto and financial topics are blocked from background topic monitoring.
 
----
-
-## 🌟 Capabilities at a Glance
-
-| Feature | Description | Technology |
-|---------|-------------|------------|
-| **🗣️ Low-Latency Voice** | Real-time conversation with interrupt handling | Gemini 2.5 Native Audio |
-| **🧊 Parametric CAD** | Editable 3D model generation from voice prompts | `build123d` → STL |
-| **🖨️ 3D Printing** | Slicing and wireless print job submission | OrcaSlicer + Moonraker/OctoPrint |
-| **🖐️ Minority Report UI** | Gesture-controlled window manipulation | MediaPipe Hand Tracking |
-| **👁️ Face Authentication** | Secure local biometric login | MediaPipe Face Landmarker |
-| **🌐 Web Agent** | Autonomous browser automation | Playwright + Chromium |
-| **🏠 Smart Home** | Voice control for TP-Link Kasa devices | `python-kasa` |
-| **📁 Project Memory** | Persistent context across sessions | File-based JSON storage |
-
-### 🖐️ Gesture Control Details
-
-FRIDAY's "Minority Report" interface uses your webcam to detect hand gestures:
-
-| Gesture | Action |
-|---------|--------|
-| 🤏 **Pinch** | Confirm action / click |
-| ✋ **Open Palm** | Release the window |
-| ✊ **Close Fist** | "Select" and grab a UI window to drag it |
-
-> **Tip**: Enable the video feed window to see the hand tracking overlay.
-
----
-
-## 🏗️ Architecture Overview
+## Architecture
 
 ```mermaid
 graph TB
-    subgraph Frontend ["Frontend (Electron + React)"]
-        UI[React UI]
-        THREE[Three.js 3D Viewer]
-        GESTURE[MediaPipe Gestures]
-        SOCKET_C[Socket.IO Client]
-    end
-    
-    subgraph Backend ["Backend (Python 3.11 + FastAPI)"]
-        SERVER[server.py<br/>Socket.IO Server]
-        FRIDAY[friday.py<br/>Gemini Live API]
-        WEB[web_agent.py<br/>Playwright Browser]
-        CAD[cad_agent.py<br/>CAD + build123d]
-        PRINTER[printer_agent.py<br/>3D Printing + OrcaSlicer]
-        KASA[kasa_agent.py<br/>Smart Home]
-        AUTH[authenticator.py<br/>MediaPipe Face Auth]
-        PM[project_manager.py<br/>Project Context]
-    end
-    
-    UI --> SOCKET_C
-    SOCKET_C <--> SERVER
-    SERVER --> FRIDAY
-    FRIDAY --> WEB
-    FRIDAY --> CAD
-    FRIDAY --> KASA
-    SERVER --> AUTH
-    SERVER --> PM
-    SERVER --> PRINTER
-    CAD -->|STL file| THREE
-    CAD -->|STL file| PRINTER
+    UI[Electron + React frontend] <--> SIO[Socket.IO]
+    SIO <--> SERVER[FastAPI backend/server.py]
+    SERVER --> CORE[backend/friday.py Gemini Live session]
+    CORE --> MEMORY[Global memory_manager.py]
+    CORE --> PROJECTS[ProjectManager project memory]
+    CORE --> ACTIONS[backend/actions tools]
+    CORE --> CAD[CAD and printer agents]
+    CORE --> KASA[Kasa agent]
+    SERVER --> AUTH[FaceAuthenticator]
+    ACTIONS --> OS[Desktop, browser, files, system, web services]
 ```
 
----
+The frontend connects to `http://localhost:8000` through Socket.IO. Electron starts the Python backend and loads the Vite renderer. The Electron launcher prefers the `FRIDAY_PYTHON` environment variable, the active Conda environment, or `%USERPROFILE%\.conda\envs\friday\python.exe`, then falls back to `python`.
 
-## ⚡ TL;DR Quick Start (Experienced Developers)
+## Requirements
 
-<details>
-<summary>Click to expand quick setup commands</summary>
+- Windows 10/11 is the primary supported platform.
+- Python 3.11 through Miniconda or Anaconda.
+- Node.js 18 or later and npm.
+- Git.
+- A Gemini API key from [Google AI Studio](https://aistudio.google.com/app/apikey).
+- A webcam for face authentication, camera mode, or hand tracking.
+- Optional: OrcaSlicer/PrusaSlicer, Kasa devices, OctoPrint/Moonraker printer, and installed desktop applications.
 
-```bash
-# 1. Clone and enter
-git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git && cd Friday-AI-Assistant
+## Installation
 
-# 2. Create Python environment (Python 3.11)
-conda create -n friday python=3.11 -y && conda activate friday
-brew install portaudio  # macOS only (for PyAudio)
-pip install -r requirements.txt
-playwright install chromium
+```powershell
+git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git
+cd Friday-AI-Assistant
 
-# 3. Setup frontend
-npm install
-
-# 4. Create .env file
-echo "GEMINI_API_KEY=your_key_here" > .env
-
-# 5. Run!
-conda activate friday && npm run dev
-```
-
-</details>
-
----
-
-## 🛠️ Installation Requirements
-
-### 🆕 Absolute Beginner Setup (Start Here)
-If you have never coded before, follow these steps first!
-
-**Step 1: Install Visual Studio Code (The Editor)**
-- Download and install [VS Code](https://code.visualstudio.com/). This is where you will write code and run commands.
-
-**Step 2: Install Anaconda (The Manager)**
-- Download [Miniconda](https://docs.conda.io/en/latest/miniconda.html) (a lightweight version of Anaconda).
-- This tool allows us to create isolated "playgrounds" (environments) for our code so different projects don't break each other.
-- **Windows Users**: During install, check "Add Anaconda to my PATH environment variable" (even if it says not recommended, it makes things easier for beginners).
-
-**Step 3: Install Git (The Downloader)**
-- **Windows**: Download [Git for Windows](https://git-scm.com/download/win).
-- **Mac**: Open the "Terminal" app (Cmd+Space, type Terminal) and type `git`. If not installed, it will ask to install developer tools—say yes.
-
-**Step 4: Get the Code**
-1. Open your terminal (or Command Prompt on Windows).
-2. Type this command and hit Enter:
-   ```bash
-   git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git
-   ```
-3. This creates a folder named `F.R.I.D.A.Y`.
-
-**Step 5: Open in VS Code**
-1. Open VS Code.
-2. Go to **File > Open Folder**.
-3. Select the `F.R.I.D.A.Y` folder you just downloaded.
-4. Open the internal terminal: Press `Ctrl + ~` (tilde) or go to **Terminal > New Terminal**.
-
----
-
-### ⚠️ Technical Prerequisites
-Once you have the basics above, continue here.
-
-### 1. System Dependencies
-
-**MacOS:**
-```bash
-# Audio Input/Output support (PyAudio)
-brew install portaudio
-```
-
-**Windows:**
-- No additional system dependencies required!
-
-### 2. Python Environment
-Create a single Python 3.11 environment:
-
-```bash
-conda create -n friday python=3.11
+conda create -n friday python=3.11 -y
 conda activate friday
-
-# Install all dependencies
 pip install -r requirements.txt
-
-# Install Playwright browsers
-playwright install chromium
-```
-
-### 3. Frontend Setup
-Requires **Node.js 18+** and **npm**. Download from [nodejs.org](https://nodejs.org/) if not installed.
-
-```bash
-# Verify Node is installed
-node --version  # Should show v18.x or higher
-
-# Install frontend dependencies
 npm install
 ```
 
-### 4. 🔐 Face Authentication Setup
-To use the secure voice features, FRIDAY needs to know what you look like.
+Create `.env` in the repository root. Never commit it:
 
-1. Take a clear photo of your face (or use an existing one).
-2. Rename the file to `reference.jpg`.
-3. Drag and drop this file into the `friday/backend` folder.
-4. (Optional) You can toggle this feature on/off in `settings.json` by changing `"face_auth_enabled": true/false`.
-
----
-
-## ⚙️ Configuration (`settings.json`)
-
-The system creates a `settings.json` file on first run. You can modify this to change behavior:
-
-| Key | Type | Description |
-| :--- | :--- | :--- |
-| `face_auth_enabled` | `bool` | If `true`, blocks all AI interaction until your face is recognized via the camera. |
-| `tool_permissions` | `obj` | Controls manual approval for specific tools. |
-| `tool_permissions.generate_cad` | `bool` | If `true`, requires you to click "Confirm" on the UI before generating CAD. |
-| `tool_permissions.run_web_agent` | `bool` | If `true`, requires confirmation before opening the browser agent. |
-| `tool_permissions.write_file` | `bool` | **Critical**: Requires confirmation before the AI writes code/files to disk. |
-
----
-
-### 5. 🖨️ 3D Printer Setup
-FRIDAY V2 can slice STL files and send them directly to your 3D printer.
-
-**Supported Hardware:**
-- **Klipper/Moonraker** (Creality K1, Voron, etc.)
-- **OctoPrint** instances
-- **PrusaLink** (Experimental)
-
-**Step 1: Install Slicer**
-FRIDAY uses **OrcaSlicer** (recommended) or PrusaSlicer to generate G-code.
-1. Download and install [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer).
-2. Run it once to ensure profiles are created.
-3. FRIDAY automatically detects the installation path.
-
-**Step 2: Connect Printer**
-1. Ensure your printer and computer are on the **same Wi-Fi network**.
-2. Open the **Printer Window** in FRIDAY (Cube icon).
-3. FRIDAY automatically scans for printers using mDNS.
-4. **Manual Connection**: If your printer isn't found, use the "Add Printer" button and enter the IP address (e.g., `192.168.1.50`).
-
----
-
-### 6. 🔑 Gemini API Key Setup
-FRIDAY uses Google's Gemini API for voice and intelligence. You need a free API key.
-
-1. Go to [Google AI Studio](https://aistudio.google.com/app/apikey).
-2. Sign in with your Google account.
-3. Click **"Create API Key"** and copy the generated key.
-4. Create a file named `.env` in the `friday` folder (same level as `README.md`).
-5. Add this line to the file:
-   ```
-   GEMINI_API_KEY=your_api_key_here
-   ```
-6. Replace `your_api_key_here` with the key you copied.
-
-> **Note**: Keep this key private! Never commit your `.env` file to Git.
-
----
-
-## 🚀 Running FRIDAY V2
-
-You have two options to run the app. Ensure your `friday` environment is active!
-
-### Option 1: The "Easy" Way (Single Terminal)
-The app is smart enough to start the backend for you.
-1. Open your terminal in the `friday` folder.
-2. Activate your environment: `conda activate friday`
-3. Run:
-   ```bash
-   npm run dev
-   ```
-4. The backend will start automatically in the background.
-
-### Option 2: The "Developer" Way (Two Terminals)
-Use this if you want to see the Python logs (recommended for debugging).
-
-**Terminal 1 (Backend):**
-```bash
-conda activate friday
-python backend/server.py
+```text
+GEMINI_API_KEY=your_api_key_here
 ```
 
-**Terminal 2 (Frontend):**
-```bash
-# Environment doesn't matter here, but keep it simple
+Install the Playwright browser binaries used by browser automation and flight search:
+
+```powershell
+playwright install chromium firefox
+```
+
+WebKit is intentionally not installed. Safari is not supported on Windows and Playwright's WebKit host validation may require native libraries that are not present by default.
+
+For face authentication, place a clear reference image at `backend/reference.jpg`, then enable `face_auth_enabled` in the generated settings file or through the Settings window.
+
+## Run
+
+Activate the correct environment before running the application:
+
+```powershell
+conda activate friday
 npm run dev
 ```
 
----
+`npm run dev` starts Vite and Electron together. The Electron process starts `backend/server.py` and waits for the backend health endpoint at `http://127.0.0.1:8000/status`.
 
-## ✅ First Flight Checklist (Things to Test)
+Useful scripts:
 
-1. **Voice Check**: Say "Hello FRIDAY". She should respond.
-2. **Vision Check**: Look at the camera. If Face Auth is on, the lock screen should unlock.
-3. **CAD Check**: Open the CAD window and say "Create a cube". Watch the logs.
-4. **Web Check**: Open the Browser window and say "Go to Google".
-5. **Smart Home**: If you have Kasa devices, say "Turn on the lights".
-
----
-
-## ▶️ Commands & Tools Reference
-
-### 🗣️ Voice Commands
-- "Switch project to [Name]"
-- "Create a new project called [Name]"
-- "Turn on the [Room] light"
-- "Make the light [Color]"
-- "Pause audio" / "Stop audio"
-
-### 🧊 3D CAD
-- **Prompt**: "Create a 3D model of a hex bolt."
-- **Iterate**: "Make the head thinner." (Requires previous context)
-- **Files**: Saves to `projects/[ProjectName]/output.stl`.
-
-### 🌐 Web Agent
-- **Prompt**: "Go to Amazon and find a USB-C cable under $10."
-- **Note**: The agent will auto-scroll, click, and type. Do not interfere with the browser window while it runs.
-
-### 🖨️ Printing & Slicing
-- **Auto-Discovery**: FRIDAY automatically finds printers on your network.
-- **Slicing**: Click "Slice & Print" on any generated 3D model.
-- **Profiles**: FRIDAY intelligently selects the correct OrcaSlicer profile based on your printer's name (e.g., "Creality K1").
-
----
-
-## ❓ Troubleshooting FAQ
-
-### Camera not working / Permission denied (Mac)
-**Symptoms**: Error about camera access, or video feed shows black.
-
-**Solution**:
-1. Go to **System Preferences > Privacy & Security > Camera**.
-2. Ensure your terminal app (e.g., Terminal, iTerm, VS Code) has camera access enabled.
-3. Restart the app after granting permission.
-
----
-
-### `GEMINI_API_KEY` not found / Authentication Error
-**Symptoms**: Backend crashes on startup with "API key not found".
-
-**Solution**:
-1. Make sure your `.env` file is in the root `friday` folder (not inside `backend/`).
-2. Verify the format is exactly: `GEMINI_API_KEY=your_key` (no quotes, no spaces).
-3. Restart the backend after editing the file.
-
----
-
-### WebSocket connection errors (1011)
-**Symptoms**: `websockets.exceptions.ConnectionClosedError: 1011 (internal error)`.
-
-**Solution**:
-This is a server-side issue from the Gemini API. Simply reconnect by clicking the connect button or saying "Hello FRIDAY" again. If it persists, check your internet connection or try again later.
-
----
-
-## 📸 What It Looks Like
-
-*Coming soon! Screenshots and demo videos will be added here.*
-
----
-
-## 📂 Project Structure
-
+```powershell
+npm run build                 # Build the React renderer
+python backend/server.py      # Run only the backend
+npm run start                 # Start Electron against the built renderer
 ```
+
+If Node is not available after Conda activation, use the full npm path on Windows:
+
+```powershell
+& "C:\Program Files\nodejs\npm.cmd" run dev
+```
+
+## Tools and permissions
+
+Friday's Gemini tool set includes CAD, web agent, project management, memory search, Kasa, printer control, computer control, computer settings, file management, app launching, system status, weather, reminders, desktop control, web search, messaging, YouTube, browser control, code helper, project building, flight search, game updates, file processing, and topic monitoring.
+
+Tool permissions are stored in `settings.json` and can be changed in the Settings window. `true` means Friday asks for confirmation before executing the tool; `false` allows it automatically. Destructive or externally visible actions should remain protected. Code generation/build tools can write files, install dependencies, and execute code, so they should remain confirmation-protected.
+
+## Memory
+
+Project memory is kept by `ProjectManager` in `projects/<project>/chat_history.jsonl`. The temporary project is recreated on startup, so it is not permanent.
+
+Global memory is independent of projects:
+
+```text
+long_term_memory/
+├── transcripts/              # One human-readable UTF-8 transcript per day
+├── memory_index.jsonl        # All logged messages across projects and restarts
+├── facts.jsonl               # Deduplicated durable facts
+└── uploads/                  # Preserved uploaded images, such as wallpapers
+```
+
+Recent global memory and durable facts load when a Gemini session starts. The `search_memory` tool searches the complete stored lifetime by keywords. Storage is append-oriented, but the repository does not provide cloud backup or cryptographic immutability; protect and back up `long_term_memory/` if it matters.
+
+## Upload and wallpaper workflow
+
+1. Open the File Manager action window.
+2. Select a picture.
+3. Choose an image action such as `Describe`, `OCR`, or `Analyze`, then select **Process file**.
+4. The image is retained in `long_term_memory/uploads/` and the result appears in the window.
+5. Say or type: `Set the uploaded image as my wallpaper.`
+6. Confirm Friday's `desktop_control` request.
+
+Non-image uploads are saved temporarily for processing and removed afterward. The upload endpoint limits files to 25 MB and sanitizes the filename.
+
+## Testing
+
+```powershell
+conda activate friday
+pytest
+```
+
+The Python tests cover authentication, CAD, Kasa, printer, web-agent, and tool behavior. Frontend validation is currently a production build:
+
+```powershell
+& "C:\Program Files\nodejs\node.exe" "node_modules\vite\bin\vite.js" build
+```
+
+## Project structure
+
+```text
 F.R.I.D.A.Y/
-├── backend/                    # Python server & AI logic
-│   ├── friday.py                  # Gemini Live API integration
-│   ├── server.py               # FastAPI + Socket.IO server
-│   ├── cad_agent.py            # CAD generation orchestrator
-│   ├── printer_agent.py        # 3D printer discovery & slicing
-│   ├── web_agent.py            # Playwright browser automation
-│   ├── kasa_agent.py           # TP-Link smart home control
-│   ├── authenticator.py        # MediaPipe face auth logic
-│   ├── project_manager.py      # Project context management
-│   ├── tools.py                # Tool definitions for Gemini
-│   └── reference.jpg           # Your face photo (add this!)
-├── src/                        # React frontend
-│   ├── App.jsx                 # Main application component
-│   ├── components/             # UI components (11 files)
-│   └── index.css               # Global styles
-├── electron/                   # Electron main process
-│   └── main.js                 # Window & IPC setup
-├── projects/                   # User project data (auto-created)
-├── .env                        # API keys (create this!)
+├── backend/
+│   ├── friday.py              # Gemini Live session and tool dispatch
+│   ├── server.py              # FastAPI and Socket.IO server
+│   ├── tools.py               # Gemini function declarations
+│   ├── memory_manager.py      # Global transcripts, facts, and search
+│   ├── project_manager.py     # Project-scoped memory and artifacts
+│   ├── actions/               # Desktop, browser, web, file, media, and system tools
+│   ├── cad_agent.py            # CAD generation and iteration
+│   ├── printer_agent.py        # Printer discovery, slicing, and printing
+│   ├── web_agent.py            # Browser task agent
+│   ├── kasa_agent.py           # TP-Link Kasa integration
+│   └── authenticator.py        # Face authentication
+├── electron/main.js            # Electron window and Python launcher
+├── src/App.jsx                 # Main React application
+├── src/components/             # Core UI and action windows
+├── public/                     # MediaPipe model assets
 ├── requirements.txt            # Python dependencies
-├── package.json                # Node.js dependencies
-└── README.md                   # You are here!
+├── package.json                # Node/Electron dependencies and scripts
+└── README.md                   # This file
 ```
 
----
+## Known limitations
 
-## ⚠️ Known Limitations
+- Gemini access requires internet connectivity and available API quota.
+- The primary live session uses one camera/audio flow; `screen_processor.py` remains separate and is not wired into the main session to avoid competing Gemini Live connections.
+- Linux and macOS support exists in several action modules but is not the primary tested environment.
+- Some optional actions require additional installed software or services, such as `pycaw`, `win10toast`, `send2trash`, a browser profile, Steam, or a local printer.
+- System alerts use cooldowns, but proactive behavior should be tuned if it becomes too frequent.
+- Large frontend bundles and outdated Browserslist data may produce non-blocking Vite warnings.
 
-| Limitation | Details |
-|------------|---------|
-| **macOS & Windows** | Tested on macOS 14+ and Windows 10/11. Linux is untested. |
-| **Camera Required** | Face auth and gesture control need a working webcam. |
-| **Gemini API Quota** | Free tier has rate limits; heavy CAD iteration may hit limits. |
-| **Network Dependency** | Requires internet for Gemini API (no offline mode). |
-| **Single User** | Face auth recognizes one person (the `reference.jpg`). |
+## License
 
----
-
-## 🤝 Contributing
-
-Contributions are welcome! Here's how:
-
-1. **Fork** the repository.
-2. **Create a branch**: `git checkout -b feature/amazing-feature`
-3. **Commit** your changes: `git commit -m 'Add amazing feature'`
-4. **Push** to the branch: `git push origin feature/amazing-feature`
-5. **Open a Pull Request** with a clear description.
-
-### Development Tips
-
-- Run the backend separately (`python backend/server.py`) to see Python logs.
-- Use `npm run dev` without Electron during frontend development (faster reload).
-- The `projects/` folder contains user data—don't commit it to Git.
-
----
-
-## 🔒 Security Considerations
-
-| Aspect | Implementation |
-|--------|----------------|
-| **API Keys** | Stored in `.env`, never committed to Git. |
-| **Face Data** | Processed locally, never uploaded. |
-| **Tool Confirmations** | Write/CAD/Web actions can require user approval. |
-| **No Cloud Storage** | All project data stays on your machine. |
-
-> [!WARNING]
-> Never share your `.env` file or `reference.jpg`. These contain sensitive credentials and biometric data.
-
----
-
-## 🙏 Acknowledgments
-
-- **[Google Gemini](https://deepmind.google/technologies/gemini/)** — Native Audio API for real-time voice
-- **[build123d](https://github.com/gumyr/build123d)** — Modern parametric CAD library
-- **[MediaPipe](https://developers.google.com/mediapipe)** — Hand tracking, gesture recognition, and face authentication
-- **[Playwright](https://playwright.dev/)** — Reliable browser automation
-
----
-
-## 📄 License
-
-This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
-
----
-
-<p align="center">
-  <strong>Built with 🤖 by Sinegugu Mazwi</strong><br>
-  <em>Bridging AI, CAD, and Vision in a Single Interface</em>
-</p>
+This project is licensed under the MIT License. Copyright 2025 Sinegugu Mazwi.

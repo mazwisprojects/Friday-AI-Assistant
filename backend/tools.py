@@ -325,6 +325,21 @@ youtube_video_tool = {
     }
 }
 
+contacts_manager_tool = {
+    "name": "contacts_manager",
+    "description": "Manages Friday's persistent local contacts. Add or update a contact, remove a contact or channel, list contacts, or find a contact. Use saved contact names with send_message.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: add, update, remove, list, find."},
+            "name": {"type": "STRING", "description": "Contact's display name."},
+            "recipient": {"type": "STRING", "description": "Username, phone number, or other recipient identifier for the selected platform."},
+            "platform": {"type": "STRING", "description": "Messaging platform, e.g. whatsapp, telegram, discord, signal, instagram, messenger."}
+        },
+        "required": ["action"]
+    }
+}
+
 browser_control_tool = {
     "name": "browser_control",
     "description": "Controls a real web browser (Chrome, Firefox, Edge, Brave, using the user's own profile): navigate, search, open tabs, click, type, scroll, fill forms, read page text, screenshot, and manage multiple browser sessions.",
@@ -539,6 +554,7 @@ tools_list = [{"function_declarations": [
     web_search_tool,
     send_message_tool,
     youtube_video_tool,
+    contacts_manager_tool,
     browser_control_tool,
     code_helper_tool,
     build_project_tool,

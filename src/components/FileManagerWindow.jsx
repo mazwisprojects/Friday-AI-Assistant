@@ -5,6 +5,10 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
   const [currentPath, setCurrentPath] = useState('');
   const [items, setItems] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedFile, setSelectedFile] = useState(null);
+  const [processingAction, setProcessingAction] = useState('summarize');
+  const [processingResult, setProcessingResult] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
   useEffect(() => {
     const socket = window.socket;
@@ -13,11 +17,24 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
       setItems(data.items);
       setCurrentPath(data.path);
     });
+
+    socket.on('file_processing_result', (data) => {
+      setIsProcessing(false);
+      const result = data.error || data.result || 'Processing completed.';
+      setProcessingResult(data.file_awareness
+        ? `${result}\n\nYou can now tell Friday what to do with this file.`
+        : data.wallpaper_ready
+          ? `${result}\n\nWallpaper ready: ask Friday to set this image as your wallpaper.`
+          : result);
+    });
     
     // Load home directory
     socket.emit('read_directory', { path: '~' });
     
-    return () => socket.off('directory_contents');
+    return () => {
+      socket.off('directory_contents');
+      socket.off('file_processing_result');
+    };
   }, []);
 
   const handleNavigate = (path) => {
@@ -31,8 +48,61 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
 
   const handleSearch = () => {
     if (searchQuery.trim()) {
-      socket.emit('search_files', { query: searchQuery, path: currentPath });
+      window.socket.emit('search_files', { query: searchQuery, path: currentPath });
     }
+  };
+
+  const handleFileSelect = (event) => {
+    const file = event.target.files?.[0] || null;
+    setSelectedFile(file);
+    setProcessingResult('');
+
+    if (!file) return;
+    if (file.size > 25 * 1024 * 1024) {
+      setProcessingResult('File is too large. Maximum size is 25 MB.');
+      return;
+    }
+
+    setIsProcessing(true);
+    setProcessingResult('Uploading file so Friday can inspect it...');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const encoded = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      window.socket.emit('upload_file_for_awareness', {
+        filename: file.name,
+        mime_type: file.type || 'application/octet-stream',
+        data: encoded
+      });
+    };
+    reader.onerror = () => {
+      setIsProcessing(false);
+      setProcessingResult('Could not read the selected file.');
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleProcessFile = () => {
+    if (!selectedFile) return;
+
+    setIsProcessing(true);
+    setProcessingResult('Uploading and processing...');
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = String(reader.result || '');
+      const encoded = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      window.socket.emit('process_uploaded_file', {
+        filename: selectedFile.name,
+        data: encoded,
+        action: processingAction,
+        instruction: ''
+      });
+    };
+    reader.onerror = () => {
+      setIsProcessing(false);
+      setProcessingResult('Could not read the selected file.');
+    };
+    reader.readAsDataURL(selectedFile);
   };
 
   const handleItemClick = (item) => {
@@ -40,7 +110,7 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
       handleNavigate(item.path);
     } else {
       // Could open file preview
-      socket.emit('read_file', { path: item.path });
+      window.socket.emit('read_file', { path: item.path });
     }
   };
 
@@ -67,6 +137,27 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
         </button>
       </div>
       <div className="window-content">
+        <div className="file-processor-panel">
+          <div className="file-toolbar">
+            <input type="file" onChange={handleFileSelect} />
+            <select value={processingAction} onChange={(e) => setProcessingAction(e.target.value)}>
+              <option value="summarize">Summarize</option>
+              <option value="extract_text">Extract text</option>
+              <option value="describe">Describe</option>
+              <option value="ocr">OCR</option>
+              <option value="analyze">Analyze</option>
+              <option value="explain">Explain code</option>
+              <option value="review">Review code</option>
+              <option value="word_count">Word count</option>
+            </select>
+            <button onClick={handleProcessFile} disabled={!selectedFile || isProcessing}>
+              {isProcessing ? 'Processing...' : 'Process file'}
+            </button>
+          </div>
+          {selectedFile && <div className="path-display">Selected: {selectedFile.name}</div>}
+          {processingResult && <pre className="file-processing-result">{processingResult}</pre>}
+        </div>
+
         <div className="file-toolbar">
           <button onClick={() => handleNavigate('~')}>
             <Home size={16} />

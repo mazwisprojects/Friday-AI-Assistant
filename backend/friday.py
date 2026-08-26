@@ -44,6 +44,7 @@ from actions import file_processor as file_processor_module
 from actions import background_monitor as background_monitor_module
 from actions.proactive import ProactiveEngine
 from memory.memory_manager import load_memory as load_legacy_memory
+from contacts_manager import ContactsManager
 
 # youtube_video's _ask_for_url shows a blocking Tkinter dialog and ignores any 'url'
 # already passed in. We require 'url' explicitly in the tool schema instead of prompting.
@@ -142,6 +143,7 @@ class AudioLoop:
         self.system_monitor = system_monitor_module.SystemMonitor()
         self.proactive_engine = ProactiveEngine()
         self._last_user_speech = time.monotonic()
+        self.last_uploaded_image = None
 
         self.send_text_task = None
         self.stop_event = asyncio.Event()
@@ -165,6 +167,7 @@ class AudioLoop:
         # If friday.py is in backend/, project root is one up
         project_root = os.path.dirname(current_dir)
         self.project_manager = ProjectManager(project_root)
+        self.contacts_manager = ContactsManager(project_root)
 
         # Global memory: not project-scoped, never cleared, survives restarts
         from memory_manager import MemoryManager
@@ -652,7 +655,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 
                                 # Check Permissions (Default to True if not set)
@@ -1163,11 +1166,38 @@ class AudioLoop:
 
                                 elif fc.name == "send_message":
                                     receiver = fc.args.get("receiver", "")
+                                    platform = fc.args.get("platform", "whatsapp")
+                                    resolved_receiver = self.contacts_manager.resolve(receiver, platform)
+                                    if resolved_receiver:
+                                        receiver = resolved_receiver
                                     print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'send_message' receiver='{receiver}'")
                                     result_str = await asyncio.to_thread(
                                         send_message_module.send_message,
-                                        {"receiver": receiver, "message_text": fc.args.get("message_text", ""), "platform": fc.args.get("platform", "whatsapp")}
+                                        {"receiver": receiver, "message_text": fc.args.get("message_text", ""), "platform": platform}
                                     )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "contacts_manager":
+                                    action = fc.args.get("action", "").lower().strip()
+                                    name = fc.args.get("name", "")
+                                    platform = fc.args.get("platform", "whatsapp")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'contacts_manager' action='{action}' name='{name}'")
+                                    if action in ("add", "update"):
+                                        result_str = self.contacts_manager.add_or_update(
+                                            name, fc.args.get("recipient", ""), platform
+                                        )
+                                    elif action == "remove":
+                                        result_str = self.contacts_manager.remove(name, platform if fc.args.get("recipient") else "")
+                                    elif action == "list":
+                                        result_str = self.contacts_manager.format_contacts()
+                                    elif action == "find":
+                                        contact = self.contacts_manager.find(name)
+                                        result_str = json.dumps(contact, ensure_ascii=False) if contact else f"Contact not found: {name}"
+                                    else:
+                                        result_str = f"Unknown contacts_manager action: '{action}'"
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
