@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -52,24 +53,30 @@ class MemoryManager:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     def save_facts(self, facts: list[str], source: str = ""):
-        """Appends new durable facts, ignoring duplicates already stored."""
-        cleaned = {fact.strip() for fact in facts if isinstance(fact, str) and fact.strip()}
+        """Appends durable facts while filtering secrets and exact duplicates."""
+        cleaned = {
+            fact.strip() for fact in facts
+            if isinstance(fact, str)
+            and fact.strip()
+            and len(fact.strip()) <= 500
+            and not self._looks_like_secret(fact)
+        }
         if not cleaned:
             return
 
-        existing = set()
-        if self.facts_file.exists():
-            with open(self.facts_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        fact = json.loads(line).get("fact", "").strip().lower()
-                        if fact:
-                            existing.add(fact)
-                    except json.JSONDecodeError:
-                        continue
-
         timestamp = datetime.now().isoformat(timespec="seconds")
         with self._lock:
+            existing = set()
+            if self.facts_file.exists():
+                with open(self.facts_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            fact = json.loads(line).get("fact", "").strip().lower()
+                            if fact:
+                                existing.add(fact)
+                        except json.JSONDecodeError:
+                            continue
+
             with open(self.facts_file, "a", encoding="utf-8") as f:
                 for fact in sorted(cleaned):
                     if fact.lower() in existing:
@@ -79,6 +86,18 @@ class MemoryManager:
                         "fact": fact,
                         "source": source,
                     }, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _looks_like_secret(fact: str) -> bool:
+        """Reject common credentials even if the model accidentally returns one."""
+        lowered = fact.lower()
+        secret_terms = (
+            "password", "passcode", "api key", "apikey", "token", "secret",
+            "private key", "access key", "verification code",
+        )
+        return any(term in lowered for term in secret_terms) or bool(
+            re.search(r"(?:sk-|AIza|ghp_|xox[baprs]-)[A-Za-z0-9_-]{12,}", fact)
+        )
 
     def get_facts(self, limit: int = 100):
         """Returns durable facts, newest first, without deleting older facts."""
@@ -129,24 +148,26 @@ class MemoryManager:
 
     def search(self, query: str, limit: int = 20):
         """Simple keyword search over the entire lifetime of the index."""
-        if not self.index_file.exists() or not query.strip():
+        if not query.strip():
             return []
 
         terms = query.lower().split()
-        matches = []
+        fact_matches = []
         for fact in self.get_facts(limit=limit):
             haystack = fact.get("fact", "").lower()
             if all(term in haystack for term in terms):
-                matches.append({**fact, "sender": "FACT", "text": fact.get("fact", "")})
+                fact_matches.append({**fact, "sender": "FACT", "text": fact.get("fact", "")})
 
-        with open(self.index_file, "r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                haystack = f"{entry.get('sender', '')} {entry.get('text', '')}".lower()
-                if all(term in haystack for term in terms):
-                    matches.append(entry)
+        message_matches = []
+        if self.index_file.exists():
+            with open(self.index_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    haystack = f"{entry.get('sender', '')} {entry.get('text', '')}".lower()
+                    if all(term in haystack for term in terms):
+                        message_matches.append(entry)
 
-        return matches[-limit:]
+        return (fact_matches[-limit:] + message_matches[-limit:])[:limit]

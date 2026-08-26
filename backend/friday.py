@@ -195,24 +195,28 @@ class AudioLoop:
         self._last_user_speech = time.monotonic()
 
     async def extract_important_facts(self, sender: str, text: str):
-        """Ask Gemini to retain only stable facts that will help future conversations."""
+        """Ask Gemini to retain stable facts that will help future conversations."""
         if not text.strip():
             return
 
         prompt = (
-            "Extract only durable, useful facts from this conversation message. "
-            "Keep facts about the user's identity, preferences, important plans, "
-            "long-term projects, relationships, or recurring needs. Do not save "
-            "temporary requests, greetings, secrets, passwords, API keys, or "
-            "unverified guesses. Return ONLY a JSON array of concise strings. "
-            "Return [] if there are no important facts.\n\n"
+            "Extract every durable, useful fact explicitly stated in this conversation message. "
+            "Consider these categories: user's name and identity, location, language, "
+            "communication style, preferences, dislikes, accessibility needs, family and "
+            "relationships, recurring routines, important dates, long-term goals, work, "
+            "education, projects, devices, software, recurring tasks, decisions, constraints, "
+            "and commitments. Preserve important details without inventing or guessing. "
+            "Do not save greetings, temporary one-off requests, passwords, API keys, tokens, "
+            "financial credentials, health diagnoses, or other sensitive secrets. "
+            "Return ONLY a JSON array of concise factual strings. Return [] if there are no "
+            "durable facts.\n\n"
             f"Speaker: {sender}\nMessage: {text}"
         )
 
         try:
             response = await asyncio.to_thread(
                 client.models.generate_content,
-                model="gemini-2.5-flash-lite",
+                model="models/gemini-3.5-flash-lite",
                 contents=prompt,
             )
             raw = (response.text or "").strip()

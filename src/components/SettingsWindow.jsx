@@ -108,13 +108,15 @@ const SettingsWindow = ({
     };
 
     return (
-        <div className="absolute top-20 right-10 bg-black/90 border border-cyan-500/50 p-4 rounded-lg z-50 w-80 backdrop-blur-xl shadow-[0_0_30px_rgba(6,182,212,0.2)]">
+        <div className="fixed top-20 right-4 sm:right-10 bg-black/95 border border-cyan-500/50 p-4 rounded-lg z-[1100] w-[calc(100vw-2rem)] max-w-80 max-h-[calc(100vh-5rem)] overflow-hidden backdrop-blur-xl shadow-[0_0_30px_rgba(6,182,212,0.2)]">
             <div className="flex justify-between items-center mb-4 border-b border-cyan-900/50 pb-2">
                 <h2 className="text-cyan-400 font-bold text-sm uppercase tracking-wider">Settings</h2>
                 <button onClick={onClose} className="text-cyan-600 hover:text-cyan-400">
                     <X size={16} />
                 </button>
             </div>
+
+            <div className="max-h-[calc(100vh-9rem)] overflow-y-auto pr-1 custom-scrollbar">
 
             {/* Authentication Section */}
             <div className="mb-6">
@@ -248,6 +250,7 @@ const SettingsWindow = ({
                         className="text-xs text-cyan-100 bg-gray-900 border border-cyan-800 rounded p-2 file:mr-2 file:py-1 file:px-2 file:rounded-full file:border-0 file:text-[10px] file:font-semibold file:bg-cyan-900 file:text-cyan-400 hover:file:bg-cyan-800 cursor-pointer"
                     />
                 </div>
+            </div>
             </div>
         </div>
     );

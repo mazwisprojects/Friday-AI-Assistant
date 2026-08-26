@@ -15,11 +15,25 @@ import AuthLock from './components/AuthLock';
 import KasaWindow from './components/KasaWindow';
 import PrinterWindow from './components/PrinterWindow';
 import SettingsWindow from './components/SettingsWindow';
+import CodeWindow from './components/CodeWindow';
+import ControlWindow from './components/ControlWindow';
+import DesktopWindow from './components/DesktopWindow';
+import FileManagerWindow from './components/FileManagerWindow';
+import FlightWindow from './components/FlightWindow';
+import GameWindow from './components/GameWindow';
+import MessageWindow from './components/MessageWindow';
+import ProcessWindow from './components/ProcessWindow';
+import ReminderWindow from './components/ReminderWindow';
+import SearchWindow from './components/SearchWindow';
+import SystemMonitorWindow from './components/SystemMonitorWindow';
+import WeatherWindow from './components/WeatherWindow';
+import YouTubeWindow from './components/YouTubeWindow';
 
 
 
 const socket = io('http://localhost:8000');
-const { ipcRenderer } = window.require('electron');
+window.socket = socket;
+const ipcRenderer = window.require?.('electron')?.ipcRenderer;
 
 function App() {
     const [status, setStatus] = useState('Disconnected');
@@ -60,6 +74,22 @@ function App() {
     const [showPrinterWindow, setShowPrinterWindow] = useState(false);
     const [showCadWindow, setShowCadWindow] = useState(false);
     const [showBrowserWindow, setShowBrowserWindow] = useState(false);
+    const [actionWindows, setActionWindows] = useState({
+        code: false,
+        control: false,
+        desktop: false,
+        files: false,
+        flights: false,
+        games: false,
+        messages: false,
+        processes: false,
+        reminders: false,
+        search: false,
+        system: false,
+        weather: false,
+        youtube: false
+    });
+    const [showActionMenu, setShowActionMenu] = useState(false);
 
     // Printing workflow status (for top toolbar display)
     const [slicingStatus, setSlicingStatus] = useState({ active: false, percent: 0, message: '' });
@@ -95,6 +125,19 @@ function App() {
         browser: { x: window.innerWidth / 2 - 300, y: window.innerHeight / 2 },
         kasa: { x: window.innerWidth / 2 + 350, y: window.innerHeight / 2 - 100 },
         printer: { x: window.innerWidth / 2 - 350, y: window.innerHeight / 2 - 100 },
+        code: { x: 310, y: 330 },
+        control: { x: 340, y: 350 },
+        desktop: { x: 360, y: 370 },
+        files: { x: 380, y: 390 },
+        flights: { x: 400, y: 410 },
+        games: { x: 420, y: 430 },
+        messages: { x: 440, y: 450 },
+        processes: { x: 460, y: 470 },
+        reminders: { x: 480, y: 490 },
+        search: { x: 500, y: 510 },
+        system: { x: 520, y: 530 },
+        weather: { x: 540, y: 550 },
+        youtube: { x: 560, y: 570 },
         tools: { x: window.innerWidth / 2, y: window.innerHeight - 100 } // Fixed bottom OFFSET
     });
 
@@ -106,13 +149,28 @@ function App() {
         browser: { w: 550, h: 380 },
         video: { w: 320, h: 180 },
         kasa: { w: 300, h: 380 }, // Approx
-        printer: { w: 380, h: 380 } // Approx
+        printer: { w: 380, h: 380 }, // Approx
+        code: { w: 600, h: 500 },
+        control: { w: 450, h: 360 },
+        desktop: { w: 400, h: 320 },
+        files: { w: 500, h: 400 },
+        flights: { w: 500, h: 500 },
+        games: { w: 500, h: 450 },
+        messages: { w: 450, h: 500 },
+        processes: { w: 550, h: 400 },
+        reminders: { w: 420, h: 400 },
+        search: { w: 480, h: 400 },
+        system: { w: 380, h: 360 },
+        weather: { w: 400, h: 300 },
+        youtube: { w: 500, h: 400 }
     });
     const [activeDragElement, setActiveDragElement] = useState(null);
 
     // Z-Index Stacking Order (last element = highest z-index)
     const [zIndexOrder, setZIndexOrder] = useState([
-        'visualizer', 'chat', 'tools', 'video', 'cad', 'browser', 'kasa', 'printer'
+        'visualizer', 'chat', 'tools', 'video', 'cad', 'browser', 'kasa', 'printer',
+        'code', 'control', 'desktop', 'files', 'flights', 'games', 'messages',
+        'processes', 'reminders', 'search', 'system', 'weather', 'youtube'
     ]);
 
     // Hand Control State
@@ -1104,14 +1162,14 @@ function App() {
         }
     };
 
-    const handleMinimize = () => ipcRenderer.send('window-minimize');
-    const handleMaximize = () => ipcRenderer.send('window-maximize');
+    const handleMinimize = () => ipcRenderer?.send('window-minimize');
+    const handleMaximize = () => ipcRenderer?.send('window-maximize');
 
     // Close Application - memory is now actively saved to project, no prompt needed
     const handleCloseRequest = () => {
         // Emit shutdown signal to backend for graceful shutdown
         // Use volatile emit with timeout fallback to ensure window closes even if server is unresponsive
-        const closeWindow = () => ipcRenderer.send('window-close');
+        const closeWindow = () => ipcRenderer?.send('window-close');
 
         if (socket.connected) {
             console.log('[APP] Sending shutdown signal to backend...');
@@ -1197,6 +1255,9 @@ function App() {
                 newX = Math.max(margin, Math.min(width - size.w - margin, newX));
                 newY = Math.max(margin, Math.min(height - size.h - margin, newY));
 
+            } else if (actionWindowDefinitions.some(windowDefinition => windowDefinition.id === id)) {
+                newX = Math.max(margin, Math.min(width - size.w - margin, newX));
+                newY = Math.max(60 + margin, Math.min(height - size.h - margin, newY));
             } else {
                 // Anchor: Center
                 newX = Math.max(size.w / 2 + margin, Math.min(width - size.w / 2 - margin, newX));
@@ -1305,6 +1366,9 @@ function App() {
             } else if (id === 'video') {
                 newX = Math.max(margin, Math.min(width - size.w - margin, newX));
                 newY = Math.max(margin, Math.min(height - size.h - margin, newY));
+            } else if (actionWindowDefinitions.some(windowDefinition => windowDefinition.id === id)) {
+                newX = Math.max(margin, Math.min(width - size.w - margin, newX));
+                newY = Math.max(60 + margin, Math.min(height - size.h - margin, newY));
             } else {
                 newX = Math.max(size.w / 2 + margin, Math.min(width - size.w / 2 - margin, newX));
                 newY = Math.max(size.h / 2 + margin, Math.min(height - size.h / 2 - margin, newY));
@@ -1339,6 +1403,43 @@ function App() {
     const togglePrinterWindow = () => {
         setShowPrinterWindow(!showPrinterWindow);
     };
+
+    const toggleActionWindow = (id) => {
+        setActionWindows(prev => ({ ...prev, [id]: !prev[id] }));
+        if (!actionWindows[id]) {
+            const size = elementSizes[id] || { w: 400, h: 300 };
+            const margin = 12;
+            const maxX = Math.max(margin, window.innerWidth - size.w - margin);
+            const maxY = Math.max(60 + margin, window.innerHeight - size.h - margin);
+            setElementPositions(prev => ({
+                ...prev,
+                [id]: {
+                    x: Math.min(Math.max(margin, (window.innerWidth - size.w) / 2), maxX),
+                    y: Math.min(Math.max(60 + margin, (window.innerHeight - size.h) / 2), maxY)
+                }
+            }));
+        }
+        bringToFront(id);
+    };
+
+    const actionWindowDefinitions = [
+        { id: 'code', component: CodeWindow },
+        { id: 'control', component: ControlWindow },
+        { id: 'desktop', component: DesktopWindow },
+        { id: 'files', component: FileManagerWindow },
+        { id: 'flights', component: FlightWindow },
+        { id: 'games', component: GameWindow },
+        { id: 'messages', component: MessageWindow },
+        { id: 'processes', component: ProcessWindow },
+        { id: 'reminders', component: ReminderWindow },
+        { id: 'search', component: SearchWindow },
+        { id: 'system', component: SystemMonitorWindow },
+        { id: 'weather', component: WeatherWindow },
+        { id: 'youtube', component: YouTubeWindow }
+    ];
+    const orderedActionWindowDefinitions = [...actionWindowDefinitions].sort(
+        (a, b) => zIndexOrder.indexOf(a.id) - zIndexOrder.indexOf(b.id)
+    );
 
 
 
@@ -1610,6 +1711,29 @@ function App() {
 
 
                 {/* Chat Module */}
+                {showActionMenu && (
+                    <div className="absolute bottom-28 left-1/2 z-[80] grid grid-cols-2 gap-2 -translate-x-1/2 rounded-xl border border-cyan-500/30 bg-black/80 p-3 shadow-2xl backdrop-blur-xl">
+                        {actionWindowDefinitions.map(({ id }) => (
+                            <button
+                                key={id}
+                                onClick={() => toggleActionWindow(id)}
+                                className={`rounded border px-3 py-2 text-left text-[10px] uppercase tracking-wider transition-colors ${actionWindows[id] ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200' : 'border-cyan-900/60 text-cyan-500 hover:border-cyan-500 hover:text-cyan-200'}`}
+                            >
+                                {id === 'files' ? 'File Manager' : id}
+                            </button>
+                        ))}
+                    </div>
+                )}
+
+                {orderedActionWindowDefinitions.map(({ id, component: WindowComponent }) => actionWindows[id] && (
+                    <WindowComponent
+                        key={id}
+                        position={elementPositions[id]}
+                        onClose={() => toggleActionWindow(id)}
+                        onDrag={(event) => handleMouseDown(event, id)}
+                    />
+                ))}
+
                 <ChatModule
                     messages={messages}
                     inputValue={inputValue}
@@ -1644,6 +1768,8 @@ function App() {
                         showCadWindow={showCadWindow}
                         onToggleBrowser={() => setShowBrowserWindow(!showBrowserWindow)}
                         showBrowserWindow={showBrowserWindow}
+                        onToggleActions={() => setShowActionMenu(prev => !prev)}
+                        showActionMenu={showActionMenu}
                         activeDragElement={activeDragElement}
                         position={elementPositions.tools}
                         onMouseDown={(e) => handleMouseDown(e, 'tools')}

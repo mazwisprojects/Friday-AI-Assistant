@@ -67,8 +67,18 @@ function startPythonBackend() {
     const scriptPath = path.join(__dirname, '../backend/server.py');
     console.log(`Starting Python backend: ${scriptPath}`);
 
-    // Assuming 'python' is in PATH. In prod, this would be the executable.
-    pythonProcess = spawn('python', [scriptPath], {
+    const pythonCandidates = [
+        process.env.FRIDAY_PYTHON,
+        process.env.CONDA_PREFIX ? path.join(process.env.CONDA_PREFIX, 'python.exe') : null,
+        path.join(process.env.USERPROFILE || '', '.conda', 'envs', 'friday', 'python.exe'),
+        'python',
+    ].filter(Boolean);
+    const pythonExecutable = pythonCandidates.find((candidate) => {
+        return candidate === 'python' || require('fs').existsSync(candidate);
+    });
+
+    console.log(`Using Python interpreter: ${pythonExecutable}`);
+    pythonProcess = spawn(pythonExecutable, [scriptPath], {
         cwd: path.join(__dirname, '../backend'),
     });
 

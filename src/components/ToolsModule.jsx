@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, MicOff, Settings, Power, Video, VideoOff, Hand, Lightbulb, Printer, Globe, Box } from 'lucide-react';
+import { Mic, MicOff, Settings, Power, Video, VideoOff, Hand, Lightbulb, Printer, Globe, Box, Layout } from 'lucide-react';
 
 const ToolsModule = ({
     isConnected,
@@ -21,6 +21,8 @@ const ToolsModule = ({
     showCadWindow,
     onToggleBrowser,
     showBrowserWindow,
+    onToggleActions,
+    showActionMenu,
     activeDragElement,
 
     position,
@@ -140,6 +142,17 @@ const ToolsModule = ({
                         } `}
                 >
                     <Globe size={24} />
+                </button>
+
+                <button
+                    onClick={onToggleActions}
+                    className={`p-3 rounded-full border-2 transition-all duration-300 ${showActionMenu
+                        ? 'border-cyan-400 bg-cyan-400/10 text-cyan-400'
+                        : 'border-cyan-900 text-cyan-700 hover:border-cyan-500 hover:text-cyan-500'
+                        } `}
+                    title="Open action windows"
+                >
+                    <Layout size={24} />
                 </button>
             </div>
         </div>
