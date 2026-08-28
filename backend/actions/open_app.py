@@ -264,10 +264,15 @@ def open_app(
         if normalized.lower() != app_name.lower():
             if launcher(app_name):
                 return f"Opened {app_name}."
+        if app_name.lower() in {"whatsapp", "telegram", "discord", "signal", "messenger"}:
+            return (
+                f"I could not open {app_name} because it is not installed or could not be found. "
+                f"You can install {app_name}, or I can open {app_name} Web instead."
+            )
         return (
-            f"Could not confirm that {app_name} launched. "
-            f"It may still be loading, or it might not be installed."
+            f"I could not open {app_name}. It may still be loading, or it might not be installed. "
+            f"You can install it or tell me to try a web alternative."
         )
     except Exception as e:
         print(f"[open_app] Error: {e}")
-        return f"Failed to open {app_name}: {e}"
+        return f"I could not open {app_name}. The launcher reported: {e}. You can install it or try its web version."

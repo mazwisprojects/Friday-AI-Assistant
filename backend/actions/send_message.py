@@ -257,7 +257,10 @@ def send_message(
         handler = _resolve_platform(platform)
         result  = handler(receiver, message_text)
     except Exception as e:
-        result = f"Could not send message: {e}"
+        result = (
+            f"I could not send the message through {platform} because the desktop action failed: {e}. "
+            f"Check that {platform} is installed and signed in, or ask me to try {platform} Web."
+        )
 
     print(f"[SendMessage] {'✅' if 'sent' in result.lower() else '❌'} {result}")
     if player:

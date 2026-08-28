@@ -91,6 +91,65 @@ body {
   color: #fca5a5;
 }
 
+.hud-action-plan {
+  position: absolute;
+  top: 118px;
+  left: 28px;
+  z-index: 5;
+  width: 310px;
+  padding: 10px;
+  color: rgba(207, 250, 254, 0.8);
+  background: rgba(2, 10, 14, 0.84);
+  border-left: 2px solid rgba(34, 211, 238, 0.7);
+  box-shadow: 0 0 18px rgba(0, 172, 210, 0.1);
+  pointer-events: none;
+}
+
+.hud-plan-heading,
+.hud-plan-step {
+  display: grid;
+  grid-template-columns: 28px 1fr 30px;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  line-height: 1.5;
+  text-transform: uppercase;
+}
+
+.hud-plan-heading {
+  grid-template-columns: 1fr auto;
+  padding-bottom: 6px;
+  color: #67e8f9;
+  border-bottom: 1px solid rgba(34, 211, 238, 0.2);
+  font-weight: 700;
+}
+
+.hud-plan-step {
+  padding: 4px 0;
+  color: rgba(165, 243, 252, 0.42);
+}
+
+.hud-plan-step > span:first-child {
+  color: rgba(103, 232, 249, 0.45);
+}
+
+.hud-plan-step b {
+  font-size: 0.55rem;
+  text-align: right;
+}
+
+.hud-plan-active {
+  color: #fef08a;
+  background: rgba(250, 204, 21, 0.08);
+}
+
+.hud-plan-active b { color: #fde047; }
+.hud-plan-done { color: rgba(134, 239, 172, 0.72); }
+.hud-plan-done b { color: #86efac; }
+.hud-plan-error { color: #fca5a5; }
+.hud-plan-error b { color: #f87171; }
+
 .hud-crosshair {
   position: absolute;
   top: 50%;
@@ -249,6 +308,12 @@ body {
 
   .hud-telemetry-left { left: 18px; }
   .hud-telemetry-right { right: 18px; }
+
+  .hud-action-plan {
+    top: 148px;
+    left: 18px;
+    width: min(310px, calc(100vw - 36px));
+  }
 
   .hud-diagnostics {
     right: 18px;
@@ -530,4 +595,59 @@ button {
 .hud-toggle:hover {
   color: #cffafe;
   border-color: rgba(103, 232, 249, 0.85);
+}
+
+#tools button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 36px;
+  padding: 0;
+  overflow: hidden;
+  border-radius: 0 !important;
+  transition: transform 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+#tools button::before,
+#tools button::after {
+  position: absolute;
+  width: 7px;
+  height: 7px;
+  pointer-events: none;
+  content: '';
+  border-color: currentColor;
+  opacity: 0.65;
+  transition: width 160ms ease, height 160ms ease, opacity 160ms ease;
+}
+
+#tools button::before {
+  top: 3px;
+  left: 3px;
+  border-top: 1px solid;
+  border-left: 1px solid;
+}
+
+#tools button::after {
+  right: 3px;
+  bottom: 3px;
+  border-right: 1px solid;
+  border-bottom: 1px solid;
+}
+
+#tools button:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 16px currentColor;
+}
+
+#tools button:hover::before,
+#tools button:hover::after {
+  width: 11px;
+  height: 11px;
+  opacity: 1;
+}
+
+#tools button:active {
+  transform: translateY(0) scale(0.94);
 }

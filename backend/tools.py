@@ -238,6 +238,28 @@ get_system_status_tool = {
     }
 }
 
+undo_last_action_tool = {
+    "name": "undo_last_action",
+    "description": "Reverses the most recent supported action. Currently restores overwritten/deletes newly created project files, restores a previous wallpaper when its path is available, and restores the previous project context.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {},
+    }
+}
+
+mute_alert_category_tool = {
+    "name": "mute_alert_category",
+    "description": "Controls proactive system alerts. Mute or unmute one category (cpu, ram, temp, gpu), enable or disable all system alerts, or list the current alert settings. Use this when the user asks Friday to stop repeatedly warning about CPU or another system metric.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: mute, unmute, enable, disable, list."},
+            "category": {"type": "STRING", "description": "Alert category: cpu, ram, temp, or gpu."}
+        },
+        "required": ["action"]
+    }
+}
+
 get_weather_tool = {
     "name": "get_weather",
     "description": "Opens a weather search in the browser for a given city and time period.",
@@ -548,6 +570,8 @@ tools_list = [{"function_declarations": [
     manage_files_tool,
     open_application_tool,
     get_system_status_tool,
+    undo_last_action_tool,
+    mute_alert_category_tool,
     get_weather_tool,
     set_reminder_tool,
     desktop_control_tool,

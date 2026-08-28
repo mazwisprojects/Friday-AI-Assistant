@@ -12,8 +12,11 @@ import PIL.Image
 import mss
 import argparse
 import math
+import shutil
 import struct
 import time
+from datetime import datetime
+from pathlib import Path
 
 from google import genai
 from google.genai import types
@@ -45,6 +48,7 @@ from actions import background_monitor as background_monitor_module
 from actions.proactive import ProactiveEngine
 from memory.memory_manager import load_memory as load_legacy_memory
 from contacts_manager import ContactsManager
+from undo_manager import UndoManager
 
 # youtube_video's _ask_for_url shows a blocking Tkinter dialog and ignores any 'url'
 # already passed in. We require 'url' explicitly in the tool schema instead of prompting.
@@ -94,7 +98,7 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -107,6 +111,9 @@ class AudioLoop:
         self.on_project_update = on_project_update
         self.on_device_update = on_device_update
         self.on_error = on_error
+        self.on_alert_settings_update = on_alert_settings_update
+        self.on_plan_update = on_plan_update
+        self.authenticated = authenticated
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
         self.output_device_index = output_device_index
@@ -144,6 +151,9 @@ class AudioLoop:
         self.proactive_engine = ProactiveEngine()
         self._last_user_speech = time.monotonic()
         self.last_uploaded_image = None
+        self.last_uploaded_file = None
+        self.undo_manager = None
+        self._active_plan = None
 
         self.send_text_task = None
         self.stop_event = asyncio.Event()
@@ -168,6 +178,8 @@ class AudioLoop:
         project_root = os.path.dirname(current_dir)
         self.project_manager = ProjectManager(project_root)
         self.contacts_manager = ContactsManager(project_root)
+        self.undo_manager = UndoManager(project_root)
+        file_controller_module.configure_undo_manager(self.undo_manager)
 
         # Global memory: not project-scoped, never cleared, survives restarts
         from memory_manager import MemoryManager
@@ -179,6 +191,117 @@ class AudioLoop:
             # Since this is init, loop might not be running, but on_project_update in server.py uses asyncio.create_task which needs a loop.
             # We will handle this by calling it in run() or just print for now.
             pass
+
+    def check_tool_preconditions(self, tool_name: str, args: dict) -> str | None:
+        """Return a user-facing reason when a tool cannot run safely or usefully."""
+        if not self.authenticated:
+            return "Authentication is required before using tools."
+
+        if tool_name in {"read_file", "write_file"}:
+            path = args.get("path", "")
+            if not path:
+                return f"The {tool_name} tool requires a file path."
+            if tool_name == "write_file":
+                target = (self.project_manager.get_current_project_path() / path).resolve()
+                project_root = self.project_manager.get_current_project_path().resolve()
+                if not target.is_relative_to(project_root):
+                    return "The requested file path is outside the active project."
+            elif not os.path.isfile(path):
+                return f"The file was not found: {path}"
+
+        if tool_name == "process_file":
+            path = args.get("file_path", "")
+            if not path or not os.path.isfile(path):
+                return f"The file was not found: {path or '(no path provided)'}"
+
+        if tool_name == "desktop_control" and args.get("action") == "wallpaper":
+            path = args.get("path", "")
+            if not path or not os.path.isfile(path):
+                return "The wallpaper image file was not found."
+
+        if tool_name == "set_reminder":
+            try:
+                target = datetime.strptime(
+                    f"{args.get('date', '')} {args.get('time', '')}", "%Y-%m-%d %H:%M"
+                )
+                if target <= datetime.now():
+                    return "The reminder date and time must be in the future."
+            except ValueError:
+                return "The reminder needs a valid date (YYYY-MM-DD) and time (HH:MM)."
+
+        if tool_name == "control_light":
+            target = args.get("target", "")
+            if not target or target not in self.kasa_agent.devices and not any(
+                getattr(device, "alias", "").lower() == target.lower()
+                for device in self.kasa_agent.devices.values()
+            ):
+                return "That Kasa device is not known. Discover Kasa devices first."
+
+        if tool_name in {"print_stl", "get_print_status"}:
+            printer_target = args.get("printer", "")
+            if not printer_target:
+                return "A printer name or address is required."
+            if not self.printer_agent._resolve_printer(printer_target):
+                return "That printer is not configured. Discover or add the printer first."
+
+        if tool_name == "discover_printers" and not self.printer_agent:
+            return "The printer service is not available."
+
+        if tool_name == "browser_control":
+            browser = args.get("browser", "").lower()
+            if browser in {"chrome", "edge", "firefox", "brave", "opera", "vivaldi"}:
+                executable_names = {
+                    "chrome": "chrome", "edge": "msedge", "firefox": "firefox",
+                    "brave": "brave", "opera": "opera", "vivaldi": "vivaldi",
+                }
+                if not shutil.which(executable_names[browser]) and not self._browser_profile_exists(browser):
+                    return f"The requested browser is not installed: {browser}."
+
+        if tool_name == "send_message":
+            receiver = args.get("receiver", "").strip()
+            platform = args.get("platform", "whatsapp")
+            if receiver and not self.contacts_manager.resolve(receiver, platform) and not any(char in receiver for char in "@+0123456789"):
+                return f"No saved contact named '{receiver}' was found. Save the contact first or provide a direct username/number."
+
+        return None
+
+    def start_action_plan(self, tool_name: str, args: dict):
+        plans = {
+            "desktop_control": ["Locate target desktop file", "Verify image format", "Request wallpaper confirmation", "Apply wallpaper"],
+            "process_file": ["Locate uploaded file", "Verify file type", "Process file", "Return result"],
+            "send_message": ["Locate contact", "Resolve messaging platform", "Request send confirmation", "Send message"],
+            "build_project": ["Plan project structure", "Generate project files", "Install dependencies", "Run or open project"],
+            "find_flights": ["Validate trip details", "Search flight results", "Parse available flights", "Return options"],
+        }
+        steps = plans.get(tool_name)
+        if not steps:
+            return
+        self._active_plan = {"title": tool_name.replace("_", " ").upper(), "steps": [{"label": label, "status": "pending"} for label in steps]}
+        self._update_plan_step(0, "active")
+
+    def _update_plan_step(self, index: int, status: str):
+        if not self._active_plan or index >= len(self._active_plan["steps"]):
+            return
+        self._active_plan["steps"][index]["status"] = status
+        if self.on_plan_update:
+            self.on_plan_update(self._active_plan)
+
+    def finish_action_plan(self, success: bool = True):
+        if not self._active_plan:
+            return
+        for step in self._active_plan["steps"]:
+            step["status"] = "done" if success else ("error" if step["status"] == "active" else step["status"])
+        if self.on_plan_update:
+            self.on_plan_update(self._active_plan)
+        self._active_plan = None
+
+    @staticmethod
+    def _browser_profile_exists(browser: str) -> bool:
+        return any(path.exists() for path in (
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Google" / "Chrome" / "User Data",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "User Data",
+            Path(os.environ.get("APPDATA", "")) / "Mozilla" / "Firefox",
+        ))
 
     def flush_chat(self):
         """Forces the current chat buffer to be written to log."""
@@ -211,8 +334,12 @@ class AudioLoop:
             "and commitments. Preserve important details without inventing or guessing. "
             "Do not save greetings, temporary one-off requests, passwords, API keys, tokens, "
             "financial credentials, health diagnoses, or other sensitive secrets. "
-            "Return ONLY a JSON array of concise factual strings. Return [] if there are no "
-            "durable facts.\n\n"
+            "Return ONLY a JSON array of objects with this exact shape: "
+            "[{\"subject\": \"stable.field.name\", \"value\": \"current factual value\", "
+            "\"confidence\": 1.0}]. Use the same subject for the same fact over time; "
+            "for example, use user.identity.name for the user's name and "
+            "user.relationship.partner for the user's partner. Return [] if there are "
+            "no durable facts.\n\n"
             f"Speaker: {sender}\nMessage: {text}"
         )
 
@@ -508,6 +635,7 @@ class AudioLoop:
         try:
             # Ensure parent exists
             os.makedirs(os.path.dirname(final_path), exist_ok=True)
+            self.undo_manager.record_file_write(str(final_path))
             with open(final_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             result = f"File '{final_path.name}' written successfully to project '{self.project_manager.current_project}'."
@@ -655,8 +783,25 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
+                                self.start_action_plan(fc.name, fc.args)
+
+                                precondition_error = self.check_tool_preconditions(fc.name, fc.args)
+                                if precondition_error:
+                                    print(f"[FRIDAY DEBUG] [PRECONDITION] {fc.name}: {precondition_error}")
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id,
+                                        name=fc.name,
+                                        response={"result": f"Tool not executed: {precondition_error}"},
+                                    ))
+                                    self.finish_action_plan(False)
+                                    continue
+
+                                if self._active_plan:
+                                    self._update_plan_step(0, "done")
+                                    self._update_plan_step(1, "done")
+                                    self._update_plan_step(2, "active")
                                 
                                 # Check Permissions (Default to True if not set)
                                 confirmation_required = self.permissions.get(fc.name, True)
@@ -701,6 +846,7 @@ class AudioLoop:
                                             }
                                         )
                                         function_responses.append(function_response)
+                                        self.finish_action_plan(False)
                                         continue
 
                                 # If confirmed (or no callback configured, or auto-allowed), proceed
@@ -775,8 +921,10 @@ class AudioLoop:
                                 elif fc.name == "switch_project":
                                     name = fc.args["name"]
                                     print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'switch_project' name='{name}'")
+                                    previous_project = self.project_manager.current_project
                                     success, msg = self.project_manager.switch_project(name)
                                     if success:
+                                        self.undo_manager.record_project_switch(previous_project)
                                         if self.on_project_update:
                                             self.on_project_update(name)
                                         # Gather project context and send to AI (silently, no response expected)
@@ -1064,6 +1212,14 @@ class AudioLoop:
                                     action = fc.args.get("action", "")
                                     print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'computer_settings' action='{action}'")
                                     params = {k: v for k, v in fc.args.items()}
+                                    if action in ("volume_up", "volume_down", "volume_set"):
+                                        previous_value = await asyncio.to_thread(computer_settings_module.get_current_volume)
+                                        if previous_value is not None:
+                                            self.undo_manager.record_setting("volume_set", previous_value)
+                                    elif action in ("brightness_up", "brightness_down"):
+                                        previous_value = await asyncio.to_thread(computer_settings_module.get_current_brightness)
+                                        if previous_value is not None:
+                                            self.undo_manager.record_setting("brightness_set", previous_value)
                                     result_str = await asyncio.to_thread(computer_settings_module.computer_settings, params)
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": result_str}
@@ -1103,6 +1259,45 @@ class AudioLoop:
                                     )
                                     function_responses.append(function_response)
 
+                                elif fc.name == "mute_alert_category":
+                                    action = fc.args.get("action", "").lower().strip()
+                                    category = fc.args.get("category", "").lower().strip()
+                                    if action == "mute":
+                                        result_str = self.system_monitor.mute_category(category)
+                                    elif action == "unmute":
+                                        result_str = self.system_monitor.unmute_category(category)
+                                    elif action == "enable":
+                                        result_str = self.system_monitor.set_alerts_enabled(True)
+                                    elif action == "disable":
+                                        result_str = self.system_monitor.set_alerts_enabled(False)
+                                    elif action == "list":
+                                        muted = ", ".join(sorted(self.system_monitor.muted_categories)) or "none"
+                                        state = "enabled" if self.system_monitor.alerts_enabled else "disabled"
+                                        result_str = f"System alerts are {state}; muted categories: {muted}."
+                                    else:
+                                        result_str = f"Unknown alert control action: '{action}'"
+                                    if self.on_alert_settings_update:
+                                        self.on_alert_settings_update({
+                                            "system_alerts_enabled": self.system_monitor.alerts_enabled,
+                                            "muted_alert_categories": sorted(self.system_monitor.muted_categories),
+                                        })
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "undo_last_action":
+                                    result_str = await asyncio.to_thread(
+                                        self.undo_manager.undo_last,
+                                        desktop_module=desktop_module,
+                                        computer_settings_module=computer_settings_module,
+                                        project_manager=self.project_manager,
+                                    )
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
                                 elif fc.name == "get_weather":
                                     city = fc.args.get("city", "")
                                     print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_weather' city='{city}'")
@@ -1132,7 +1327,10 @@ class AudioLoop:
                                     # Dispatch to an explicit whitelist of safe functions only - deliberately
                                     # bypassing desktop_control()'s fallback that generates and exec()s AI code.
                                     if action == "wallpaper":
+                                        previous_wallpaper = await asyncio.to_thread(desktop_module.get_current_wallpaper)
                                         result_str = await asyncio.to_thread(desktop_module.set_wallpaper, fc.args.get("path", ""))
+                                        if not result_str.lower().startswith("no ") and not result_str.lower().startswith("could not"):
+                                            self.undo_manager.record_wallpaper(previous_wallpaper)
                                     elif action == "wallpaper_url":
                                         result_str = await asyncio.to_thread(desktop_module.set_wallpaper_from_url, fc.args.get("url", ""))
                                     elif action == "current_wallpaper":
@@ -1305,6 +1503,7 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
                                     function_responses.append(function_response)
+                        self.finish_action_plan(True)
                         if function_responses:
                             await self.session.send_tool_response(function_responses=function_responses)
                 

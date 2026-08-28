@@ -36,6 +36,7 @@ const TOOLS = [
     { id: 'process_file', label: 'Process File' },
     { id: 'manage_monitors', label: 'Manage Monitors' },
     { id: 'contacts_manager', label: 'Contacts Manager' },
+    { id: 'undo_last_action', label: 'Undo Last Action' },
 ];
 
 const SettingsWindow = ({
@@ -58,6 +59,7 @@ const SettingsWindow = ({
 }) => {
     const [permissions, setPermissions] = useState({});
     const [faceAuthEnabled, setFaceAuthEnabled] = useState(false);
+    const [systemAlertsEnabled, setSystemAlertsEnabled] = useState(true);
 
     useEffect(() => {
         // Request initial permissions
@@ -71,6 +73,9 @@ const SettingsWindow = ({
                 if (typeof settings.face_auth_enabled !== 'undefined') {
                     setFaceAuthEnabled(settings.face_auth_enabled);
                     localStorage.setItem('face_auth_enabled', settings.face_auth_enabled);
+                }
+                if (typeof settings.system_alerts_enabled !== 'undefined') {
+                    setSystemAlertsEnabled(settings.system_alerts_enabled);
                 }
             }
         };
@@ -108,6 +113,12 @@ const SettingsWindow = ({
         socket.emit('update_settings', { camera_flipped: newVal });
     };
 
+    const toggleSystemAlerts = () => {
+        const newVal = !systemAlertsEnabled;
+        setSystemAlertsEnabled(newVal);
+        socket.emit('update_settings', { system_alerts_enabled: newVal });
+    };
+
     return (
         <div className="fixed top-20 right-4 sm:right-10 bg-black/95 border border-cyan-500/50 p-4 rounded-lg z-[1100] w-[calc(100vw-2rem)] max-w-80 max-h-[calc(100vh-5rem)] overflow-hidden backdrop-blur-xl shadow-[0_0_30px_rgba(6,182,212,0.2)]">
             <div className="flex justify-between items-center mb-4 border-b border-cyan-900/50 pb-2">
@@ -130,6 +141,21 @@ const SettingsWindow = ({
                         className={`hud-toggle ${faceAuthEnabled ? 'hud-toggle-on' : ''}`}
                     >
                         <span>{faceAuthEnabled ? 'ON' : 'OFF'}</span>
+                        <i />
+                    </button>
+                </div>
+            </div>
+
+            <div className="mb-6">
+                <h3 className="text-cyan-400 font-bold mb-3 text-xs uppercase tracking-wider opacity-80">System Alerts</h3>
+                <div className="flex items-center justify-between text-xs bg-gray-900/50 p-2 rounded border border-cyan-900/30">
+                    <span className="text-cyan-100/80">Proactive Alerts</span>
+                    <button
+                        onClick={toggleSystemAlerts}
+                        aria-label={`System alerts ${systemAlertsEnabled ? 'on' : 'off'}`}
+                        className={`hud-toggle ${systemAlertsEnabled ? 'hud-toggle-on' : ''}`}
+                    >
+                        <span>{systemAlertsEnabled ? 'ON' : 'OFF'}</span>
                         <i />
                     </button>
                 </div>

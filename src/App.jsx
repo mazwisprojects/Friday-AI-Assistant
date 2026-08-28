@@ -70,6 +70,7 @@ function App() {
     const [browserData, setBrowserData] = useState({ image: null, logs: [] });
     // showMemoryPrompt removed - memory is now actively saved to project
     const [confirmationRequest, setConfirmationRequest] = useState(null); // { id, tool, args }
+    const [actionPlan, setActionPlan] = useState(null);
     const [kasaDevices, setKasaDevices] = useState([]);
     const [showKasaWindow, setShowKasaWindow] = useState(false);
     const [showPrinterWindow, setShowPrinterWindow] = useState(false);
@@ -249,11 +250,8 @@ function App() {
             const height = window.innerHeight;
 
             // Calculate available vertical space
-            // Tools is fixed at bottom ~100px space
-            const toolsY = height - 100;
-            // ToolsModule uses translate(-50%, -50%). So its Center Y.
-            // Let's reserve bottom 140px for tools to be safe and float it nicely.
-            const toolsCenterY = height - 100;
+            // ToolsModule uses translate(-50%, -50%); keep its lower edge near the HUD frame.
+            const toolsCenterY = height - 26;
 
             const gap = 20;
 
@@ -395,6 +393,12 @@ function App() {
                 setStatus('Model Connected');
             } else if (data.msg === 'F.R.I.D.A.Y Stopped') {
                 setStatus('Connected');
+            }
+        });
+        socket.on('action_plan', (plan) => {
+            setActionPlan(plan);
+            if (plan.steps?.every((step) => step.status === 'done' || step.status === 'error')) {
+                setTimeout(() => setActionPlan(null), 4000);
             }
         });
         socket.on('audio_data', (data) => {
@@ -687,6 +691,7 @@ function App() {
             socket.off('cad_data');
             socket.off('cad_thought');
             socket.off('cad_status');
+            socket.off('action_plan');
             socket.off('browser_frame');
             socket.off('transcription');
             socket.off('tool_confirmation_request');
@@ -1572,6 +1577,22 @@ function App() {
                     <span>DEVICES // {kasaDevices.length.toString().padStart(2, '0')}</span>
                     <span>PRINTERS // {printerCount.toString().padStart(2, '0')}</span>
                 </div>
+
+                {actionPlan && (
+                    <div className="hud-action-plan" aria-live="polite">
+                        <div className="hud-plan-heading">
+                            <span>PLAN // {actionPlan.title}</span>
+                            <span>{actionPlan.steps.filter((step) => step.status === 'done').length.toString().padStart(2, '0')}/{actionPlan.steps.length.toString().padStart(2, '0')}</span>
+                        </div>
+                        {actionPlan.steps.map((step, index) => (
+                            <div className={`hud-plan-step hud-plan-${step.status}`} key={`${step.label}-${index}`}>
+                                <span>{(index + 1).toString().padStart(2, '0')}</span>
+                                <span>{step.label}</span>
+                                <b>{step.status === 'active' ? '>>' : step.status === 'done' ? 'OK' : step.status === 'error' ? 'ERR' : '--'}</b>
+                            </div>
+                        ))}
+                    </div>
+                )}
 
                 <div className="hud-crosshair" aria-hidden="true">
                     <span className="hud-crosshair-line hud-crosshair-top" />

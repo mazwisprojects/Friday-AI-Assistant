@@ -113,6 +113,42 @@ def volume_set(value: int):
             capture_output=True)
         return
 
+def get_current_volume() -> int | None:
+    if _OS == "Windows":
+        try:
+            import math
+            from ctypes import cast, POINTER
+            from comtypes import CLSCTX_ALL
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            volume = cast(interface, POINTER(IAudioEndpointVolume))
+            return round(volume.GetMasterVolumeLevelScalar() * 100)
+        except Exception:
+            return None
+    return None
+
+def get_current_brightness() -> int | None:
+    if _OS == "Windows":
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightness).CurrentBrightness"],
+                capture_output=True, text=True, timeout=5, **_WIN_HIDE
+            )
+            return int(result.stdout.strip())
+        except Exception:
+            return None
+    return None
+
+def brightness_set(value: int):
+    value = max(0, min(100, int(value)))
+    if _OS == "Windows":
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-WmiObject -Namespace root/wmi -Class WmiMonitorBrightnessMethods).WmiSetBrightness(1, {value})"],
+            capture_output=True, timeout=5, **_WIN_HIDE
+        )
 def brightness_up():
     if _OS == "Darwin":
         subprocess.run(["osascript", "-e",
@@ -662,6 +698,13 @@ def computer_settings(
             return f"Volume set to {value}%."
         except Exception as e:
             return f"Could not set volume: {e}"
+
+    if action == "brightness_set":
+        try:
+            brightness_set(int(value or 50))
+            return f"Brightness set to {value}%."
+        except Exception as e:
+            return f"Could not set brightness: {e}"
 
     if action in ("type_text", "write_on_screen", "type", "write"):
         text = str(value or params.get("text", "")).strip()

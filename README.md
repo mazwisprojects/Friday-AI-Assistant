@@ -102,6 +102,8 @@ Friday's Gemini tool set includes CAD, web agent, project management, memory sea
 
 Tool permissions are stored in `settings.json` and can be changed in the Settings window. `true` means Friday asks for confirmation before executing the tool; `false` allows it automatically. Destructive or externally visible actions should remain protected. Code generation/build tools can write files, install dependencies, and execute code, so they should remain confirmation-protected.
 
+System alerts are controlled by `system_alerts_enabled`, `muted_alert_categories`, and `alert_cooldowns` in `settings.json`. Friday uses separate cooldowns for CPU, RAM, temperature, and GPU alerts. An alert category remains quiet while the problem stays continuously above its threshold; it becomes eligible again only after the metric recovers meaningfully and later crosses the threshold again. You can also say `mute CPU alerts`, `unmute CPU alerts`, `disable system alerts`, or `enable system alerts`. These choices persist across restarts.
+
 ## Memory
 
 Project memory is kept by `ProjectManager` in `projects/<project>/chat_history.jsonl`. The temporary project is recreated on startup, so it is not permanent.

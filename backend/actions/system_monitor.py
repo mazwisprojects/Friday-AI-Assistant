@@ -17,8 +17,19 @@ DEFAULT_THRESHOLDS = {
     "gpu":  95.0,
 }
 
-_COOLDOWN   = 300
 _CPU_STREAK = 3
+DEFAULT_COOLDOWNS = {
+    "cpu": 1800,
+    "ram": 1800,
+    "temp": 900,
+    "gpu": 900,
+}
+DEFAULT_HYSTERESIS = {
+    "cpu": 10.0,
+    "ram": 5.0,
+    "temp": 5.0,
+    "gpu": 10.0,
+}
 
 # ── NVML DLL cache (Windows: nvml.dll, Linux: libnvidia-ml.so.1) ─────────────
 _nvml_lib: object = None
@@ -140,16 +151,51 @@ class SystemMonitor:
     Call check() periodically; returns a [SYSTEM_ALERT] string or None.
     """
 
-    def __init__(self, thresholds: dict | None = None):
+    def __init__(self, thresholds: dict | None = None, alerts_enabled: bool = True, muted_categories: set[str] | None = None, cooldowns: dict | None = None):
         self.thresholds   = {**DEFAULT_THRESHOLDS, **(thresholds or {})}
+        self.alerts_enabled = alerts_enabled
+        self.muted_categories = set(muted_categories or set())
+        self.cooldowns = {**DEFAULT_COOLDOWNS, **(cooldowns or {})}
         self._last_alert: dict[str, float] = {}
+        self._alert_active: dict[str, bool] = {}
         self._cpu_streak  = 0
 
     def _can_alert(self, key: str) -> bool:
-        return (time.monotonic() - self._last_alert.get(key, 0)) > _COOLDOWN
+        return (time.monotonic() - self._last_alert.get(key, 0)) > self.cooldowns.get(key, 300)
 
     def _record(self, key: str):
         self._last_alert[key] = time.monotonic()
+
+    def configure(self, alerts_enabled: bool | None = None, muted_categories: set[str] | None = None, cooldowns: dict | None = None):
+        if alerts_enabled is not None:
+            self.alerts_enabled = alerts_enabled
+        if muted_categories is not None:
+            self.muted_categories = {category.lower() for category in muted_categories}
+        if cooldowns is not None:
+            self.cooldowns.update(cooldowns)
+
+    def mute_category(self, category: str) -> str:
+        category = category.lower().strip()
+        if category not in DEFAULT_THRESHOLDS:
+            return f"Unknown alert category: {category}. Use cpu, ram, temp, or gpu."
+        self.muted_categories.add(category)
+        return f"Muted {category.upper()} alerts."
+
+    def unmute_category(self, category: str) -> str:
+        category = category.lower().strip()
+        self.muted_categories.discard(category)
+        return f"Unmuted {category.upper()} alerts."
+
+    def set_alerts_enabled(self, enabled: bool) -> str:
+        self.alerts_enabled = enabled
+        return f"System alerts {'enabled' if enabled else 'disabled'}."
+
+    def _reset_after_recovery(self, values: dict[str, float]):
+        for category, value in values.items():
+            threshold = self.thresholds[category]
+            hysteresis = DEFAULT_HYSTERESIS[category]
+            if value < threshold - hysteresis:
+                self._alert_active[category] = False
 
     def check(self) -> str | None:
         try:
@@ -160,41 +206,50 @@ class SystemMonitor:
         except Exception:
             return None
 
+        values = {"cpu": cpu, "ram": ram, "temp": temp, "gpu": gpu}
+        self._reset_after_recovery(values)
+        if not self.alerts_enabled:
+            return None
+
         alerts: list[str] = []
 
         if cpu >= self.thresholds["cpu"]:
             self._cpu_streak += 1
-            if self._cpu_streak >= _CPU_STREAK and self._can_alert("cpu"):
+            if self._cpu_streak >= _CPU_STREAK and "cpu" not in self.muted_categories and not self._alert_active.get("cpu", False) and self._can_alert("cpu"):
                 alerts.append(
                     f"[SYSTEM_ALERT] CPU usage has been critically high ({cpu:.0f}%) "
                     "for several seconds. Warn the user in their language and suggest "
                     "closing heavy applications."
                 )
                 self._record("cpu")
+                self._alert_active["cpu"] = True
                 self._cpu_streak = 0
         else:
             self._cpu_streak = 0
 
-        if ram >= self.thresholds["ram"] and self._can_alert("ram"):
+        if ram >= self.thresholds["ram"] and "ram" not in self.muted_categories and not self._alert_active.get("ram", False) and self._can_alert("ram"):
             alerts.append(
                 f"[SYSTEM_ALERT] RAM is at {ram:.0f}% — nearly exhausted. "
                 "Warn the user in their language and suggest freeing memory."
             )
             self._record("ram")
+            self._alert_active["ram"] = True
 
-        if temp > 0 and temp >= self.thresholds["temp"] and self._can_alert("temp"):
+        if temp > 0 and temp >= self.thresholds["temp"] and "temp" not in self.muted_categories and not self._alert_active.get("temp", False) and self._can_alert("temp"):
             alerts.append(
                 f"[SYSTEM_ALERT] CPU temperature is {temp:.0f}°C — above the safe limit. "
                 "Warn the user in their language and advise reducing system load "
                 "or checking cooling."
             )
             self._record("temp")
+            self._alert_active["temp"] = True
 
-        if gpu >= 0 and gpu >= self.thresholds["gpu"] and self._can_alert("gpu"):
+        if gpu >= 0 and gpu >= self.thresholds["gpu"] and "gpu" not in self.muted_categories and not self._alert_active.get("gpu", False) and self._can_alert("gpu"):
             alerts.append(
                 f"[SYSTEM_ALERT] GPU load is at {gpu:.0f}%. "
                 "Briefly inform the user in their language."
             )
             self._record("gpu")
+            self._alert_active["gpu"] = True
 
         return " ".join(alerts) if alerts else None

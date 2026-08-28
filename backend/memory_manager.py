@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import re
 import threading
@@ -52,40 +53,77 @@ class MemoryManager:
             with open(self.index_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-    def save_facts(self, facts: list[str], source: str = ""):
-        """Appends durable facts while filtering secrets and exact duplicates."""
-        cleaned = {
-            fact.strip() for fact in facts
-            if isinstance(fact, str)
-            and fact.strip()
-            and len(fact.strip()) <= 500
-            and not self._looks_like_secret(fact)
-        }
-        if not cleaned:
+    def save_facts(self, facts: list, source: str = ""):
+        """Append facts and supersede older values for the same subject."""
+        candidates = []
+        for item in facts:
+            if isinstance(item, str):
+                fact_text = item.strip()
+                candidate = {"subject": self._subject_from_text(fact_text), "value": fact_text}
+            elif isinstance(item, dict):
+                candidate = {
+                    "subject": str(item.get("subject", "")).strip().lower(),
+                    "value": str(item.get("value", "")).strip(),
+                    "confidence": item.get("confidence", 1.0),
+                }
+            else:
+                continue
+            if candidate["subject"] and candidate["value"] and len(candidate["value"]) <= 500 and not self._looks_like_secret(candidate["value"]):
+                candidates.append(candidate)
+
+        if not candidates:
             return
 
         timestamp = datetime.now().isoformat(timespec="seconds")
         with self._lock:
-            existing = set()
+            records = []
             if self.facts_file.exists():
                 with open(self.facts_file, "r", encoding="utf-8") as f:
                     for line in f:
                         try:
-                            fact = json.loads(line).get("fact", "").strip().lower()
-                            if fact:
-                                existing.add(fact)
+                            record = json.loads(line)
+                            if "subject" not in record:
+                                record = {
+                                    **record,
+                                    "subject": self._subject_from_text(record.get("fact", "")),
+                                    "value": record.get("fact", ""),
+                                    "status": "active",
+                                }
+                            records.append(record)
                         except json.JSONDecodeError:
                             continue
 
             with open(self.facts_file, "a", encoding="utf-8") as f:
-                for fact in sorted(cleaned):
-                    if fact.lower() in existing:
+                for candidate in candidates:
+                    subject = candidate["subject"]
+                    value = candidate["value"]
+                    current = next((record for record in reversed(records) if record.get("subject") == subject and record.get("status", "active") == "active"), None)
+                    if current and current.get("value", "").strip().lower() == value.lower():
                         continue
-                    f.write(json.dumps({
+                    if current:
+                        current["status"] = "superseded"
+                        current["superseded_at"] = timestamp
+                    record = {
                         "timestamp": timestamp,
-                        "fact": fact,
+                        "subject": subject,
+                        "value": value,
+                        "fact": value,
+                        "confidence": candidate.get("confidence", 1.0),
+                        "status": "active",
                         "source": source,
-                    }, ensure_ascii=False) + "\n")
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    records.append(record)
+
+    @staticmethod
+    def _subject_from_text(fact: str) -> str:
+        lowered = fact.lower()
+        if "girlfriend" in lowered or "boyfriend" in lowered or "partner" in lowered:
+            return "user.relationship.partner"
+        if "user's name" in lowered or "user is" in lowered or "full name" in lowered:
+            return "user.identity.name"
+        digest = hashlib.sha256(lowered.encode("utf-8")).hexdigest()[:16]
+        return f"fact.{digest}"
 
     @staticmethod
     def _looks_like_secret(fact: str) -> bool:
@@ -99,18 +137,23 @@ class MemoryManager:
             re.search(r"(?:sk-|AIza|ghp_|xox[baprs]-)[A-Za-z0-9_-]{12,}", fact)
         )
 
-    def get_facts(self, limit: int = 100):
-        """Returns durable facts, newest first, without deleting older facts."""
+    def get_facts(self, limit: int = 100, active_only: bool = True):
+        """Returns durable facts, optionally excluding superseded records."""
         if not self.facts_file.exists():
             return []
 
-        facts = []
+        records_by_subject = {}
         with open(self.facts_file, "r", encoding="utf-8") as f:
             for line in f:
                 try:
-                    facts.append(json.loads(line))
+                    record = json.loads(line)
+                    subject = record.get("subject") or self._subject_from_text(record.get("fact", ""))
+                    records_by_subject[subject] = record
                 except json.JSONDecodeError:
                     continue
+        facts = list(records_by_subject.values())
+        if active_only:
+            facts = [record for record in facts if record.get("status", "active") == "active"]
         return facts[-limit:]
 
     def list_transcript_files(self):
@@ -154,9 +197,9 @@ class MemoryManager:
         terms = query.lower().split()
         fact_matches = []
         for fact in self.get_facts(limit=limit):
-            haystack = fact.get("fact", "").lower()
+            haystack = f"{fact.get('subject', '')} {fact.get('value', fact.get('fact', ''))}".lower()
             if all(term in haystack for term in terms):
-                fact_matches.append({**fact, "sender": "FACT", "text": fact.get("fact", "")})
+                fact_matches.append({**fact, "sender": "FACT", "text": fact.get("value", fact.get("fact", ""))})
 
         message_matches = []
         if self.index_file.exists():

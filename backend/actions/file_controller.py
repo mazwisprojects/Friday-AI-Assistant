@@ -11,6 +11,11 @@ except ImportError:
     _SEND2TRASH = False
 
 _OS = platform.system()  # "Windows" | "Darwin" | "Linux"
+_UNDO_MANAGER = None
+
+def configure_undo_manager(manager):
+    global _UNDO_MANAGER
+    _UNDO_MANAGER = manager
 
 _SAFE_ROOTS: list[Path] = [
     Path.home(),
@@ -141,6 +146,12 @@ def create_file(path: str, name: str = "", content: str = "") -> str:
         target = (base / name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
+        existed = target.exists()
+        if _UNDO_MANAGER:
+            if existed:
+                _UNDO_MANAGER.record_file_write(str(target))
+            else:
+                _UNDO_MANAGER.record("delete_file", {"path": str(target.resolve())})
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"File created: {target.name}"
@@ -154,6 +165,9 @@ def create_folder(path: str, name: str = "") -> str:
         target = (base / name) if name else base
         if not _is_safe_path(target):
             return f"Access denied: {target}"
+        existed = target.exists()
+        if _UNDO_MANAGER and not existed:
+            _UNDO_MANAGER.record("delete_file", {"path": str(target.resolve())})
         target.mkdir(parents=True, exist_ok=True)
         return f"Folder created: {target.name}"
     except Exception as e:
@@ -177,6 +191,8 @@ def delete_file(path: str, name: str = "") -> str:
         if target.resolve() in {p.resolve() for p in protected}:
             return f"Protected directory, cannot delete: {target.name}"
 
+        if _UNDO_MANAGER:
+            _UNDO_MANAGER.record_deleted(str(target))
         return _safe_trash(target)
 
     except PermissionError:
@@ -205,6 +221,8 @@ def move_file(path: str, name: str = "", destination: str = "") -> str:
 
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dst))
+        if _UNDO_MANAGER:
+            _UNDO_MANAGER.record_move(str(src), str(dst))
         return f"Moved: {src.name} → {dst.parent.name}/"
 
     except Exception as e:
@@ -236,6 +254,8 @@ def copy_file(path: str, name: str = "", destination: str = "") -> str:
         else:
             shutil.copy2(str(src), str(dst))
 
+        if _UNDO_MANAGER:
+            _UNDO_MANAGER.record_copy(str(dst))
         return f"Copied: {src.name} → {dst.parent.name}/"
 
     except Exception as e:
@@ -258,6 +278,8 @@ def rename_file(path: str, name: str = "", new_name: str = "") -> str:
             return f"A file named '{new_name}' already exists here."
 
         target.rename(new_path)
+        if _UNDO_MANAGER:
+            _UNDO_MANAGER.record_rename(str(target), str(new_path))
         return f"Renamed: {target.name} → {new_name}"
 
     except Exception as e:
@@ -292,6 +314,8 @@ def write_file(path: str, name: str = "", content: str = "",
         if not _is_safe_path(target):
             return f"Access denied: {target}"
         target.parent.mkdir(parents=True, exist_ok=True)
+        if _UNDO_MANAGER and not append:
+            _UNDO_MANAGER.record_file_write(str(target))
         mode = "a" if append else "w"
         with open(target, mode, encoding="utf-8") as f:
             f.write(content)

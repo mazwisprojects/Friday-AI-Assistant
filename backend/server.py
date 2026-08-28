@@ -90,11 +90,20 @@ DEFAULT_SETTINGS = {
         "game_updater": True,
         "process_file": True,
         "manage_monitors": True,
-        "contacts_manager": True
+        "contacts_manager": True,
+        "undo_last_action": True
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
-    "camera_flipped": False # Invert cursor horizontal direction
+    "camera_flipped": False, # Invert cursor horizontal direction
+    "system_alerts_enabled": True,
+    "muted_alert_categories": [],
+    "alert_cooldowns": {
+        "cpu": 1800,
+        "ram": 1800,
+        "temp": 900,
+        "gpu": 900
+    }
 }
 
 SETTINGS = DEFAULT_SETTINGS.copy()
@@ -308,6 +317,13 @@ async def start_audio(sid, data=None):
         print(f"Sending Error to frontend: {msg}")
         asyncio.create_task(sio.emit('error', {'msg': msg}))
 
+    def on_plan_update(plan):
+        asyncio.create_task(sio.emit('action_plan', plan))
+
+    def on_alert_settings_update(alert_settings):
+        SETTINGS.update(alert_settings)
+        save_settings()
+
     # Initialize FRIDAY
     try:
         print(f"Initializing AudioLoop with device_index={device_index}")
@@ -323,6 +339,9 @@ async def start_audio(sid, data=None):
             on_project_update=on_project_update,
             on_device_update=on_device_update,
             on_error=on_error,
+            on_alert_settings_update=on_alert_settings_update,
+            on_plan_update=on_plan_update,
+            authenticated=(not SETTINGS.get("face_auth_enabled", False) or bool(authenticator and authenticator.authenticated)),
 
             input_device_index=device_index,
             input_device_name=device_name,
@@ -332,6 +351,11 @@ async def start_audio(sid, data=None):
 
         # Apply current permissions
         audio_loop.update_permissions(SETTINGS["tool_permissions"])
+        audio_loop.system_monitor.configure(
+            alerts_enabled=SETTINGS.get("system_alerts_enabled", True),
+            muted_categories=set(SETTINGS.get("muted_alert_categories", [])),
+            cooldowns=SETTINGS.get("alert_cooldowns", {}),
+        )
         
         # Check initial mute state
         if data and data.get('muted', False):
@@ -663,7 +687,13 @@ async def process_uploaded_file(sid, data):
             )
     except Exception as e:
         print(f"Error processing uploaded file: {e}")
-        await sio.emit('file_processing_result', {'error': f'File processing failed: {e}'}, room=sid)
+        await sio.emit('file_processing_result', {
+            'error': (
+                f"I could not process '{data.get('filename', 'the file')}'. "
+                f"The processor reported: {e}. Check that the required file-processing "
+                "packages are installed and try again with a supported format."
+            )
+        }, room=sid)
     finally:
         if uploaded_path and not keep_upload:
             try:
@@ -1124,6 +1154,18 @@ async def update_settings(sid, data):
     if "camera_flipped" in data:
         SETTINGS["camera_flipped"] = data["camera_flipped"]
         print(f"[SERVER] Camera flip set to: {data['camera_flipped']}")
+
+    if "system_alerts_enabled" in data:
+        SETTINGS["system_alerts_enabled"] = bool(data["system_alerts_enabled"])
+        if audio_loop:
+            audio_loop.system_monitor.configure(alerts_enabled=SETTINGS["system_alerts_enabled"])
+
+    if "muted_alert_categories" in data and isinstance(data["muted_alert_categories"], list):
+        SETTINGS["muted_alert_categories"] = data["muted_alert_categories"]
+        if audio_loop:
+            audio_loop.system_monitor.configure(
+                muted_categories=set(SETTINGS["muted_alert_categories"])
+            )
 
     save_settings()
     # Broadcast new full settings
