@@ -247,6 +247,41 @@ undo_last_action_tool = {
     }
 }
 
+manage_uploads_tool = {
+    "name": "manage_uploads",
+    "description": "Manages uploaded files. List uploads, permanently save a temporary upload, forget one upload or all temporary uploads, or clean expired temporary files.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: list, save, forget, cleanup."},
+            "path": {"type": "STRING", "description": "Exact upload path for save or forget. Omit to forget all temporary uploads."}
+        },
+        "required": ["action"]
+    }
+}
+
+cancel_current_task_tool = {
+    "name": "cancel_current_task",
+    "description": "Stops the currently running cancellable action, such as CAD generation, browser automation, project building, flight search, game updates, or file processing. Use when the user says stop or cancel what you are doing.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {},
+    }
+}
+
+self_maintenance_tool = {
+    "name": "self_maintenance",
+    "description": "Runs Friday's own maintenance tasks: run the backend test suite, compile-check the backend for syntax errors, build the frontend, or install missing Python/Node dependencies. Use when the user asks Friday to test itself, self-compile, build the frontend, install missing dependencies, or check for errors and warnings. Reports issues found for the user to review and fix; does not auto-fix code.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: run_tests, compile_check, build_frontend, install_python_deps, install_frontend_deps, full_check. Defaults to full_check."},
+            "args": {"type": "STRING", "description": "Optional extra pytest arguments, for run_tests."}
+        },
+        "required": ["action"]
+    }
+}
+
 mute_alert_category_tool = {
     "name": "mute_alert_category",
     "description": "Controls proactive system alerts. Mute or unmute one category (cpu, ram, temp, gpu), enable or disable all system alerts, or list the current alert settings. Use this when the user asks Friday to stop repeatedly warning about CPU or another system metric.",
@@ -571,6 +606,9 @@ tools_list = [{"function_declarations": [
     open_application_tool,
     get_system_status_tool,
     undo_last_action_tool,
+    manage_uploads_tool,
+    cancel_current_task_tool,
+    self_maintenance_tool,
     mute_alert_category_tool,
     get_weather_tool,
     set_reminder_tool,

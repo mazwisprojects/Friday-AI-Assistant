@@ -37,6 +37,8 @@ const TOOLS = [
     { id: 'manage_monitors', label: 'Manage Monitors' },
     { id: 'contacts_manager', label: 'Contacts Manager' },
     { id: 'undo_last_action', label: 'Undo Last Action' },
+    { id: 'cancel_current_task', label: 'Cancel Current Task' },
+    { id: 'self_maintenance', label: 'Self Maintenance' },
 ];
 
 const SettingsWindow = ({

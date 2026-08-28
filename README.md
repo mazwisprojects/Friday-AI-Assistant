@@ -115,21 +115,22 @@ long_term_memory/
 ├── transcripts/              # One human-readable UTF-8 transcript per day
 ├── memory_index.jsonl        # All logged messages across projects and restarts
 ├── facts.jsonl               # Deduplicated durable facts
-└── uploads/                  # Preserved uploaded images, such as wallpapers
+├── uploads/                  # Temporary and explicitly saved uploads
+└── backups/                  # Periodic memory snapshots
 ```
 
-Recent global memory and durable facts load when a Gemini session starts. The `search_memory` tool searches the complete stored lifetime by keywords. Storage is append-oriented, but the repository does not provide cloud backup or cryptographic immutability; protect and back up `long_term_memory/` if it matters.
+Recent global memory and active durable facts load when a Gemini session starts. The `search_memory` tool searches the complete stored lifetime and ranks results using exact subject matches, phrase matches, token coverage, recency, fact confidence, and current-project relevance. Fact corrections keep superseded records for history while only the newest active value is used. Semantic embedding search is an optional future upgrade; the current implementation does not require a vector database. Memory writes use a cross-process lock, fsync, recoverable JSONL reads, atomic upload replacement, and periodic snapshots. Storage is persistent but not cloud-backed or cryptographically immutable; protect and back up `long_term_memory/` if it matters.
 
 ## Upload and wallpaper workflow
 
 1. Open the File Manager action window.
 2. Select a picture.
 3. Choose an image action such as `Describe`, `OCR`, or `Analyze`, then select **Process file**.
-4. The image is retained in `long_term_memory/uploads/` and the result appears in the window.
+4. The file is placed in temporary upload storage and the result appears in the window.
 5. Say or type: `Set the uploaded image as my wallpaper.`
 6. Confirm Friday's `desktop_control` request.
 
-Non-image uploads are saved temporarily for processing and removed afterward. The upload endpoint limits files to 25 MB and sanitizes the filename.
+Uploads are limited to 25 MB per file and 1 GB total by default. Temporary uploads are retained for 30 days, then removed by cleanup; use `manage_uploads` with `save` to keep one permanently, or `forget` to delete uploads. `list` shows retained upload metadata. File content is sent to Gemini only when the selected workflow requires it; metadata records the local path, type, size, and retention class.
 
 ## Testing
 

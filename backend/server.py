@@ -26,6 +26,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import friday
 from contacts_manager import ContactsManager
+from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 
@@ -91,7 +92,10 @@ DEFAULT_SETTINGS = {
         "process_file": True,
         "manage_monitors": True,
         "contacts_manager": True,
-        "undo_last_action": True
+        "undo_last_action": True,
+        "manage_uploads": True,
+        "cancel_current_task": False,
+        "self_maintenance": True
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
@@ -103,11 +107,23 @@ DEFAULT_SETTINGS = {
         "ram": 1800,
         "temp": 900,
         "gpu": 900
-    }
+    },
+    "upload_retention_days": 30,
+    "max_upload_storage_mb": 1024
 }
 
 SETTINGS = DEFAULT_SETTINGS.copy()
 contacts_manager = ContactsManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+global_memory_manager = MemoryManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+async def ensure_audio_ready(sid, require_session=True):
+    if not audio_loop:
+        await sio.emit('error', {'msg': 'Friday is still starting. Try again in a moment.'}, room=sid)
+        return False
+    if require_session and not audio_loop.session:
+        await sio.emit('error', {'msg': 'Friday is connected but the Gemini session is not ready yet.'}, room=sid)
+        return False
+    return True
 
 def load_settings():
     global SETTINGS
@@ -136,6 +152,8 @@ def save_settings():
 
 # Load on startup
 load_settings()
+global_memory_manager.upload_retention_days = max(1, int(SETTINGS.get("upload_retention_days", 30)))
+global_memory_manager.max_upload_storage_bytes = int(SETTINGS.get("max_upload_storage_mb", 1024)) * 1024 * 1024
 
 authenticator = None
 kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
@@ -220,6 +238,8 @@ async def connect(sid, environ):
 @sio.event
 async def disconnect(sid):
     print(f"Client disconnected: {sid}")
+    if audio_loop:
+        audio_loop.cancel_pending_confirmations()
 
 @sio.event
 async def start_audio(sid, data=None):
@@ -284,6 +304,10 @@ async def start_audio(sid, data=None):
         print(f"Requesting confirmation for tool: {data.get('tool')}")
         asyncio.create_task(sio.emit('tool_confirmation_request', data))
 
+    def on_confirmation_expired(data):
+        print(f"Confirmation expired for tool: {data.get('tool')}")
+        asyncio.create_task(sio.emit('confirmation_expired', data, room=sid))
+
     # Callback to send CAD status to frontend
     def on_cad_status(status):
         # status can be: 
@@ -334,6 +358,7 @@ async def start_audio(sid, data=None):
             on_web_data=on_web_data,
             on_transcription=on_transcription,
             on_tool_confirmation=on_tool_confirmation,
+            on_confirmation_expired=on_confirmation_expired,
             on_cad_status=on_cad_status,
             on_cad_thought=on_cad_thought,
             on_project_update=on_project_update,
@@ -348,6 +373,10 @@ async def start_audio(sid, data=None):
             kasa_agent=kasa_agent
         )
         print("AudioLoop initialized successfully.")
+
+        audio_loop.memory_manager.upload_retention_days = max(1, int(SETTINGS.get("upload_retention_days", 30)))
+        audio_loop.memory_manager.max_upload_storage_bytes = int(SETTINGS.get("max_upload_storage_mb", 1024)) * 1024 * 1024
+        audio_loop.memory_manager.cleanup_expired_uploads()
 
         # Apply current permissions
         audio_loop.update_permissions(SETTINGS["tool_permissions"])
@@ -510,12 +539,7 @@ async def user_input(sid, data):
     text = data.get('text')
     print(f"[SERVER DEBUG] User input received: '{text}'")
     
-    if not audio_loop:
-        print("[SERVER DEBUG] [Error] Audio loop is None. Cannot send text.")
-        return
-
-    if not audio_loop.session:
-        print("[SERVER DEBUG] [Error] Session is None. Cannot send text.")
+    if not await ensure_audio_ready(sid):
         return
 
     if text:
@@ -614,9 +638,7 @@ async def upload_memory(sid, data):
              await sio.emit('error', {'msg': "System not ready (Audio Loop inactive)"})
              return
         
-        if not audio_loop.session:
-             print("[SERVER DEBUG] [Error] Session is None. Cannot load memory.")
-             await sio.emit('error', {'msg': "System not ready (No active session)"})
+        if not await ensure_audio_ready(sid):
              return
 
         # Send to model
@@ -634,8 +656,6 @@ async def upload_memory(sid, data):
 @sio.event
 async def process_uploaded_file(sid, data):
     """Process a file selected in the frontend without exposing its local path."""
-    uploaded_path = None
-    keep_upload = False
     try:
         filename = Path(str(data.get('filename', 'uploaded_file'))).name
         encoded_file = data.get('data', '')
@@ -644,26 +664,13 @@ async def process_uploaded_file(sid, data):
             return
 
         file_bytes = base64.b64decode(encoded_file, validate=True)
-        if len(file_bytes) > 25 * 1024 * 1024:
-            await sio.emit('file_processing_result', {'error': 'File is too large. Maximum size is 25 MB.'}, room=sid)
-            return
-
-        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'}
-        keep_upload = Path(filename).suffix.lower() in image_extensions
-        if keep_upload:
-            upload_dir = Path(__file__).resolve().parent.parent / 'long_term_memory' / 'uploads'
-        else:
-            upload_dir = Path(tempfile.gettempdir()) / 'friday_uploads'
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        if keep_upload:
-            stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-            uploaded_path = upload_dir / f'{stamp}_{filename}'
-        else:
-            uploaded_path = upload_dir / filename
-        uploaded_path.write_bytes(file_bytes)
-
-        if keep_upload and audio_loop:
-            audio_loop.last_uploaded_image = str(uploaded_path)
+        metadata = global_memory_manager.store_upload(
+            filename,
+            file_bytes,
+            data.get('mime_type', 'application/octet-stream'),
+            permanent=False,
+        )
+        uploaded_path = Path(metadata['path'])
 
         params = {
             'file_path': str(uploaded_path),
@@ -674,12 +681,13 @@ async def process_uploaded_file(sid, data):
         await sio.emit('file_processing_result', {
             'filename': filename,
             'result': result,
-            'wallpaper_ready': keep_upload,
+            'wallpaper_ready': metadata['mime_type'].startswith('image/'),
+            'saved_path': str(uploaded_path),
         }, room=sid)
-        if keep_upload and audio_loop and audio_loop.session:
+        if metadata['mime_type'].startswith('image/') and audio_loop and audio_loop.session:
             await audio_loop.session.send(
                 input=(
-                    f"System Notification: The user uploaded an image and it is permanently available at "
+                    f"System Notification: The user uploaded an image and it is temporarily available at "
                     f"{uploaded_path}. If the user asks to set the uploaded image as wallpaper, use "
                     f"desktop_control with action='wallpaper' and this exact path, after confirmation."
                 ),
@@ -694,12 +702,6 @@ async def process_uploaded_file(sid, data):
                 "packages are installed and try again with a supported format."
             )
         }, room=sid)
-    finally:
-        if uploaded_path and not keep_upload:
-            try:
-                uploaded_path.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 @sio.event
 async def upload_file_for_awareness(sid, data):
@@ -712,17 +714,9 @@ async def upload_file_for_awareness(sid, data):
             return
 
         file_bytes = base64.b64decode(encoded_file, validate=True)
-        if len(file_bytes) > 25 * 1024 * 1024:
-            await sio.emit('file_processing_result', {'error': 'File is too large. Maximum size is 25 MB.'}, room=sid)
-            return
-
-        upload_dir = Path(__file__).resolve().parent.parent / 'long_term_memory' / 'uploads'
-        upload_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-        saved_path = upload_dir / f'{stamp}_{filename}'
-        saved_path.write_bytes(file_bytes)
-
         mime_type = data.get('mime_type', 'application/octet-stream')
+        metadata = global_memory_manager.store_upload(filename, file_bytes, mime_type, permanent=False)
+        saved_path = Path(metadata['path'])
         preview = ''
         if mime_type.startswith('text/') or Path(filename).suffix.lower() in {'.txt', '.md', '.json', '.csv', '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.css'}:
             preview = file_bytes.decode('utf-8', errors='ignore')[:12000]
@@ -737,7 +731,7 @@ async def upload_file_for_awareness(sid, data):
                     )
                 awareness = (
                     f"System Notification: The user uploaded a file named '{filename}' ({mime_type}, "
-                    f"{len(file_bytes)} bytes). It is permanently available at {saved_path}. "
+                    f"{len(file_bytes)} bytes). It is temporarily available at {saved_path}. "
                     "You are now aware of this file. Ask the user what they would like you to do "
                     "with it, such as summarize, extract text, analyze, edit, or set it as wallpaper "
                     "if it is an image. Do not perform an action until the user specifies one and "

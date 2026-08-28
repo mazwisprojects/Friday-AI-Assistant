@@ -397,7 +397,7 @@ function App() {
         });
         socket.on('action_plan', (plan) => {
             setActionPlan(plan);
-            if (plan.steps?.every((step) => step.status === 'done' || step.status === 'error')) {
+            if (plan.steps?.every((step) => ['done', 'error', 'cancelled'].includes(step.status))) {
                 setTimeout(() => setActionPlan(null), 4000);
             }
         });
@@ -534,6 +534,11 @@ function App() {
         socket.on('tool_confirmation_request', (data) => {
             console.log("Received Confirmation Request:", data);
             setConfirmationRequest(data);
+        });
+
+        socket.on('confirmation_expired', (data) => {
+            setConfirmationRequest((request) => request?.id === data.id ? null : request);
+            addMessage('System', `Confirmation expired for ${data.tool}. The action was not executed.`);
         });
 
         // Handle Print Window Request (from CadWindow)
@@ -695,6 +700,7 @@ function App() {
             socket.off('browser_frame');
             socket.off('transcription');
             socket.off('tool_confirmation_request');
+            socket.off('confirmation_expired');
             socket.off('kasa_devices');
             socket.off('printer_list');
             socket.off('slicing_progress');
@@ -1588,7 +1594,7 @@ function App() {
                             <div className={`hud-plan-step hud-plan-${step.status}`} key={`${step.label}-${index}`}>
                                 <span>{(index + 1).toString().padStart(2, '0')}</span>
                                 <span>{step.label}</span>
-                                <b>{step.status === 'active' ? '>>' : step.status === 'done' ? 'OK' : step.status === 'error' ? 'ERR' : '--'}</b>
+                                <b>{step.status === 'active' ? '>>' : step.status === 'done' ? 'OK' : step.status === 'error' ? 'ERR' : step.status === 'cancelled' ? 'X' : '--'}</b>
                             </div>
                         ))}
                     </div>

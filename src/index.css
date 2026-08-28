@@ -149,6 +149,8 @@ body {
 .hud-plan-done b { color: #86efac; }
 .hud-plan-error { color: #fca5a5; }
 .hud-plan-error b { color: #f87171; }
+.hud-plan-cancelled { color: rgba(251, 191, 36, 0.7); }
+.hud-plan-cancelled b { color: #fbbf24; }
 
 .hud-crosshair {
   position: absolute;
