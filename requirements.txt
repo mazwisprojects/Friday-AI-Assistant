@@ -2,6 +2,9 @@ fastapi
 uvicorn
 python-socketio
 python-multipart
+# Testing
+pytest
+pytest-asyncio
 # Google GenAI SDK (v1beta)
 google-genai
 # Computer Vision & Audio

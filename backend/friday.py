@@ -26,7 +26,17 @@ if sys.version_info < (3, 11, 0):
     asyncio.TaskGroup = taskgroup.TaskGroup
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
-from tools import tools_list
+from tools import (
+    tools_list,
+    generate_cad,
+    run_web_agent,
+    print_stl_tool,
+    discover_printers_tool,
+    list_smart_devices_tool,
+    control_light_tool,
+    list_projects_tool,
+    iterate_cad_tool,
+)
 from actions import computer_control as computer_control_module
 from actions import computer_settings as computer_settings_module
 from actions import file_controller as file_controller_module
@@ -46,6 +56,7 @@ from actions import game_updater as game_updater_module
 from actions import file_processor as file_processor_module
 from actions import background_monitor as background_monitor_module
 from actions import self_maintenance as self_maintenance_module
+from actions import powershell_command as powershell_command_module
 from actions.proactive import ProactiveEngine
 from memory.memory_manager import load_memory as load_legacy_memory
 from contacts_manager import ContactsManager
@@ -934,7 +945,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -1498,6 +1509,21 @@ class AudioLoop:
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("self_maintenance", self_maintenance_module.self_maintenance, params))
                                     result_str = f"Self-maintenance ({action}) started. This can take a few minutes."
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "run_powershell_command":
+                                    command = fc.args.get("command", "")
+                                    cwd = fc.args.get("cwd")
+                                    timeout = fc.args.get("timeout", 120)
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'run_powershell_command' command='{command[:120]}'")
+                                    params = {"command": command, "cwd": cwd, "timeout": timeout}
+                                    result_str = await asyncio.to_thread(
+                                        powershell_command_module.run_powershell_command,
+                                        params,
+                                    )
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )

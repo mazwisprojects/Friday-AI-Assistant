@@ -11,6 +11,16 @@ import sys
 from contextlib import redirect_stdout
 from pathlib import Path
 
+
+def _missing_python_packages(packages: list[str]) -> list[str]:
+    missing = []
+    for package in packages:
+        try:
+            __import__(package)
+        except Exception:
+            missing.append(package)
+    return missing
+
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _BACKEND_DIR.parent
 _MAX_OUTPUT_CHARS = 6000
@@ -52,10 +62,31 @@ def _extract_issues(text: str) -> list[str]:
     return issues[:40]
 
 
-def run_backend_tests(args: str = "") -> dict:
-    """Runs the Python test suite with the current interpreter."""
+def _needs_frontend_install() -> bool:
+    return not (_PROJECT_ROOT / "node_modules").exists()
+
+
+def run_backend_tests(args: str = "", target: str | None = None) -> dict:
+    """Runs the Python test suite with the current interpreter.
+
+    Accepts either a pytest-style argument string or a single target path/file.
+    """
+    missing = _missing_python_packages(["pytest"])
+    if missing:
+        install_result = install_python_dependencies()
+        if not install_result["ok"]:
+            return {
+                "ok": False,
+                "returncode": install_result["returncode"],
+                "stdout": install_result.get("stdout", ""),
+                "stderr": install_result.get("stderr", ""),
+                "issues": install_result.get("issues", ["Missing Python dependencies prevented pytest execution"]),
+            }
+
     cmd = [sys.executable, "-m", "pytest", "-q"]
-    if args:
+    if target:
+        cmd.append(target)
+    elif args:
         cmd.extend(args.split())
     result = _run_command(cmd, cwd=_PROJECT_ROOT, timeout=600)
     result["issues"] = _extract_issues(result["stdout"] + "\n" + result["stderr"])
@@ -102,6 +133,16 @@ def build_frontend() -> dict:
             "ok": False, "returncode": -1, "stdout": "", "issues": ["npm was not found on PATH"],
             "stderr": "npm was not found. Install Node.js or set FRIDAY_NPM_PATH.",
         }
+    if _needs_frontend_install():
+        install_result = install_frontend_dependencies()
+        if not install_result["ok"]:
+            return {
+                "ok": False,
+                "returncode": install_result["returncode"],
+                "stdout": install_result.get("stdout", ""),
+                "stderr": install_result.get("stderr", ""),
+                "issues": install_result.get("issues", ["Frontend dependencies were missing and could not be installed"]),
+            }
     result = _run_command([npm, "run", "build"], cwd=_PROJECT_ROOT, timeout=600)
     result["issues"] = _extract_issues(result["stdout"] + "\n" + result["stderr"])
     return result
@@ -149,9 +190,11 @@ def self_maintenance(parameters: dict) -> str:
     """Dispatcher: action in {run_tests, compile_check, build_frontend,
     install_python_deps, install_frontend_deps, full_check}."""
     action = (parameters or {}).get("action", "full_check").lower().strip()
+    args = parameters.get("args", "") if parameters else ""
+    target = parameters.get("target") if parameters else None
 
     if action == "run_tests":
-        return _summarize("Backend tests", run_backend_tests(parameters.get("args", "")))
+        return _summarize("Backend tests", run_backend_tests(args, target=target))
     if action == "compile_check":
         return _summarize("Backend compile check", compile_check_backend())
     if action == "build_frontend":
@@ -161,6 +204,10 @@ def self_maintenance(parameters: dict) -> str:
     if action == "install_frontend_deps":
         return _summarize("Frontend dependency install", install_frontend_dependencies())
     if action == "full_check":
+        if _missing_python_packages(["pytest"]):
+            install_python_dependencies()
+        if _needs_frontend_install():
+            install_frontend_dependencies()
         parts = [
             _summarize("Backend compile check", compile_check_backend()),
             _summarize("Backend tests", run_backend_tests()),

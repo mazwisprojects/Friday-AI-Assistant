@@ -271,14 +271,29 @@ cancel_current_task_tool = {
 
 self_maintenance_tool = {
     "name": "self_maintenance",
-    "description": "Runs Friday's own maintenance tasks: run the backend test suite, compile-check the backend for syntax errors, build the frontend, or install missing Python/Node dependencies. Use when the user asks Friday to test itself, self-compile, build the frontend, install missing dependencies, or check for errors and warnings. Reports issues found for the user to review and fix; does not auto-fix code.",
+    "description": "Runs Friday's own maintenance tasks: run the backend test suite, a specific test file, compile-check the backend for syntax errors, build the frontend, or install missing Python/Node dependencies. Use when the user asks Friday to test itself, self-compile, build the frontend, install missing dependencies, or check for errors and warnings. Reports issues found for the user to review and fix; does not auto-fix code.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
             "action": {"type": "STRING", "description": "One of: run_tests, compile_check, build_frontend, install_python_deps, install_frontend_deps, full_check. Defaults to full_check."},
-            "args": {"type": "STRING", "description": "Optional extra pytest arguments, for run_tests."}
+            "args": {"type": "STRING", "description": "Optional extra pytest arguments for run_tests. Examples: '-k auth' or 'tests/test_authenticator.py'."},
+            "target": {"type": "STRING", "description": "Optional single test target to run, such as 'tests/test_authenticator.py' or 'tests/test_kasa_agent.py::TestKasaDiscovery::test_initialize_known_devices'."}
         },
         "required": ["action"]
+    }
+}
+
+run_powershell_command_tool = {
+    "name": "run_powershell_command",
+    "description": "Executes an arbitrary PowerShell command on this machine and returns stdout/stderr. Use only when the user explicitly asks Friday to run a shell command or PowerShell script.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "command": {"type": "STRING", "description": "The exact PowerShell command to execute, such as 'Get-ChildItem' or 'Get-Process | Select-Object -First 5'."},
+            "cwd": {"type": "STRING", "description": "Optional working directory for the command."},
+            "timeout": {"type": "NUMBER", "description": "Timeout in seconds. Defaults to 120."}
+        },
+        "required": ["command"]
     }
 }
 
@@ -609,6 +624,7 @@ tools_list = [{"function_declarations": [
     manage_uploads_tool,
     cancel_current_task_tool,
     self_maintenance_tool,
+    run_powershell_command_tool,
     mute_alert_category_tool,
     get_weather_tool,
     set_reminder_tool,
