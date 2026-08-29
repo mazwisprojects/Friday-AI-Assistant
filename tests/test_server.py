@@ -59,18 +59,93 @@ def test_save_settings_writes_json(tmp_path, monkeypatch):
     assert "tool_permissions" in saved
 
 
-def test_get_contacts_is_shadowed_by_a_duplicate_stub_handler(monkeypatch):
-    # NOTE: server.py defines `get_contacts` twice (once with a real
-    # contacts_manager-backed implementation, and again later as a dead stub).
-    # Python keeps only the last definition, so the real contact list handler
-    # is currently unreachable. This test documents that actual behavior.
+def test_get_contacts_emits_both_contacts_list_and_contact_list(monkeypatch):
     fake_sio = _FakeSio()
     monkeypatch.setattr(server, "sio", fake_sio)
-    monkeypatch.setattr(server.contacts_manager, "list_contacts", lambda: [{"name": "Jane"}])
+    monkeypatch.setattr(server.contacts_manager, "list_contacts", lambda: [
+        {"name": "Jane", "channels": {"whatsapp": "+1555"}},
+        {"name": "Bob", "channels": {"telegram": "@bob"}},
+    ])
 
-    asyncio.run(server.get_contacts("sid-1", {"platform": "whatsapp"}))
+    asyncio.run(server.get_contacts("sid-1", None))
 
-    assert fake_sio.emitted == [{"event": "contact_list", "data": [], "room": None}]
+    events = {e["event"]: e for e in fake_sio.emitted}
+    assert events["contacts_list"]["data"]["contacts"][0]["name"] == "Jane"
+    assert events["contact_list"]["data"][0]["name"] == "Jane"
+    assert events["contact_list"]["data"][1]["name"] == "Bob"
+
+
+def test_get_contacts_filters_contact_list_by_platform(monkeypatch):
+    fake_sio = _FakeSio()
+    monkeypatch.setattr(server, "sio", fake_sio)
+    monkeypatch.setattr(server.contacts_manager, "list_contacts", lambda: [
+        {"name": "Jane", "channels": {"whatsapp": "+1555"}},
+        {"name": "Bob", "channels": {"telegram": "@bob"}},
+    ])
+
+    asyncio.run(server.get_contacts("sid-1", {"platform": "telegram"}))
+
+    contact_list_event = next(e for e in fake_sio.emitted if e["event"] == "contact_list")
+    assert [c["name"] for c in contact_list_event["data"]] == ["Bob"]
+
+
+def test_send_message_resolves_receiver_when_exactly_one_contact_matches(monkeypatch):
+    fake_sio = _FakeSio()
+    monkeypatch.setattr(server, "sio", fake_sio)
+    monkeypatch.setattr(server.contacts_manager, "list_contacts", lambda: [
+        {"name": "Jane", "channels": {"whatsapp": "+1555"}},
+    ])
+    calls = []
+
+    def fake_send_message_action(params):
+        calls.append(params)
+        return "Message sent to +1555 via whatsapp."
+
+    monkeypatch.setattr("actions.send_message.send_message", fake_send_message_action)
+
+    asyncio.run(server.send_message("sid-1", {"platform": "whatsapp", "message": "hi"}))
+
+    assert calls == [{"receiver": "+1555", "message_text": "hi", "platform": "whatsapp"}]
+    assert "Message sent" in fake_sio.emitted[0]["data"]["msg"]
+
+
+def test_send_message_reports_no_contact_for_platform(monkeypatch):
+    fake_sio = _FakeSio()
+    monkeypatch.setattr(server, "sio", fake_sio)
+    monkeypatch.setattr(server.contacts_manager, "list_contacts", lambda: [])
+
+    asyncio.run(server.send_message("sid-1", {"platform": "whatsapp", "message": "hi"}))
+
+    assert "no saved contact" in fake_sio.emitted[0]["data"]["msg"].lower()
+
+
+def test_send_message_reports_ambiguous_contacts(monkeypatch):
+    fake_sio = _FakeSio()
+    monkeypatch.setattr(server, "sio", fake_sio)
+    monkeypatch.setattr(server.contacts_manager, "list_contacts", lambda: [
+        {"name": "Jane", "channels": {"whatsapp": "+1555"}},
+        {"name": "Ann", "channels": {"whatsapp": "+1777"}},
+    ])
+
+    asyncio.run(server.send_message("sid-1", {"platform": "whatsapp", "message": "hi"}))
+
+    assert "multiple" in fake_sio.emitted[0]["data"]["msg"].lower()
+
+
+def test_send_message_uses_explicit_receiver_when_provided(monkeypatch):
+    fake_sio = _FakeSio()
+    monkeypatch.setattr(server, "sio", fake_sio)
+    calls = []
+
+    def fake_send_message_action(params):
+        calls.append(params)
+        return "Message sent."
+
+    monkeypatch.setattr("actions.send_message.send_message", fake_send_message_action)
+
+    asyncio.run(server.send_message("sid-1", {"platform": "telegram", "message": "hi", "receiver": "@bob"}))
+
+    assert calls == [{"receiver": "@bob", "message_text": "hi", "platform": "telegram"}]
 
 
 def test_save_contact_delegates_to_contacts_manager(monkeypatch):

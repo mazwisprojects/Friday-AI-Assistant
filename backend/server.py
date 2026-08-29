@@ -180,8 +180,13 @@ async def status():
     return {"status": "running", "service": "F.R.I.D.A.Y Backend"}
 
 @sio.event
-async def get_contacts(sid):
-    await sio.emit('contacts_list', {'contacts': contacts_manager.list_contacts()}, room=sid)
+async def get_contacts(sid, data=None):
+    contacts = contacts_manager.list_contacts()
+    await sio.emit('contacts_list', {'contacts': contacts}, room=sid)
+
+    platform = (data or {}).get('platform')
+    filtered = [c for c in contacts if not platform or platform in c.get('channels', {})]
+    await sio.emit('contact_list', filtered, room=sid)
 
 @sio.event
 async def save_contact(sid, data):
@@ -1445,25 +1450,30 @@ async def set_wallpaper(sid):
         print(f"Error setting wallpaper: {e}")
 
 @sio.event
-async def get_contacts(sid, data):
-    """Get contacts for MessageWindow."""
-    try:
-        platform = data.get('platform')
-        await sio.emit('contact_list', [])
-    except Exception as e:
-        print(f"Error getting contacts: {e}")
-
-@sio.event
 async def send_message(sid, data):
     """Send a message for MessageWindow."""
-    from actions.send_message import send_message_action
+    from actions.send_message import send_message as send_message_action
     try:
-        platform = data.get('platform')
-        message = data.get('message')
-        result = send_message_action({'platform': platform, 'message': message})
-        await sio.emit('status', {'msg': 'Message sent'})
+        platform = data.get('platform', 'whatsapp')
+        message = data.get('message', '')
+        receiver = data.get('receiver', '')
+
+        if not receiver:
+            matches = [c for c in contacts_manager.list_contacts() if platform in c.get('channels', {})]
+            if len(matches) == 1:
+                receiver = matches[0]['channels'][platform]
+            elif not matches:
+                await sio.emit('status', {'msg': f"No saved contact for {platform}. Add one in Contacts first."}, room=sid)
+                return
+            else:
+                await sio.emit('status', {'msg': f"Multiple {platform} contacts found. Please specify a recipient."}, room=sid)
+                return
+
+        result = send_message_action({'receiver': receiver, 'message_text': message, 'platform': platform})
+        await sio.emit('status', {'msg': result}, room=sid)
     except Exception as e:
         print(f"Error sending message: {e}")
+        await sio.emit('status', {'msg': f"Error sending message: {e}"}, room=sid)
 
 @sio.event
 async def get_game_library(sid):
