@@ -150,18 +150,54 @@ class MemoryManager:
             # Machine-readable index for later search/retrieval
             self._append_jsonl(self.index_file, entry)
 
+    @staticmethod
+    def _normalize_confidence(value) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 1.0
+        return max(0.0, min(1.0, parsed))
+
+    @staticmethod
+    def _normalize_importance(value) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return 0.5
+        return max(0.0, min(1.0, parsed))
+
+    @staticmethod
+    def _fact_score(record: dict) -> float:
+        timestamp = record.get("timestamp")
+        age_days = 0.0
+        if timestamp:
+            try:
+                age_days = max(0.0, (datetime.now() - MemoryManager._parse_timestamp(timestamp)).total_seconds() / 86400.0)
+            except Exception:
+                age_days = 0.0
+        recency = 1.0 / (1.0 + age_days / 365.0)
+        confidence = MemoryManager._normalize_confidence(record.get("confidence", 1.0))
+        importance = MemoryManager._normalize_importance(record.get("importance", 0.5))
+        return (importance * 3.0) + (confidence * 2.0) + (recency * 2.0)
+
     def save_facts(self, facts: list, source: str = "", project: str = None):
         """Append facts and supersede older values for the same subject."""
         candidates = []
         for item in facts:
             if isinstance(item, str):
                 fact_text = item.strip()
-                candidate = {"subject": self._subject_from_text(fact_text), "value": fact_text}
+                candidate = {
+                    "subject": self._subject_from_text(fact_text),
+                    "value": fact_text,
+                    "confidence": 1.0,
+                    "importance": 0.5,
+                }
             elif isinstance(item, dict):
                 candidate = {
                     "subject": str(item.get("subject", "")).strip().lower(),
                     "value": str(item.get("value", "")).strip(),
-                    "confidence": item.get("confidence", 1.0),
+                    "confidence": self._normalize_confidence(item.get("confidence", 1.0)),
+                    "importance": self._normalize_importance(item.get("importance", 0.5)),
                 }
             else:
                 continue
@@ -186,6 +222,10 @@ class MemoryManager:
                                     "value": record.get("fact", ""),
                                     "status": "active",
                                 }
+                            if "importance" not in record:
+                                record["importance"] = self._normalize_importance(record.get("confidence", 0.5))
+                            if "confidence" not in record:
+                                record["confidence"] = 1.0
                             records.append(record)
                         except json.JSONDecodeError:
                             continue
@@ -198,6 +238,14 @@ class MemoryManager:
                     if current and current.get("value", "").strip().lower() == value.lower():
                         continue
                     if current:
+                        current_score = self._fact_score(current)
+                        candidate_score = self._fact_score({
+                            "timestamp": timestamp,
+                            "confidence": candidate["confidence"],
+                            "importance": candidate["importance"],
+                        })
+                        if current_score >= candidate_score:
+                            continue
                         current["status"] = "superseded"
                         current["superseded_at"] = timestamp
                     record = {
@@ -206,6 +254,7 @@ class MemoryManager:
                         "value": value,
                         "fact": value,
                         "confidence": candidate.get("confidence", 1.0),
+                        "importance": candidate.get("importance", 0.5),
                         "status": "active",
                         "source": source,
                         "project": project,
@@ -238,18 +287,25 @@ class MemoryManager:
         )
 
     def get_facts(self, limit: int = 100, active_only: bool = True):
-        """Returns durable facts, optionally excluding superseded records."""
+        """Returns durable facts ranked by importance, confidence, and recency."""
         if not self.facts_file.exists():
             return []
 
         records_by_subject = {}
         for record in self._read_jsonl(self.facts_file):
             subject = record.get("subject") or self._subject_from_text(record.get("fact", ""))
-            records_by_subject[subject] = record
+            if subject not in records_by_subject:
+                records_by_subject[subject] = record
+            else:
+                incumbent = records_by_subject[subject]
+                if self._fact_score(record) >= self._fact_score(incumbent):
+                    records_by_subject[subject] = record
+
         facts = list(records_by_subject.values())
         if active_only:
             facts = [record for record in facts if record.get("status", "active") == "active"]
-        return facts[-limit:]
+        facts = sorted(facts, key=self._fact_score, reverse=True)
+        return facts[:limit]
 
     def list_transcript_files(self):
         """Returns all daily transcript filenames, oldest first."""
@@ -297,16 +353,78 @@ class MemoryManager:
                     "subject": fact.get("subject", ""),
                     "value": fact.get("value", fact.get("fact", "")),
                     "confidence": fact.get("confidence", 1.0),
+                    "importance": fact.get("importance", self._normalize_importance(fact.get("confidence", 0.5))),
                 }
                 for fact in facts
             ],
             "user_summary": user_summary[:5000],
+            "user_profile": self.learn_user_profile(),
         }
         summaries = project_summaries if project_summaries is not None else self.get_project_summaries()
         with self._lock, self._file_lock():
             self._atomic_write_json(self.profile_file, profile)
             self._atomic_write_json(self.project_summaries_file, summaries)
         return profile
+
+    def learn_user_profile(self) -> dict:
+        """Derive a compact profile from the strongest durable facts."""
+        facts = self.get_facts(limit=50)
+        profile = {"facts": {}}
+        for fact in facts:
+            subject = str(fact.get("subject", "")).strip()
+            if not subject:
+                continue
+            profile["facts"][subject] = {
+                "value": fact.get("value", fact.get("fact", "")),
+                "confidence": self._normalize_confidence(fact.get("confidence", 1.0)),
+                "importance": self._normalize_importance(fact.get("importance", 0.5)),
+                "updated_at": fact.get("timestamp"),
+            }
+        return profile
+
+    def compact_low_value_facts(self, max_facts: int = 50, stale_days: int = 90, min_importance: float = 0.25) -> dict:
+        """Remove stale facts that are low value and no longer useful."""
+        if not self.facts_file.exists():
+            return {"removed_count": 0, "remaining_count": 0}
+
+        records = self._read_jsonl(self.facts_file)
+        active_records = [record for record in records if record.get("status", "active") == "active"]
+        if not active_records:
+            return {"removed_count": 0, "remaining_count": 0}
+
+        active_records.sort(key=self._fact_score, reverse=True)
+        keep = []
+        remove_count = 0
+        for record in active_records:
+            age_days = 0.0
+            timestamp = record.get("timestamp")
+            if timestamp:
+                age_days = max(0.0, (datetime.now() - self._parse_timestamp(timestamp)).total_seconds() / 86400.0)
+            importance = self._normalize_importance(record.get("importance", 0.5))
+            if age_days > stale_days and importance < min_importance:
+                remove_count += 1
+                record["status"] = "superseded"
+                record["superseded_at"] = datetime.now().isoformat(timespec="seconds")
+                continue
+            keep.append(record)
+
+        if len(keep) > max_facts:
+            # Trim the weakest facts while preserving strongest ones.
+            for record in sorted(keep[max_facts:], key=self._fact_score):
+                record["status"] = "superseded"
+                record["superseded_at"] = datetime.now().isoformat(timespec="seconds")
+                remove_count += 1
+            keep = keep[:max_facts]
+
+        with self._lock, self._file_lock():
+            with open(self.facts_file, "w", encoding="utf-8", newline="") as f:
+                for record in records:
+                    if record.get("status") == "superseded" and record in active_records:
+                        record["status"] = "superseded"
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    self._flush_and_sync(f)
+
+        return {"removed_count": remove_count, "remaining_count": len(keep)}
 
     def get_compact_context(self, recent_limit: int = 20) -> str:
         """Return compact profile plus a small raw tail for session startup."""

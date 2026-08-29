@@ -57,6 +57,8 @@ from actions import file_processor as file_processor_module
 from actions import background_monitor as background_monitor_module
 from actions import self_maintenance as self_maintenance_module
 from actions import powershell_command as powershell_command_module
+from actions import git_workflow as git_workflow_module
+from actions import agent_dispatcher as agent_dispatcher_module
 from actions.proactive import ProactiveEngine
 from memory.memory_manager import load_memory as load_legacy_memory
 from contacts_manager import ContactsManager
@@ -945,7 +947,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -1526,6 +1528,28 @@ class AudioLoop:
                                     )
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "git_workflow":
+                                    action = fc.args.get("action", "status")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'git_workflow' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    result_str = await asyncio.to_thread(git_workflow_module.git_workflow, params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "deploy_agent":
+                                    action = fc.args.get("action", "deploy")
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'deploy_agent' action='{action}'")
+                                    params = {k: v for k, v in fc.args.items()}
+                                    # Deploying/polling/listing/cancelling agents is instantaneous (thread-based agents
+                                    # run independently), so this never blocks the tool-call loop.
+                                    result = agent_dispatcher_module.agent_dispatcher_action(params)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}
                                     )
                                     function_responses.append(function_response)
 

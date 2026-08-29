@@ -283,6 +283,22 @@ self_maintenance_tool = {
     }
 }
 
+git_workflow_tool = {
+    "name": "git_workflow",
+    "description": "Inspects git status, creates or switches branches, shows diffs, commits staged or all changes, and checks for obvious regressions. Use when the user asks Friday to manage the repository, review changes, or prepare a branch/commit.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: status, create_branch, checkout_branch, diff, review_diff, commit, regression_check."},
+            "repo_path": {"type": "STRING", "description": "Optional repo path. Defaults to the current workspace."},
+            "branch_name": {"type": "STRING", "description": "Branch name for create_branch or checkout_branch."},
+            "message": {"type": "STRING", "description": "Commit message for commit actions."},
+            "max_chars": {"type": "NUMBER", "description": "Maximum characters to return for review_diff."}
+        },
+        "required": ["action"]
+    }
+}
+
 run_powershell_command_tool = {
     "name": "run_powershell_command",
     "description": "Executes an arbitrary PowerShell command on this machine and returns stdout/stderr. Use only when the user explicitly asks Friday to run a shell command or PowerShell script.",
@@ -294,6 +310,22 @@ run_powershell_command_tool = {
             "timeout": {"type": "NUMBER", "description": "Timeout in seconds. Defaults to 120."}
         },
         "required": ["command"]
+    }
+}
+
+deploy_agent_tool = {
+    "name": "deploy_agent",
+    "description": "Deploys an independent background agent to handle a long-running task (e.g. repo repair: inspect, run targeted checks, verify, summarize) so Friday never hangs waiting on it. Use 'deploy' to start an agent, 'status' to poll one by agent_id, 'list' to see all deployed agents, and 'cancel' to stop one early.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "action": {"type": "STRING", "description": "One of: deploy, status, list, cancel."},
+            "agent_type": {"type": "STRING", "description": "Agent to deploy. Currently supported: repo_repair."},
+            "goal": {"type": "STRING", "description": "High-level goal for the deployed agent, e.g. 'clean up this repo and fix failing tests'."},
+            "repo_path": {"type": "STRING", "description": "Repository path for the agent to operate on. Defaults to the current workspace."},
+            "agent_id": {"type": "STRING", "description": "Agent id for status or cancel actions."}
+        },
+        "required": ["action"]
     }
 }
 
@@ -624,7 +656,9 @@ tools_list = [{"function_declarations": [
     manage_uploads_tool,
     cancel_current_task_tool,
     self_maintenance_tool,
+    git_workflow_tool,
     run_powershell_command_tool,
+    deploy_agent_tool,
     mute_alert_category_tool,
     get_weather_tool,
     set_reminder_tool,
