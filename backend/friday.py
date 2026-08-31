@@ -94,7 +94,11 @@ config = types.LiveConnectConfig(
         "You have a witty and charming personality. "
         "Your creator is Sinegugu, and you address him as 'Sir'. "
         "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
-        "You have a fun personality.",
+        "You have a fun personality. "
+        "Before ever telling the user you don't know a personal detail about them (name, relationships, family, "
+        "job, preferences, past decisions, or anything they may have told you in a previous conversation), you must "
+        "first silently call the search_memory tool with relevant keywords to check your long-term memory. Only say "
+        "you don't know after that search comes back empty. Never claim you have no information without searching first.",
     tools=tools,
     speech_config=types.SpeechConfig(
         voice_config=types.VoiceConfig(
@@ -1944,15 +1948,17 @@ class AudioLoop:
                     else:
                         print(f"[FRIDAY DEBUG] [RECONNECT] Connection restored.")
                         # Restore Context (global memory, same source used on fresh startup)
-                        print(f"[FRIDAY DEBUG] [RECONNECT] Fetching recent chat history to restore context...")
-                        history = self.memory_manager.get_recent_messages(limit=10)
-                        
-                        context_msg = "System Notification: Connection was lost and just re-established. Here is the recent chat history to help you resume seamlessly:\n\n"
-                        for entry in history:
-                            sender = entry.get('sender', 'Unknown')
-                            text = entry.get('text', '')
-                            context_msg += f"[{sender}]: {text}\n"
-                        
+                        # Each reconnect starts a brand-new Live session with empty context, so
+                        # durable facts (name, relationships, preferences, etc.) must be resent
+                        # here too, not just the raw recent chat tail - otherwise they silently
+                        # fall out of context after any disconnect/reconnect cycle.
+                        print(f"[FRIDAY DEBUG] [RECONNECT] Fetching compact long-term memory and recent chat history to restore context...")
+                        compact_context = self.memory_manager.get_compact_context(recent_limit=10)
+
+                        context_msg = "System Notification: Connection was lost and just re-established. Load this compact long-term memory silently and use it when relevant, then resume the conversation seamlessly:\n\n"
+                        if compact_context != "Compact long-term memory:\n":
+                            context_msg += compact_context + "\n\n"
+
                         context_msg += "\nPlease acknowledge the reconnection to the user (e.g. 'I lost connection for a moment, but I'm back...') and resume what you were doing."
                         
                         print(f"[FRIDAY DEBUG] [RECONNECT] Sending restoration context to model...")
@@ -1981,6 +1987,13 @@ class AudioLoop:
             except Exception as e:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
                 print(f"[FRIDAY DEBUG] [ERR] Connection Error: {e}")
+                
+                # Notify user of connection error
+                try:
+                    if hasattr(self, 'session') and self.session:
+                        await self.session.send(input=f"System Notification: Connection error occurred. Reconnecting... Error: {str(e)}", end_of_turn=True)
+                except Exception as notify_error:
+                    print(f"[FRIDAY DEBUG] [ERR] Failed to notify user of error: {notify_error}")
                 
                 if self.stop_event.is_set():
                     break

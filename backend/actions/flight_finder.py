@@ -7,7 +7,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from config import is_windows, is_mac, is_linux
+from config import is_windows, is_mac, is_linux, get_api_key
 
 def _get_base_dir() -> Path:
     if getattr(sys, "frozen", False):
@@ -17,10 +17,6 @@ def _get_base_dir() -> Path:
 
 BASE_DIR        = _get_base_dir()
 API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
-
-
-def _get_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "")
 
 _MONTH_MAP: dict[str, int] = {
 
@@ -63,7 +59,7 @@ def _parse_date(raw: str) -> str:
 
     try:
         from google import genai as _genai
-        _client  = _genai.Client(api_key=_get_api_key())
+        _client  = _genai.Client(api_key=get_api_key())
         response = _client.models.generate_content(
             model="models/gemini-3.5-flash-lite",
             contents=(
@@ -157,7 +153,7 @@ def _parse_flights_with_gemini(
     from google import genai as _genai
     from google.genai import types
 
-    _client = _genai.Client(api_key=_get_api_key())
+    _client = _genai.Client(api_key=get_api_key())
     prompt  = (
         f"Extract flight options from {origin} to {destination} on {date} "
         f"from this Google Flights page text:\n\n{raw_text[:12000]}\n\n"

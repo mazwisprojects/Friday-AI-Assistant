@@ -25,13 +25,15 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-def _get_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "")
+# Import centralized config
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import get_api_key
 
 
 def _gemini_client():
     from google import genai
-    _c = genai.Client(api_key=_get_api_key())
+    _c = genai.Client(api_key=get_api_key())
 
     class _W:
         def generate_content(self, contents):

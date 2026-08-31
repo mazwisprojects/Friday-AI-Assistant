@@ -6,6 +6,9 @@ import re
 import time
 from pathlib import Path
 
+# Import centralized config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import get_api_key
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -20,13 +23,10 @@ MAX_FIX_ATTEMPTS = 5
 MODEL_PLANNER    = "gemini-2.5-flash"
 MODEL_WRITER     = "gemini-2.5-flash"
 
-def _get_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "")
-
 
 def _get_model(model_name: str):
     from google import genai
-    _c = genai.Client(api_key=_get_api_key())
+    _c = genai.Client(api_key=get_api_key())
 
     class _W:
         def generate_content(self, contents):

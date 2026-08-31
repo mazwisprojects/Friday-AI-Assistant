@@ -29,14 +29,9 @@ if _OS == "Windows":
 else:
     _WIN_HIDE: dict = {}
 
-
-def _get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).resolve().parent.parent
-
-def _get_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "")
+# Import centralized config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import get_api_key
 
 def _get_macos_wifi_interface() -> str:
     try:
@@ -60,10 +55,10 @@ def volume_up():
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) + 10)"],
-            capture_output=True)
+            capture_output=True, timeout=5)
     else:
         subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "+10%"],
-            capture_output=True)
+            capture_output=True, timeout=5)
 
 def volume_down():
     if _OS == "Windows":
@@ -71,20 +66,20 @@ def volume_down():
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             "set volume output volume (output volume of (get volume settings) - 10)"],
-            capture_output=True)
+            capture_output=True, timeout=5)
     else:
         subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", "-10%"],
-            capture_output=True)
+            capture_output=True, timeout=5)
 
 def volume_mute():
     if _OS == "Windows":
         pyautogui.press("volumemute")
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", "set volume with output muted"],
-            capture_output=True)
+            capture_output=True, timeout=5)
     else:
         subprocess.run(["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
-            capture_output=True)
+            capture_output=True, timeout=5)
 
 def volume_set(value: int):
     value = max(0, min(100, int(value)))
@@ -106,11 +101,11 @@ def volume_set(value: int):
             pyautogui.press("volumemute")
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e", f"set volume output volume {value}"],
-            capture_output=True)
+            capture_output=True, timeout=5)
         return
     else:
         subprocess.run(["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{value}%"],
-            capture_output=True)
+            capture_output=True, timeout=5)
         return
 
 def get_current_volume() -> int | None:
@@ -153,18 +148,18 @@ def brightness_up():
     if _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to key code 144'],
-            capture_output=True)
+            capture_output=True, timeout=5)
     elif _OS == "Linux":
         if subprocess.run(["which", "brightnessctl"],
-                capture_output=True).returncode == 0:
-            subprocess.run(["brightnessctl", "set", "+10%"], capture_output=True)
+                capture_output=True, timeout=5).returncode == 0:
+            subprocess.run(["brightnessctl", "set", "+10%"], capture_output=True, timeout=5)
         else:
             subprocess.run(
                 'xrandr --output $(xrandr | grep " connected" | head -1 | cut -d " " -f1)'
                 ' --brightness $(python3 -c "import subprocess; '
                 'b=float(subprocess.check_output([\"xrandr\",\"--verbose\"]).decode()'
                 '.split(\"Brightness:\")[1].split()[0]); print(min(1.0,b+0.1))")',
-                shell=True, capture_output=True
+                shell=True, capture_output=True, timeout=10
             )
     else:
         try:
@@ -182,18 +177,18 @@ def brightness_down():
     if _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to key code 145'],
-            capture_output=True)
+            capture_output=True, timeout=5)
     elif _OS == "Linux":
         if subprocess.run(["which", "brightnessctl"],
-                capture_output=True).returncode == 0:
-            subprocess.run(["brightnessctl", "set", "10%-"], capture_output=True)
+                capture_output=True, timeout=5).returncode == 0:
+            subprocess.run(["brightnessctl", "set", "10%-"], capture_output=True, timeout=5)
         else:
             subprocess.run(
                 'xrandr --output $(xrandr | grep " connected" | head -1 | cut -d " " -f1)'
                 ' --brightness $(python3 -c "import subprocess; '
                 'b=float(subprocess.check_output([\"xrandr\",\"--verbose\"]).decode()'
                 '.split(\"Brightness:\")[1].split()[0]); print(max(0.1,b-0.1))")',
-                shell=True, capture_output=True
+                shell=True, capture_output=True, timeout=10
             )
     else:
         try:
@@ -228,13 +223,13 @@ def maximize_window():
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to keystroke "f" '
             'using {control down, command down}'],
-            capture_output=True)
+            capture_output=True, timeout=5)
     elif _OS == "Windows":
         pyautogui.hotkey("win", "up")
     else:
         try:
             subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"],
-                capture_output=True)
+                capture_output=True, timeout=5)
         except Exception:
             pyautogui.hotkey("super", "up")
 
@@ -251,7 +246,7 @@ def snap_left():
     else:  # Linux
         try:
             subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", "0,0,0,960,1080"],
-                capture_output=True)
+                capture_output=True, timeout=5)
         except Exception:
             pass
 
@@ -267,7 +262,7 @@ def snap_right():
     else:  # Linux
         try:
             subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-e", "0,960,0,960,1080"],
-                capture_output=True)
+                capture_output=True, timeout=5)
         except Exception:
             pass
 
@@ -287,7 +282,7 @@ def open_task_manager():
         subprocess.Popen(["open", "-a", "Activity Monitor"])
     else:
         for cmd in [["gnome-system-monitor"], ["xfce4-taskmanager"], ["htop"]]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+            if subprocess.run(["which", cmd[0]], capture_output=True, timeout=5).returncode == 0:
                 subprocess.Popen(cmd)
                 break
 
@@ -415,7 +410,7 @@ def take_screenshot():
         pyautogui.hotkey("command", "shift", "3")
     else:
         for cmd in [["scrot"], ["gnome-screenshot"], ["import", "-window", "root", "screenshot.png"]]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+            if subprocess.run(["which", cmd[0]], capture_output=True, timeout=5).returncode == 0:
                 subprocess.Popen(cmd)
                 return
         pyautogui.hotkey("ctrl", "print_screen")
@@ -431,8 +426,8 @@ def lock_screen():
             ["xdg-screensaver", "lock"],
             ["loginctl", "lock-session"],
         ]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
-                subprocess.run(cmd, capture_output=True)
+            if subprocess.run(["which", cmd[0]], capture_output=True, timeout=5).returncode == 0:
+                subprocess.run(cmd, capture_output=True, timeout=5)
                 return
 
 def open_system_settings():
@@ -442,7 +437,7 @@ def open_system_settings():
         subprocess.Popen(["open", "-a", "System Preferences"])
     else:
         for cmd in [["gnome-control-center"], ["xfce4-settings-manager"], ["kcmshell5"]]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+            if subprocess.run(["which", cmd[0]], capture_output=True, timeout=5).returncode == 0:
                 subprocess.Popen(cmd)
                 return
 
@@ -453,7 +448,7 @@ def open_file_explorer():
         subprocess.Popen(["open", str(Path.home())])
     else:
         for cmd in [["nautilus"], ["thunar"], ["dolphin"], ["nemo"]]:
-            if subprocess.run(["which", cmd[0]], capture_output=True).returncode == 0:
+            if subprocess.run(["which", cmd[0]], capture_output=True, timeout=5).returncode == 0:
                 subprocess.Popen(cmd)
                 return
         subprocess.Popen(["xdg-open", str(Path.home())])
@@ -466,9 +461,9 @@ def sleep_display():
         except Exception as e:
             print(f"[Settings] sleep_display failed: {e}")
     elif _OS == "Darwin":
-        subprocess.run(["pmset", "displaysleepnow"], capture_output=True)
+        subprocess.run(["pmset", "displaysleepnow"], capture_output=True, timeout=5)
     else:
-        subprocess.run(["xset", "dpms", "force", "off"], capture_output=True)
+        subprocess.run(["xset", "dpms", "force", "off"], capture_output=True, timeout=5)
 
 def open_run():
     if _OS == "Windows":
@@ -479,7 +474,7 @@ def dark_mode():
         subprocess.run(["osascript", "-e",
             'tell app "System Events" to tell appearance preferences '
             'to set dark mode to not dark mode'],
-            capture_output=True)
+            capture_output=True, timeout=5)
     elif _OS == "Windows":
         try:
             import winreg
@@ -495,13 +490,13 @@ def dark_mode():
         try:
             result = subprocess.run(
                 ["gsettings", "get", "org.gnome.desktop.interface", "color-scheme"],
-                capture_output=True, text=True
+                capture_output=True, text=True, timeout=5
             )
             current = result.stdout.strip()
             new_scheme = "'default'" if "dark" in current else "'prefer-dark'"
             subprocess.run(
                 ["gsettings", "set", "org.gnome.desktop.interface", "color-scheme", new_scheme],
-                capture_output=True
+                capture_output=True, timeout=5
             )
         except Exception as e:
             print(f"[Settings] dark_mode Linux failed: {e}")
@@ -511,11 +506,11 @@ def toggle_wifi():
         iface = _get_macos_wifi_interface()
         result = subprocess.run(
             ["networksetup", "-getairportpower", iface],
-            capture_output=True, text=True
+            capture_output=True, text=True, timeout=5
         )
         state = "off" if "On" in result.stdout else "on"
         subprocess.run(["networksetup", "-setairportpower", iface, state],
-            capture_output=True)
+            capture_output=True, timeout=5)
     elif _OS == "Windows":
         try:
             subprocess.run(
@@ -529,31 +524,31 @@ def toggle_wifi():
             print(f"[Settings] toggle_wifi Windows failed: {e}")
     else:
         try:
-            result = subprocess.run(["nmcli", "radio", "wifi"], capture_output=True, text=True)
+            result = subprocess.run(["nmcli", "radio", "wifi"], capture_output=True, text=True, timeout=5)
             state  = "off" if "enabled" in result.stdout else "on"
-            subprocess.run(["nmcli", "radio", "wifi", state], capture_output=True)
+            subprocess.run(["nmcli", "radio", "wifi", state], capture_output=True, timeout=5)
         except Exception as e:
             print(f"[Settings] toggle_wifi Linux failed: {e}")
 
 def restart_computer():
     if _OS == "Windows":
-        subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True, **_WIN_HIDE)
+        subprocess.run(["shutdown", "/r", "/t", "10"], capture_output=True, timeout=5, **_WIN_HIDE)
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to restart'],
-            capture_output=True)
+            capture_output=True, timeout=5)
     else:
-        subprocess.run(["systemctl", "reboot"], capture_output=True)
+        subprocess.run(["systemctl", "reboot"], capture_output=True, timeout=5)
 
 def shutdown_computer():
     if _OS == "Windows":
-        subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True)
+        subprocess.run(["shutdown", "/s", "/t", "10"], capture_output=True, timeout=5, **_WIN_HIDE)
     elif _OS == "Darwin":
         subprocess.run(["osascript", "-e",
             'tell application "System Events" to shut down'],
-            capture_output=True)
+            capture_output=True, timeout=5)
     else:
-        subprocess.run(["systemctl", "poweroff"], capture_output=True)
+        subprocess.run(["systemctl", "poweroff"], capture_output=True, timeout=5)
 
 ACTION_MAP: dict[str, callable] = {
     "volume_up":           volume_up,
@@ -624,7 +619,7 @@ _DANGEROUS_ACTIONS = {"restart", "shutdown"}
 def _detect_action(description: str) -> dict:
 
     from google import genai as _genai
-    _client = _genai.Client(api_key=_get_api_key())
+    _client = _genai.Client(api_key=get_api_key())
 
     available = ", ".join(sorted(ACTION_MAP.keys())) + \
                 ", volume_set, type_text, press_key, reload_n"

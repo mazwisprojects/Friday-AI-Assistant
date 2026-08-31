@@ -1,5 +1,8 @@
 import os
+import sys
 import platform
+import json
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -29,3 +32,32 @@ def is_mac() -> bool:
 
 def is_linux() -> bool:
     return _SYSTEM == "Linux"
+
+
+def get_api_key() -> str:
+    """Get the Gemini API key from environment variables."""
+    return os.getenv("GEMINI_API_KEY", "")
+
+
+def get_config_path() -> Path:
+    """Get the path to the config/api_keys.json file."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / "config" / "api_keys.json"
+    return Path(__file__).resolve().parent.parent / "config" / "api_keys.json"
+
+
+def load_config() -> dict:
+    """Load configuration from api_keys.json file."""
+    try:
+        config_path = get_config_path()
+        if config_path.exists():
+            return json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def get_os_system() -> str:
+    """Get the OS system from config or detect from platform."""
+    config = load_config()
+    return config.get("os_system", get_os()).lower()

@@ -6,6 +6,9 @@ import re
 import time
 from pathlib import Path
 
+# Import centralized config
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import get_api_key
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -19,13 +22,9 @@ MAX_BUILD_ATTEMPTS = 3
 GEMINI_MODEL       = "gemini-2.5-flash"
 
 
-def _get_api_key() -> str:
-    return os.getenv("GEMINI_API_KEY", "")
-
-
 def _get_gemini(model: str = GEMINI_MODEL):
     from google import genai
-    _c = genai.Client(api_key=_get_api_key())
+    _c = genai.Client(api_key=get_api_key())
 
     class _W:
         def generate_content(self, contents):
@@ -459,7 +458,7 @@ def _screen_debug_action(description, file_path, player, speak=None) -> str:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=_get_api_key())
+        client = genai.Client(api_key=get_api_key())
 
         image_bytes  = screenshot_path.read_bytes()
         image_base64 = _image_to_base64(screenshot_path)

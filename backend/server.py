@@ -30,8 +30,15 @@ from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 
-# Create a Socket.IO server
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+# Create a Socket.IO server with restricted CORS
+# Allow localhost for development and Electron app origins
+allowed_origins = [
+    'http://localhost:5173',  # Vite dev server
+    'http://127.0.0.1:5173',  # Alternative localhost
+    'capacitor://localhost',  # Capacitor/Electron
+    'ionic://localhost',      # Ionic
+]
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=allowed_origins)
 app = FastAPI()
 app_socketio = socketio.ASGIApp(sio, app)
 
@@ -256,6 +263,8 @@ async def start_audio(sid, data=None):
         if authenticator and not authenticator.authenticated:
             print("Blocked start_audio: Not authenticated.")
             await sio.emit('error', {'msg': 'Authentication Required'})
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
 
     print("Starting Audio Loop...")
@@ -273,6 +282,7 @@ async def start_audio(sid, data=None):
     if audio_loop:
         if loop_task and (loop_task.done() or loop_task.cancelled()):
              print("Audio loop task appeared finished/cancelled. Clearing and restarting...")
+             audio_loop.cancel_pending_confirmations()
              audio_loop = None
              loop_task = None
         else:
@@ -545,6 +555,8 @@ async def user_input(sid, data):
     print(f"[SERVER DEBUG] User input received: '{text}'")
     
     if not await ensure_audio_ready(sid):
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
 
     if text:
@@ -596,6 +608,8 @@ async def save_memory(sid, data):
         messages = data.get('messages', [])
         if not messages:
             print("No messages to save.")
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
 
         # Ensure directory exists
@@ -636,6 +650,8 @@ async def upload_memory(sid, data):
         memory_text = data.get('memory', '')
         if not memory_text:
             print("No memory data provided.")
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
 
         if not audio_loop:
@@ -666,6 +682,8 @@ async def process_uploaded_file(sid, data):
         encoded_file = data.get('data', '')
         if not encoded_file:
             await sio.emit('file_processing_result', {'error': 'No file data provided.'}, room=sid)
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
 
         file_bytes = base64.b64decode(encoded_file, validate=True)
@@ -716,6 +734,8 @@ async def upload_file_for_awareness(sid, data):
         encoded_file = data.get('data', '')
         if not encoded_file:
             await sio.emit('file_processing_result', {'error': 'No file data provided.'}, room=sid)
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
 
         file_bytes = base64.b64decode(encoded_file, validate=True)
@@ -793,6 +813,8 @@ async def iterate_cad(sid, data):
     
     if not audio_loop or not audio_loop.cad_agent:
         await sio.emit('error', {'msg': "CAD Agent not available"})
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
 
     try:
@@ -830,6 +852,8 @@ async def generate_cad(sid, data):
     
     if not audio_loop or not audio_loop.cad_agent:
         await sio.emit('error', {'msg': "CAD Agent not available"})
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
 
     try:
@@ -868,6 +892,8 @@ async def prompt_web_agent(sid, data):
     
     if not audio_loop or not audio_loop.web_agent:
         await sio.emit('error', {'msg': "Web Agent not available"})
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
 
     try:
@@ -911,10 +937,14 @@ async def discover_printers(sid):
                 })
             print(f"[SERVER] Returning {len(printer_list)} saved printers (audio_loop not ready)")
             await sio.emit('printer_list', printer_list)
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
         else:
             await sio.emit('printer_list', [])
             await sio.emit('status', {'msg': "Connect to F.R.I.D.A.Y to enable printer discovery"})
+            if audio_loop:
+                audio_loop.cancel_pending_confirmations()
             return
         
     try:
@@ -944,6 +974,8 @@ async def add_printer(sid, data):
     
     if not audio_loop or not audio_loop.printer_agent:
         await sio.emit('error', {'msg': "Printer Agent not available"})
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
         
     try:
@@ -1009,6 +1041,8 @@ async def print_stl(sid, data):
     
     if not audio_loop or not audio_loop.printer_agent:
         await sio.emit('error', {'msg': "Printer Agent not available"})
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
         
     try:
@@ -1018,6 +1052,8 @@ async def print_stl(sid, data):
         
         if not printer_name:
              await sio.emit('error', {'msg': "No printer specified"})
+             if audio_loop:
+                 audio_loop.cancel_pending_confirmations()
              return
              
         await sio.emit('status', {'msg': f"Preparing print for {printer_name}..."})
@@ -1080,6 +1116,8 @@ async def get_slicer_profiles(sid):
     print("Received get_slicer_profiles request")
     if not audio_loop or not audio_loop.printer_agent:
         await sio.emit('error', {'msg': "Printer Agent not available"})
+        if audio_loop:
+            audio_loop.cancel_pending_confirmations()
         return
     
     try:
@@ -1464,9 +1502,13 @@ async def send_message(sid, data):
                 receiver = matches[0]['channels'][platform]
             elif not matches:
                 await sio.emit('status', {'msg': f"No saved contact for {platform}. Add one in Contacts first."}, room=sid)
+                if audio_loop:
+                    audio_loop.cancel_pending_confirmations()
                 return
             else:
                 await sio.emit('status', {'msg': f"Multiple {platform} contacts found. Please specify a recipient."}, room=sid)
+                if audio_loop:
+                    audio_loop.cancel_pending_confirmations()
                 return
 
         result = send_message_action({'receiver': receiver, 'message_text': message, 'platform': platform})
