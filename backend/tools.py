@@ -566,6 +566,19 @@ manage_monitors_tool = {
     }
 }
 
+run_routine_tool = {
+    "name": "run_routine",
+    "description": "Runs a predefined Jarvis workflow routine such as morning briefing, focus mode, work summary, or a dev assistant plan.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "name": {"type": "STRING", "description": "Routine name: morning_briefing, focus_mode, work_summary, or dev_assistant."},
+            "payload": {"type": "OBJECT", "description": "Optional routine payload with context, tasks, system health, repo, or issue details."}
+        },
+        "required": ["name"]
+    }
+}
+
 generate_cad_prototype_tool = {
     "name": "generate_cad_prototype",
     "description": "Generates a 3D wireframe prototype based on a user's description. Use this when the user asks to 'visualize', 'prototype', 'create a wireframe', or 'design' something in 3D.",
@@ -673,7 +686,8 @@ tools_list = [{"function_declarations": [
     find_flights_tool,
     game_updater_tool,
     process_file_tool,
-    manage_monitors_tool
+    manage_monitors_tool,
+    run_routine_tool
 ]}]
 
 

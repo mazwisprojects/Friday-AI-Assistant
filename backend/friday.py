@@ -26,6 +26,10 @@ if sys.version_info < (3, 11, 0):
     asyncio.TaskGroup = taskgroup.TaskGroup
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 from tools import (
     tools_list,
     generate_cad,
@@ -76,6 +80,11 @@ SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
+# Minimum gap between image inputs to the Gemini Live session.
+# The Live API requires image inputs to be at least 1 second apart, so
+# streaming webcam frames at this cadence is the supported "live video" mode.
+VIDEO_SEND_INTERVAL = 1.0
+
 MODEL = MAIN_GEMINI_MODEL
 DEFAULT_MODE = "camera"
 
@@ -115,6 +124,8 @@ from cad_agent import CadAgent
 from web_agent import WebAgent
 from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
+from agents.agent_supervisor import AgentSupervisor
+from agents.routine_manager import RoutineManager
 
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
@@ -172,6 +183,8 @@ class AudioLoop:
         self.web_agent = WebAgent()
         self.kasa_agent = kasa_agent if kasa_agent else KasaAgent()
         self.printer_agent = PrinterAgent()
+        self.supervisor = AgentSupervisor()
+        self.routine_manager = RoutineManager()
         self.system_monitor = system_monitor_module.SystemMonitor()
         self.proactive_engine = ProactiveEngine()
         self._last_user_speech = time.monotonic()
@@ -191,6 +204,10 @@ class AudioLoop:
 
         # Video buffering state
         self._latest_image_payload = None
+        # Live vision state (continuous webcam streaming to the Live session)
+        self.live_video_enabled = True  # Enable live video by default
+        self._last_video_sent_time = 0.0
+        self._last_sent_image_data = None
         # VAD State
         self._is_speaking = False
         self._silence_start_time = None
@@ -299,23 +316,16 @@ class AudioLoop:
         return None
 
     def start_action_plan(self, tool_name: str, args: dict):
-        plans = {
-            "desktop_control": ["Locate target desktop file", "Verify image format", "Request wallpaper confirmation", "Apply wallpaper"],
-            "process_file": ["Locate uploaded file", "Verify file type", "Process file", "Return result"],
-            "send_message": ["Locate contact", "Resolve messaging platform", "Request send confirmation", "Send message"],
-            "build_project": ["Plan project structure", "Generate project files", "Install dependencies", "Run or open project"],
-            "find_flights": ["Validate trip details", "Search flight results", "Parse available flights", "Return options"],
-            "browser_control": ["Prepare browser session", "Perform browser action", "Collect result", "Return result"],
-            "code_helper": ["Inspect code request", "Generate or modify code", "Run validation", "Return result"],
-            "game_updater": ["Inspect game platform", "Prepare update operation", "Run update or schedule", "Return result"],
-            "self_maintenance": ["Compile-check backend", "Run tests / build / install", "Collect errors and warnings", "Return report"],
-        }
-        steps = plans.get(tool_name)
+        plan = self.supervisor.plan_tool_call(tool_name, args)
+        steps = plan.get("steps", [])
         if not steps:
             return
         self._cancel_event.clear()
         self._plan_pending = False
-        self._active_plan = {"title": tool_name.replace("_", " ").upper(), "steps": [{"label": label, "status": "pending"} for label in steps]}
+        self._active_plan = {
+            "title": tool_name.replace("_", " ").upper(),
+            "steps": [{"label": step.get("name", "step"), "status": step.get("status", "pending")} for step in steps],
+        }
         self._update_plan_step(0, "active")
 
     def _update_plan_step(self, index: int, status: str):
@@ -486,6 +496,17 @@ class AudioLoop:
             result = await asyncio.to_thread(function, params)
             if self._cancel_event.is_set():
                 return
+
+            outcome = self.supervisor.record_execution(tool_name, result)
+            if not outcome["ok"]:
+                self.finish_action_plan(False)
+                if self.session:
+                    await self.session.send(
+                        input=f"System Notification: {tool_name} reported a failed result. Outcome:\n{result}",
+                        end_of_turn=True,
+                    )
+                return
+
             self.finish_action_plan(True)
             if self.session:
                 await self.session.send(
@@ -520,6 +541,9 @@ class AudioLoop:
         self.session = None
         self.audio_in_queue = None
         self.out_queue = None
+        # Forget any frame we already pushed to a (now dead) session so a
+        # reconnect always starts with a clean video dedup state.
+        self._last_sent_image_data = None
         
     def resolve_tool_confirmation(self, request_id, confirmed):
         print(f"[FRIDAY DEBUG] [RESOLVE] resolve_tool_confirmation called. ID: {request_id}, Confirmed: {confirmed}")
@@ -555,6 +579,57 @@ class AudioLoop:
         # Store as the designated "next frame to send"
         self._latest_image_payload = {"mime_type": "image/jpeg", "data": b64_data}
         # No event signal needed - listen_audio pulls it
+
+    def set_live_video(self, enabled: bool):
+        """Turn continuous webcam streaming to the Live session on or off."""
+        self.live_video_enabled = bool(enabled)
+        print(f"[FRIDAY DEBUG] [VIDEO] Live vision {'ENABLED' if self.live_video_enabled else 'DISABLED'}")
+        if not self.live_video_enabled:
+            # Forget what we already sent so a re-enable always starts fresh.
+            self._last_sent_image_data = None
+
+    def _should_send_video_frame(self, now: float) -> bool:
+        """Decide whether the latest webcam frame should be forwarded now.
+
+        Returns True only when the session is live, vision is enabled, a frame
+        is available, that frame is genuinely new, and enough time has elapsed
+        since the last send (Gemini Live allows at most ~1 image/second).
+        """
+        return (
+            self.session is not None
+            and self.live_video_enabled
+            and not self.paused
+            and self._latest_image_payload is not None
+            and self._latest_image_payload.get("data") != self._last_sent_image_data
+            and (now - self._last_video_sent_time) >= VIDEO_SEND_INTERVAL
+        )
+
+    async def _send_live_video(self):
+        """Continuously forward the user's webcam to the Live session.
+
+        The frontend already downscales and streams frames to the backend via
+        ``send_frame``; this task picks up the newest one and pushes it into
+        the Gemini Live session at the supported ~1 fps cadence, skipping
+        frames that are byte-identical to the last one sent.
+        """
+        while True:
+            if self.paused or not self.live_video_enabled or not self.session or self._latest_image_payload is None:
+                await asyncio.sleep(0.2)
+                continue
+
+            if not self._should_send_video_frame(time.monotonic()):
+                await asyncio.sleep(0.2)
+                continue
+
+            payload = self._latest_image_payload
+            try:
+                await self.session.send(input=payload, end_of_turn=False)
+                self._last_sent_image_data = payload.get("data")
+                self._last_video_sent_time = time.monotonic()
+                print(f"[FRIDAY DEBUG] [VIDEO] Live frame sent to model ({len(payload.get('data', ''))} b64 chars).")
+            except Exception as e:
+                print(f"[FRIDAY DEBUG] [ERR] Failed to send live video frame: {e}")
+                await asyncio.sleep(0.5)
 
     async def send_realtime(self):
         while True:
@@ -951,7 +1026,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "run_routine"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -1774,6 +1849,25 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "run_routine":
+                                    routine_name = fc.args.get("name", "")
+                                    payload = fc.args.get("payload", {})
+                                    if isinstance(payload, str):
+                                        try:
+                                            payload = json.loads(payload)
+                                        except json.JSONDecodeError:
+                                            payload = {}
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'run_routine' name='{routine_name}'")
+                                    try:
+                                        result = self.routine_manager.run_routine(routine_name, payload)
+                                        result_str = json.dumps(result, ensure_ascii=False)
+                                    except ValueError as exc:
+                                        result_str = json.dumps({"error": str(exc)}, ensure_ascii=False)
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
                         if not self._plan_pending:
                             self.finish_action_plan(True)
                         if function_responses:
@@ -1878,7 +1972,7 @@ class AudioLoop:
                     print(f"[FRIDAY DEBUG] [ERR] Failed to send system alert: {e}")
 
     async def proactive_loop(self):
-        """Periodically checks if enough silence has passed to let the model speak unprompted."""
+        """Periodically checks if Friday should speak unprompted based on silence, stall patterns, and system state."""
         while True:
             await asyncio.sleep(60)
             if not self.session or not self.proactive_engine.should_trigger(self._last_user_speech):
@@ -1887,10 +1981,29 @@ class AudioLoop:
                 alerts = await asyncio.to_thread(background_monitor_module.check_all)
                 memory = await asyncio.to_thread(load_legacy_memory)
                 monitors = await asyncio.to_thread(background_monitor_module.list_monitors)
-                prompt = self.proactive_engine.build_prompt(memory, monitors=monitors)
+                recent_turns = self.memory_manager.get_recent_messages(limit=10)
+                recent_text = [item.get("text", "") for item in recent_turns if item.get("text")]
+                system_status = await asyncio.to_thread(system_monitor_module.get_system_status)
+                missing_context = None
+                if self._active_plan and self._active_plan.get("steps"):
+                    for step in self._active_plan["steps"]:
+                        if step.get("status") == "active":
+                            missing_context = {"tool": self._active_plan.get("title", "action").lower(), "issue": "The current task may need more detail before continuing."}
+                            break
+
+                prompt = self.proactive_engine.build_prompt(
+                    memory,
+                    monitors=monitors,
+                    recent_turns=recent_text,
+                    system_status=system_status,
+                    missing_context=missing_context,
+                )
                 if alerts:
                     prompt += "\n\nNew monitor alerts:\n" + "\n".join(alerts)
-                print(f"[FRIDAY DEBUG] [PROACTIVE] Triggering unprompted message.")
+                if self.proactive_engine.detect_stall(recent_turns=recent_text) or self.proactive_engine.detect_system_overload(system_status):
+                    print(f"[FRIDAY DEBUG] [PROACTIVE] Triggering intervention for stalled work or overload.")
+                else:
+                    print(f"[FRIDAY DEBUG] [PROACTIVE] Triggering unprompted check-in.")
                 await self.session.send(input=prompt, end_of_turn=True)
                 self.proactive_engine.mark_triggered()
             except Exception as e:
@@ -1927,6 +2040,7 @@ class AudioLoop:
                     tg.create_task(self.monitor_system())
                     tg.create_task(self.proactive_loop())
                     tg.create_task(self.compact_memory())
+                    tg.create_task(self._send_live_video())
 
                     # Handle Startup vs Reconnect Logic
                     if not is_reconnect:
