@@ -6,6 +6,7 @@ F.R.I.D.A.Y is a Windows-focused desktop AI assistant built with Electron, React
 
 ### Core AI Capabilities
 - **Gemini Live voice:** streaming input/output audio, transcription, interruption handling, reconnect context, and text input with live video streaming
+- **Sounddevice audio:** low-latency microphone capture, speaker playback, device discovery, and PCM streaming without PyAudio
 - **Live camera vision:** continuous webcam streaming to Gemini Live for real-time scene awareness, "what am I looking at?" queries, and hands-free visual interaction
 - **Persistent memory:** project-scoped chat history remains in each project; global conversations are written to daily files under `long_term_memory/transcripts/`, indexed in `memory_index.jsonl`, and important facts are deduplicated in `facts.jsonl`
 - **Important facts:** Friday extracts durable identity, preference, relationship, project, routine, goal, decision, and constraint facts. It rejects passwords, API keys, tokens, credentials, and guesses
@@ -52,14 +53,22 @@ F.R.I.D.A.Y is a Windows-focused desktop AI assistant built with Electron, React
 - **Contact management:** persistent contact storage with multiple platforms per contact
 - **YouTube integration:** video playback, transcript summarization, trending videos, video info
 - **Flight search:** Google Flights integration for flight booking and comparison
+- **Google account integration:** OAuth connection for Gmail, Google Calendar, Google Contacts, and Google Drive
+- **Gmail tools:** unread/search queries, full thread reading, and draft creation
+- **Calendar tools:** list/search events, create/update/delete events, and recurring events in Johannesburg time
+- **Google Contacts tools:** paginated reads, local import, and bidirectional synchronization
+- **Google Drive tools:** list recent non-deleted Drive files
+- **Google sync:** refresh unread mail, upcoming events, contacts, and recent Drive files into a local cache
 
 ### Development & Productivity
 - **Code assistance:** AI-powered code generation, editing, explanation, optimization, and debugging
 - **Project building:** complete project scaffolding from natural language descriptions
 - **Git workflow:** git status, branch management, diff review, commit assistance, regression checking
-- **PowerShell execution:** run arbitrary PowerShell commands with timeout control
+- **PowerShell execution:** run explicitly requested PowerShell commands with timeout control
 - **Agent deployment:** background agents for long-running tasks (repo repair, etc.)
-- **Self-maintenance:** run tests, check for errors, build frontend, install dependencies
+- **Self-maintenance:** run tests, check for errors, build frontend, install dependencies, and track recurring tool failures
+- **Self-build:** compile, test, build, attempt dependency recovery, and report verified results
+- **Custom tool factory:** create, validate, smoke-test, register, execute, and track custom tools
 - **Game management:** Steam/Epic game installation, updates, download status monitoring
 
 ### File Processing
@@ -76,12 +85,14 @@ F.R.I.D.A.Y is a Windows-focused desktop AI assistant built with Electron, React
 - **Topic monitoring:** daily news updates for custom topics (crypto/financial blocked)
 - **Scheduled reminders:** OS-level reminder notifications for specific dates/times
 - **Weather integration:** weather search and reporting for any city/time period
+- **Live weather:** current conditions, temperature, humidity, wind, daily high/low, and rain probability
 - **Routine automation:** predefined workflows (morning briefing, focus mode, work summary, dev assistant)
 - **Undo system:** reverse recent actions including file operations, wallpaper changes, project switches
 
 ### User Interface
 - **Modular action windows:** draggable, stackable React windows for each major feature
 - **Live transcription:** real-time speech-to-text transcription display
+- **Attached result cards:** weather, Google service results, and tool execution status appear as HUD tabs above chat
 - **Visual feedback:** audio visualizer, CAD progress, web agent logs, system alerts
 - **Customizable settings:** comprehensive settings window for all features
 - **Gesture control:** hand-based cursor movement and UI interaction
@@ -105,19 +116,24 @@ graph TB
     CORE --> VISION[Computer vision]
     SERVER --> AUTH[FaceAuthenticator]
     ACTIONS --> OS[Desktop, browser, files, system, web services]
+    CORE --> GOOGLE[GoogleAccount: Gmail, Calendar, Contacts, Drive]
+    CORE --> TOOLS[Custom tool factory and verified mytools]
+    CORE --> NOTIFY[Unified HUD, voice, and desktop notifications]
 ```
 
-The frontend connects to `http://localhost:8000` through Socket.IO. Electron starts the Python backend and loads the Vite renderer. The Electron launcher prefers the `FRIDAY_PYTHON` environment variable, the active Conda environment, or `%USERPROFILE%\.conda\envs\friday\python.exe`, then falls back to `python`.
+The frontend connects to `http://localhost:8000` through Socket.IO. Electron starts the Python backend and loads the Vite renderer. The Electron launcher prefers the `FRIDAY_PYTHON` environment variable, then the active Conda environment, `%USERPROFILE%\.conda\envs\friday\python.exe`, and finally `python`.
 
 ## Security & Reliability
 
 ### Security Features
 - **Electron hardening:** `nodeIntegration: false`, `contextIsolation: true`, secure preload scripts
 - **CORS restrictions:** limited to trusted origins (localhost, Capacitor/Electron)
-- **Path validation:** recent security fixes for file operations (configurable for unrestricted access)
+- **Path validation:** project file writes are intended to stay inside the active project; review file-management requests carefully
 - **Subprocess timeouts:** all subprocess calls have timeouts to prevent hanging
 - **Crash recovery:** audio loop crash guard with user notification
 - **Confirmation system:** user approval for destructive or external operations
+- **Tool isolation:** generated Python tools execute in timed subprocesses and only approved templates are available
+- **OAuth secret protection:** Google client secrets and refresh tokens are local-only and Git-ignored
 
 ### Reliability Features
 - **Automatic reconnection:** Gemini Live session reconnection with context restoration
@@ -129,7 +145,7 @@ The frontend connects to `http://localhost:8000` through Socket.IO. Electron sta
 ## Requirements
 
 - **Windows 10/11** is the primary supported platform (Linux/macOS support exists in some modules)
-- **Python 3.11+** through Miniconda or Anaconda
+- **Python 3.11+** through the existing Miniconda/Anaconda environment named `friday`
 - **Node.js 18+** and npm
 - **Git**
 - **Gemini API key** from [Google AI Studio](https://aistudio.google.com/app/apikey)
@@ -142,7 +158,6 @@ The frontend connects to `http://localhost:8000` through Socket.IO. Electron sta
 git clone https://github.com/mazwisprojects/Friday-AI-Assistant.git
 cd Friday-AI-Assistant
 
-conda create -n friday python=3.11 -y
 conda activate friday
 pip install -r requirements.txt
 npm install
@@ -153,6 +168,18 @@ Create `.env` in the repository root. Never commit it:
 ```text
 GEMINI_API_KEY=your_api_key_here
 ```
+
+### Google Account Setup
+
+Google integration uses OAuth. Friday does not store your Google password. Create a Desktop OAuth client in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials), enable the Gmail API, Google Calendar API, People API, and Google Drive API, then download the client JSON as:
+
+```text
+backend/google_client_secret.json
+```
+
+For a private app in Testing mode, add your Google address under **Google Auth Platform → Audience → Test users**. In Friday, open **Settings → Google Account → Connect** and approve the requested scopes. The refresh token is stored locally in `backend/google_token.json`, which is ignored by Git.
+
+The current OAuth scopes provide Gmail read/drafts, Calendar read/create/update/delete, Contacts read/write, and Drive read access. Enable the Gmail API, Google Calendar API, People API, and Google Drive API in the same project. Reconnect Google after changing scopes.
 
 Install the Playwright browser binaries used by browser automation and flight search:
 
@@ -226,6 +253,21 @@ Friday's comprehensive tool set includes 40+ tools organized into categories:
 - `contacts_manager` - Contact management
 - `find_flights` - Flight search and booking
 
+### Google Services
+- `gmail_read` - Read Gmail messages using Gmail search syntax
+- `gmail_thread_read` - Read all messages in a Gmail thread
+- `gmail_create_draft` - Create a Gmail draft after confirmation
+- `google_calendar_create` - Create a Google Calendar event
+- `google_calendar_list` - Search upcoming Calendar events
+- `google_calendar_update` - Update an event after confirmation
+- `google_calendar_delete` - Delete an event after confirmation
+- `google_calendar_recurring` - Create a recurring event after confirmation
+- `google_contacts_read` - Read paginated Google Contacts
+- `google_contacts_import` - Import Google Contacts into Friday's local store
+- `google_contacts_sync` - Synchronize contacts in either direction after confirmation
+- `google_drive_list` - List recent Google Drive files
+- `sync_google_services` - Refresh Gmail, Calendar, Contacts, and Drive into a local cache
+
 ### Development
 - `code_helper` - Code generation, editing, debugging
 - `build_project` - Complete project scaffolding
@@ -254,7 +296,21 @@ Friday's comprehensive tool set includes 40+ tools organized into categories:
 ### Automation
 - `run_routine` - Predefined workflow automation
 
-Tool permissions are stored in `settings.json` and can be changed in the Settings window. `true` means Friday asks for confirmation before executing the tool; `false` allows it automatically. Destructive or externally visible actions should remain protected. Code generation/build tools can write files, install dependencies, and execute code, so they should remain confirmation-protected.
+Tool permissions are stored in `settings.json` and can be viewed in the Settings window. Normal tool calls run automatically. Google Calendar updates/deletes, recurring events, Google Contacts writes, and Gmail draft creation use Friday's explicit confirmation flow before changing external data. Generated Python tools are stored in `backend/mytools/` and run in a timed subprocess.
+
+### Custom Tools
+
+Friday can create and register new tools with the `build_custom_tool`, `test_custom_tool`, and `run_custom_tool` tools. Verified tools are written as Python modules under:
+
+```text
+backend/mytools/<tool_name>.py
+```
+
+Supported templates are `http_json_get`, `readonly_powershell`, and `python_module`. Python tools have no application-level 2,000-line limit: large modules are written directly to disk, compile-verified, smoke-tested, and reported with their source line count before registration. Registry files store metadata rather than duplicating the full source, so very large modules remain manageable. Each tool must pass manifest validation and a smoke test before it is registered with Gemini. Generated tool manifests are also recorded in the local-only `backend/custom_tools.json` registry.
+
+### Self-Build and Self-Upgrade
+
+Use `self_build` to compile the backend, run tests, build the frontend, and attempt bounded dependency recovery when checks fail. Use `self_heal` for dependency/build recovery and `self_upgrade` to audit outdated packages, update declared Python and Node dependencies, scan for deprecation markers, rebuild the capability registry, and track recurring tool failures. Source code and prompts are not silently rewritten.
 
 System alerts are controlled by `system_alerts_enabled`, `muted_alert_categories`, and `alert_cooldowns` in `settings.json`. Friday uses separate cooldowns for CPU, RAM, temperature, and GPU alerts. An alert category remains quiet while the problem stays continuously above its threshold; it becomes eligible again only after the metric recovers meaningfully and later crosses the threshold again. You can also say `mute CPU alerts`, `unmute CPU alerts`, `disable system alerts`, or `enable system alerts`. These choices persist across restarts.
 
@@ -339,6 +395,10 @@ F.R.I.D.A.Y/
 │   ├── server.py              # FastAPI and Socket.IO server
 │   ├── config.py               # Centralized configuration utilities
 │   ├── tools.py               # Gemini function declarations
+│   ├── google_account.py       # Google OAuth and Gmail/Calendar/Contacts/Drive APIs
+│   ├── tool_builder.py         # Verified custom-tool creation and execution
+│   ├── notification_manager.py # Unified notification delivery and cooldowns
+│   ├── mytools/                # Generated and example custom tool modules
 │   ├── memory_manager.py      # Global transcripts, facts, and search
 │   ├── project_manager.py     # Project-scoped memory and artifacts
 │   ├── undo_manager.py         # Undo system for actions
@@ -397,11 +457,20 @@ F.R.I.D.A.Y/
 
 ## Security Considerations
 
-- **File access:** Friday can read any file on the system (unrestricted access for user convenience)
-- **Code execution:** Build and code tools can execute arbitrary code - use with caution
+- **File access:** File-management and code tools can access sensitive local data; use them only with trusted requests
+- **Code execution:** `python_module` custom tools execute generated Python in a timed subprocess; only create them intentionally
 - **Web automation:** Browser control operates with user's own profiles and can access web accounts
 - **API keys:** Gemini API key is stored in environment variables - protect this file
-- **Network access:** Friday can make arbitrary web requests and control browsers
+- **Network access:** Friday can make web requests, call approved Google APIs, and control browsers; keep the backend bound to localhost
+
+## Troubleshooting
+
+- **Google says access is blocked:** keep the OAuth app in Testing mode and add the exact Google account under Auth Platform → Audience → Test users.
+- **Google is connected but a service fails:** reconnect after changing scopes and confirm the required API is enabled.
+- **Friday starts without voice:** activate the existing `friday` Conda environment and confirm `sounddevice` can enumerate an input and output device.
+- **Backend cannot start:** verify `GEMINI_API_KEY` is present and port `8000` is available.
+- **Frontend cannot build:** run `npm install`, then `npm.cmd run build` from the repository root.
+- **Playwright actions fail:** run `playwright install chromium firefox` in the existing `friday` environment.
 
 ## Recent Improvements
 
