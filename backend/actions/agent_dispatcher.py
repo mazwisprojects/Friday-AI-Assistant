@@ -20,6 +20,9 @@ class AgentDispatcher:
     def register_agent(self, agent_type: str, function):
         self._registry[agent_type] = function
 
+    def unregister_agent(self, agent_type: str):
+        self._registry.pop(agent_type, None)
+
     def _run(self, agent_id: str, agent_type: str, function, goal: str, repo_path: str, cancel_event: threading.Event):
         entry = self._agents[agent_id]
 

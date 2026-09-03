@@ -79,6 +79,28 @@ def commit_changes(repo_path: str, message: str) -> str:
     return commit_result["stdout"] or f"Committed: {message}"
 
 
+def publish_changes(repo_path: str, message: str) -> str:
+    """Commit all current changes and push the current branch safely."""
+    if not message.strip():
+        return "No commit message provided."
+    repo = str(Path(repo_path).expanduser()) if repo_path else "."
+    status = _run_git(repo, "status", "--porcelain")
+    if not status["ok"]:
+        return f"Git status failed: {status['stderr'] or status['stdout']}"
+    if not status["stdout"].strip():
+        return "Working tree is clean; nothing to publish."
+    diff_check = _run_git(repo, "diff", "--check")
+    if not diff_check["ok"]:
+        return f"Publish stopped because diff validation failed: {diff_check['stderr'] or diff_check['stdout']}"
+    committed = commit_changes(repo, message)
+    if committed.startswith("Git commit failed") or committed.startswith("No changes"):
+        return committed
+    pushed = _run_git(repo, "push", timeout=180)
+    if not pushed["ok"]:
+        return f"Committed locally but push failed: {pushed['stderr'] or pushed['stdout']}"
+    return f"{committed}\nPush completed successfully."
+
+
 def detect_obvious_regressions(repo_path: str) -> str:
     repo = Path(repo_path).expanduser() if repo_path else Path.cwd()
     status = git_status(str(repo))
@@ -135,6 +157,8 @@ def git_workflow(parameters: dict) -> str:
         return review_diff(str(repo_path), max_chars=max_chars)
     if action == "commit":
         return commit_changes(str(repo_path), str(parameters.get("message") or ""))
+    if action in {"push", "publish", "self_publish"}:
+        return publish_changes(str(repo_path), str(parameters.get("message") or ""))
     if action == "regression_check":
         return detect_obvious_regressions(str(repo_path))
 

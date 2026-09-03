@@ -7,6 +7,7 @@ and executed only through approved operation templates.
 from __future__ import annotations
 
 import json
+import ast
 import subprocess
 import sys
 import textwrap
@@ -25,6 +26,7 @@ class ToolBuilder:
         self.tools_dir = self.backend_dir / "mytools"
         self.tools: dict[str, dict[str, Any]] = {}
         self.load()
+        self.discover_modules()
 
     def load(self) -> None:
         if not self.registry_path.exists():
@@ -35,12 +37,48 @@ class ToolBuilder:
         except (OSError, json.JSONDecodeError) as exc:
             print(f"[TOOLS] Could not load custom tools: {exc}")
 
+    def discover_modules(self) -> None:
+        """Discover manifest-only plugin modules without importing their code."""
+        if not self.tools_dir.exists():
+            return
+        discovered = False
+        for module_path in self.tools_dir.glob("*.py"):
+            if module_path.name == "__init__.py":
+                continue
+            try:
+                tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+                manifest = None
+                for node in tree.body:
+                    if isinstance(node, ast.Assign) and any(
+                        isinstance(target, ast.Name) and target.id == "TOOL_MANIFEST"
+                        for target in node.targets
+                    ):
+                        manifest = ast.literal_eval(node.value)
+                        break
+                if not isinstance(manifest, dict):
+                    continue
+                self._validate(manifest)
+                manifest = dict(manifest)
+                config = dict(manifest.get("config", {}))
+                config.pop("code", None)
+                config["module_path"] = f"mytools/{module_path.name}"
+                config.setdefault("line_count", len(module_path.read_text(encoding="utf-8").splitlines()))
+                manifest["config"] = config
+                self.tools.setdefault(manifest["name"], manifest)
+                discovered = True
+            except (OSError, SyntaxError, ValueError, MemoryError) as exc:
+                print(f"[TOOLS] Skipping invalid plugin {module_path.name}: {exc}")
+        if discovered:
+            self._save()
+
     def build(self, name: str, description: str, operation: str, parameters: dict | None = None, config: dict | None = None) -> dict:
         tool_name = self._normalise_name(name)
         if operation not in self.APPROVED_OPERATIONS:
             raise ValueError(f"Unsupported tool template: {operation}")
         manifest = {
             "name": tool_name,
+            "version": "1.0.0",
+            "enabled": True,
             "description": description.strip(),
             "operation": operation,
             "parameters": parameters or {},
@@ -114,6 +152,8 @@ class ToolBuilder:
     def declarations(self) -> list[dict]:
         declarations = []
         for manifest in self.tools.values():
+            if not manifest.get("enabled", True):
+                continue
             declarations.append({
                 "name": manifest["name"],
                 "description": manifest["description"],
@@ -157,7 +197,11 @@ class ToolBuilder:
                 "if __name__ == '__main__':\n"
                 "    import json\n"
                 "    arguments = json.loads(input())\n"
-                + textwrap.indent(manifest["config"]["code"], "    ") + "\n",
+                + textwrap.indent(manifest["config"]["code"], "    ") + "\n"
+                + "    if 'run' in locals():\n"
+                + "        output = run(arguments)\n"
+                + "        if output is not None:\n"
+                + "            print(json.dumps(output))\n",
                 encoding="utf-8",
             )
         return module_path

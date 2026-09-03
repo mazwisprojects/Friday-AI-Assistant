@@ -16,7 +16,11 @@ backend/google_sync.json
 backend/capability_registry.json
 backend/tool_failures.json
 backend/custom_tools.json
+backend/custom_agents.json
+.friday-plugin-versions/
 .friday-recovery/
+long_term_memory/tasks.json
+long_term_memory/agent_schedules.json
 settings.json
 backend/last_cad_generation.json
 long_term_memory/

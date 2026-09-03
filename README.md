@@ -308,6 +308,12 @@ backend/mytools/<tool_name>.py
 
 Supported templates are `http_json_get`, `readonly_powershell`, and `python_module`. Python tools have no application-level 2,000-line limit: large modules are written directly to disk, compile-verified, smoke-tested, and reported with their source line count before registration. Registry files store metadata rather than duplicating the full source, so very large modules remain manageable. Each tool must pass manifest validation and a smoke test before it is registered with Gemini. Generated tool manifests are also recorded in the local-only `backend/custom_tools.json` registry.
 
+### Custom Agents
+
+Friday can build background agents with `build_agent` and verify them with `test_agent`. Verified agents are written to `backend/agents/<agent_name>.py`, where they must expose `run(goal, repo_path, log, cancel_event)`. They are registered with the background dispatcher and deployed with `deploy_agent` using the returned `agent_type`. Agent manifests are stored in the local-only `backend/custom_agents.json` registry. Friday does not modify `friday.py` or add a new dispatcher branch for each generated agent.
+
+Generated agents are managed as plugins. `manage_plugins` can list plugin versions and enabled state, report agent health and recorded tool failures, create snapshots, list snapshots, roll back a snapshot, or enable/disable a generated tool or agent. Disabling a plugin removes it from future tool declarations or agent deployments without deleting its source module.
+
 ### Self-Build and Self-Upgrade
 
 Use `self_build` to compile the backend, run tests, build the frontend, and attempt bounded dependency recovery when checks fail. Use `self_heal` for dependency/build recovery and `self_upgrade` to audit outdated packages, update declared Python and Node dependencies, scan for deprecation markers, rebuild the capability registry, and track recurring tool failures. Source code and prompts are not silently rewritten.

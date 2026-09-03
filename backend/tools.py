@@ -309,11 +309,11 @@ self_maintenance_tool = {
 
 git_workflow_tool = {
     "name": "git_workflow",
-    "description": "Inspects git status, creates or switches branches, shows diffs, commits staged or all changes, and checks for obvious regressions. Use when the user asks Friday to manage the repository, review changes, or prepare a branch/commit.",
+    "description": "Inspects Git status, creates or switches branches, shows diffs, commits changes, safely publishes commits, and checks regressions. Use publish when the user explicitly asks Friday to commit and push herself. Publish never force-pushes or resets history.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "action": {"type": "STRING", "description": "One of: status, create_branch, checkout_branch, diff, review_diff, commit, regression_check."},
+            "action": {"type": "STRING", "description": "One of: status, create_branch, checkout_branch, diff, review_diff, commit, publish, push, regression_check."},
             "repo_path": {"type": "STRING", "description": "Optional repo path. Defaults to the current workspace."},
             "branch_name": {"type": "STRING", "description": "Branch name for create_branch or checkout_branch."},
             "message": {"type": "STRING", "description": "Commit message for commit actions."},
@@ -522,6 +522,11 @@ google_drive_list_tool = {"name": "google_drive_list", "description": "Lists rec
 build_custom_tool = {"name": "build_custom_tool", "description": "Builds, tests, verifies, persists, and registers a custom Friday tool. Supported templates: http_json_get, readonly_powershell, and python_module. Use python_module only when the user explicitly asks Friday to create a new coded tool.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "operation": {"type": "STRING"}, "parameters": {"type": "OBJECT"}, "config": {"type": "OBJECT", "description": "For python_module, include code that reads the arguments variable and prints a JSON result."}}, "required": ["name", "description", "operation"]}}
 test_custom_tool = {"name": "test_custom_tool", "description": "Validates and smoke-tests a registered custom Friday tool before it is used.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}}, "required": ["name"]}}
 run_custom_tool = {"name": "run_custom_tool", "description": "Runs a verified registered custom Friday tool by name.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "arguments": {"type": "OBJECT"}}, "required": ["name"]}}
+build_agent_tool = {"name": "build_agent", "description": "Builds and verifies a background agent module under backend/agents. The module must define run(goal, repo_path, log, cancel_event).", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "code": {"type": "STRING", "description": "Python source defining run(goal, repo_path, log, cancel_event)."}, "parameters": {"type": "OBJECT"}}, "required": ["name", "description", "code"]}}
+test_agent_tool = {"name": "test_agent", "description": "Compile-verifies a registered background agent module before deployment.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}}, "required": ["name"]}}
+manage_plugins_tool = {"name": "manage_plugins", "description": "Manages generated tools and agents. Actions: list, health, snapshot, snapshots, rollback, enable, disable.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING"}, "kind": {"type": "STRING", "description": "tool or agent for enable/disable"}, "name": {"type": "STRING"}, "label": {"type": "STRING"}, "snapshot": {"type": "STRING"}}, "required": ["action"]}}
+manage_tasks_tool = {"name": "manage_tasks", "description": "Creates, lists, completes, and finds overdue persistent Friday tasks.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "create, list, complete, or overdue"}, "title": {"type": "STRING"}, "due": {"type": "STRING", "description": "ISO local date/time"}, "priority": {"type": "STRING"}, "project": {"type": "STRING"}, "notes": {"type": "STRING"}, "task_id": {"type": "STRING"}, "status": {"type": "STRING"}}, "required": ["action"]}}
+schedule_agent_tool = {"name": "schedule_agent", "description": "Schedules a registered Friday agent to run repeatedly in the background.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "schedule, list, or cancel"}, "agent_type": {"type": "STRING"}, "goal": {"type": "STRING"}, "interval_seconds": {"type": "INTEGER"}, "repo_path": {"type": "STRING"}, "schedule_id": {"type": "STRING"}}, "required": ["action"]}}
 
 google_contacts_read_tool = {
     "name": "google_contacts_read",
@@ -787,6 +792,11 @@ tools_list = [{"function_declarations": [
     build_custom_tool,
     test_custom_tool,
     run_custom_tool,
+    build_agent_tool,
+    test_agent_tool,
+    manage_plugins_tool,
+    manage_tasks_tool,
+    schedule_agent_tool,
     google_contacts_read_tool,
     browser_control_tool,
     code_helper_tool,

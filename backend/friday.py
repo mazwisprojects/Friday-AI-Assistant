@@ -70,6 +70,10 @@ from contacts_manager import ContactsManager
 from google_account import GoogleAccount
 from notification_manager import NotificationManager
 from tool_builder import ToolBuilder
+from agent_builder import AgentBuilder
+from plugin_manager import PluginManager
+from task_manager import TaskManager
+from agent_scheduler import AgentScheduler
 from undo_manager import UndoManager
 from config import FACT_GEMINI_MODEL, MAIN_GEMINI_MODEL
 
@@ -96,6 +100,10 @@ load_dotenv()
 client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
 
 custom_tool_builder = ToolBuilder(os.path.dirname(os.path.abspath(__file__)))
+agent_builder = AgentBuilder(os.path.dirname(os.path.abspath(__file__)))
+plugin_manager = PluginManager(os.path.dirname(os.path.abspath(__file__)), custom_tool_builder, agent_builder, agent_dispatcher_module.dispatcher)
+task_manager = TaskManager(ROOT_DIR)
+agent_scheduler = AgentScheduler(ROOT_DIR, agent_dispatcher_module.dispatcher)
 tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
@@ -111,6 +119,7 @@ config = types.LiveConnectConfig(
         "You have a fun personality. "
         "When the user asks for a morning briefing, always use the morning_briefing routine so it gathers current Gmail, Google Calendar, and system information before answering. "
         "When asked to self-build, use self_maintenance with action self_build; when asked to self-heal, use self_maintenance with action self_heal; when asked to self-upgrade, use self_maintenance with action self_upgrade and report exactly what changed. "
+        "When the user explicitly asks you to commit and push yourself to Git, use git_workflow with action publish and a clear commit message. Never force-push or reset history. "
         "For every question about the current time or date, always use get_local_time and report Johannesburg, South Africa time (SAST), never UTC. When the user asks to put a reminder or event on Google Calendar, use google_calendar_create; use set_reminder only for a local notification. "
         "When the user asks to check, read, search, or summarize emails, always use the gmail_read tool; never use run_web_agent or web_search for Gmail. When the user asks for Google Contacts, always use google_contacts_read; when they ask to save, transfer, import, or synchronize contacts, use the appropriate Google Contacts write tool and report its actual result; use contacts_manager only for Friday's local contacts. "
         "Before ever telling the user you don't know a personal detail about them (name, relationships, family, "
@@ -133,6 +142,12 @@ from kasa_agent import KasaAgent
 from printer_agent import PrinterAgent
 from agents.agent_supervisor import AgentSupervisor
 from agents.routine_manager import RoutineManager
+
+for generated_agent_name in agent_builder.agents:
+    try:
+        agent_dispatcher_module.dispatcher.register_agent(generated_agent_name, agent_builder.load_callable(generated_agent_name))
+    except Exception as exc:
+        print(f"[AGENTS] Could not register {generated_agent_name}: {exc}")
 
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, on_notification=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
@@ -234,6 +249,10 @@ class AudioLoop:
         self.contacts_manager = ContactsManager(project_root)
         self.google_account = GoogleAccount(current_dir)
         self.tool_builder = custom_tool_builder
+        self.agent_builder = agent_builder
+        self.plugin_manager = plugin_manager
+        self.task_manager = task_manager
+        self.agent_scheduler = agent_scheduler
         self.undo_manager = UndoManager(project_root)
         file_controller_module.configure_undo_manager(self.undo_manager)
 
@@ -1078,7 +1097,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "build_custom_tool", "test_custom_tool", "run_custom_tool", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "run_routine"] or fc.name in self.tool_builder.tools:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "build_custom_tool", "test_custom_tool", "run_custom_tool", "build_agent", "test_agent", "manage_plugins", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "run_routine"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -2120,7 +2139,21 @@ class AudioLoop:
                                 elif fc.name == "build_custom_tool":
                                     try:
                                         result = self.tool_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("operation", ""), fc.args.get("parameters", {}), fc.args.get("config", {}))
-                                        tools[1]["function_declarations"].append(self.tool_builder.declarations()[-1])
+                                        declaration = self.tool_builder.declarations()[-1]
+                                        declarations = tools[1]["function_declarations"]
+                                        existing_index = next((index for index, item in enumerate(declarations) if item.get("name") == declaration["name"]), None)
+                                        if existing_index is None:
+                                            declarations.append(declaration)
+                                        else:
+                                            declarations[existing_index] = declaration
+                                        if self.session:
+                                            await self.session.send(
+                                                input=(
+                                                    f"System Notification: Custom tool '{declaration['name']}' was built, tested, verified, and registered live. "
+                                                    "Use run_custom_tool with this exact name when the user requests it."
+                                                ),
+                                                end_of_turn=False,
+                                            )
                                         result_str = json.dumps(result, ensure_ascii=False)
                                     except Exception as exc:
                                         result_str = json.dumps({"registered": False, "error": str(exc)})
@@ -2139,6 +2172,41 @@ class AudioLoop:
                                         self_maintenance_module.record_tool_failure(custom_name or "run_custom_tool", str(exc))
                                         result_str = json.dumps({"ok": False, "error": str(exc)})
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "build_agent":
+                                    try:
+                                        result = self.agent_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("code", ""), fc.args.get("parameters", {}))
+                                        agent_name = result["agent"]["name"]
+                                        agent_dispatcher_module.dispatcher.register_agent(agent_name, self.agent_builder.load_callable(agent_name))
+                                        result_str = json.dumps({**result, "deploy_with": "deploy_agent", "agent_type": agent_name}, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = json.dumps({"registered": False, "error": str(exc)})
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "test_agent":
+                                    result_str = json.dumps(self.agent_builder.test(fc.args.get("name", "")), ensure_ascii=False)
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "manage_plugins":
+                                    action = fc.args.get("action", "list").lower()
+                                    try:
+                                        if action == "list":
+                                            result = {"plugins": self.plugin_manager.list_plugins()}
+                                        elif action == "health":
+                                            result = self.plugin_manager.health()
+                                        elif action == "snapshot":
+                                            result = self.plugin_manager.snapshot(fc.args.get("label", "manual"))
+                                        elif action == "snapshots":
+                                            result = {"snapshots": self.plugin_manager.list_snapshots()}
+                                        elif action == "rollback":
+                                            result = self.plugin_manager.rollback(fc.args.get("snapshot", ""))
+                                        elif action in {"enable", "disable"}:
+                                            result = self.plugin_manager.set_enabled(fc.args.get("kind", "tool"), fc.args.get("name", ""), action == "enable")
+                                        else:
+                                            result = {"error": "Plugin action must be list, health, enable, or disable."}
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}))
 
                                 elif fc.name in self.tool_builder.tools:
                                     try:
