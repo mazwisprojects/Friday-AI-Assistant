@@ -238,6 +238,30 @@ get_system_status_tool = {
     }
 }
 
+get_local_time_tool = {
+    "name": "get_local_time",
+    "description": "Gets the current local time in Johannesburg, South Africa. Always use this tool for time questions instead of relying on UTC or model time.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {}
+    }
+}
+
+gmail_read_tool = {
+    "name": "gmail_read",
+    "description": "Reads the user's Gmail inbox through the connected Google account. Use this for requests about checking, reading, or summarizing emails. Never use run_web_agent or web_search for Gmail.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {"type": "STRING", "description": "Optional Gmail search query, such as is:unread or newer_than:7d."},
+            "limit": {"type": "INTEGER", "description": "Maximum number of emails to return, from 1 to 25."}
+        }
+    }
+}
+
+gmail_thread_read_tool = {"name": "gmail_thread_read", "description": "Reads every message in a Gmail thread. Use for email conversations or full thread details.", "parameters": {"type": "OBJECT", "properties": {"thread_id": {"type": "STRING"}}, "required": ["thread_id"]}}
+gmail_draft_tool = {"name": "gmail_create_draft", "description": "Creates a Gmail draft without sending it. Requires confirmation because it writes to Gmail.", "parameters": {"type": "OBJECT", "properties": {"to": {"type": "STRING"}, "subject": {"type": "STRING"}, "body": {"type": "STRING"}, "thread_id": {"type": "STRING"}}, "required": ["to", "subject", "body"]}}
+
 undo_last_action_tool = {
     "name": "undo_last_action",
     "description": "Reverses the most recent supported action. Currently restores overwritten/deletes newly created project files, restores a previous wallpaper when its path is available, and restores the previous project context.",
@@ -275,7 +299,7 @@ self_maintenance_tool = {
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "action": {"type": "STRING", "description": "One of: run_tests, compile_check, build_frontend, install_python_deps, install_frontend_deps, full_check. Defaults to full_check."},
+            "action": {"type": "STRING", "description": "One of: run_tests, compile_check, build_frontend, install_python_deps, install_frontend_deps, full_check, self_build, self_heal, self_upgrade. self_upgrade audits outdated packages, scans deprecations, refreshes dependencies, and updates the capability registry. Defaults to full_check."},
             "args": {"type": "STRING", "description": "Optional extra pytest arguments for run_tests. Examples: '-k auth' or 'tests/test_authenticator.py'."},
             "target": {"type": "STRING", "description": "Optional single test target to run, such as 'tests/test_authenticator.py' or 'tests/test_kasa_agent.py::TestKasaDiscovery::test_initialize_known_devices'."}
         },
@@ -344,7 +368,7 @@ mute_alert_category_tool = {
 
 get_weather_tool = {
     "name": "get_weather",
-    "description": "Opens a weather search in the browser for a given city and time period.",
+    "description": "Gets live current weather and today's forecast for a city. Returns actual temperature, conditions, humidity, wind, high, low, and rain chance; do not use the web agent for weather.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -368,6 +392,27 @@ set_reminder_tool = {
         "required": ["date", "time"]
     }
 }
+
+google_calendar_create_tool = {
+    "name": "google_calendar_create",
+    "description": "Creates an event on the user's connected primary Google Calendar. Use this when the user asks to put a reminder, appointment, task, or event on Google Calendar. Use set_reminder only for a local OS notification.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "title": {"type": "STRING", "description": "Event title."},
+            "date": {"type": "STRING", "description": "Date in YYYY-MM-DD format."},
+            "time": {"type": "STRING", "description": "Johannesburg time in HH:MM 24-hour format."},
+            "duration_minutes": {"type": "INTEGER", "description": "Event duration in minutes. Defaults to 30."},
+            "description": {"type": "STRING", "description": "Optional event details."}
+        },
+        "required": ["title", "date", "time"]
+    }
+}
+
+google_calendar_list_tool = {"name": "google_calendar_list", "description": "Reads and searches upcoming events on the connected primary Google Calendar.", "parameters": {"type": "OBJECT", "properties": {"query": {"type": "STRING"}, "days": {"type": "INTEGER"}, "limit": {"type": "INTEGER"}}}}
+google_calendar_update_tool = {"name": "google_calendar_update", "description": "Updates an existing Google Calendar event. Requires confirmation.", "parameters": {"type": "OBJECT", "properties": {"event_id": {"type": "STRING"}, "title": {"type": "STRING"}, "date": {"type": "STRING"}, "time": {"type": "STRING"}, "duration_minutes": {"type": "INTEGER"}, "description": {"type": "STRING"}}, "required": ["event_id"]}}
+google_calendar_delete_tool = {"name": "google_calendar_delete", "description": "Deletes an existing Google Calendar event. Requires confirmation.", "parameters": {"type": "OBJECT", "properties": {"event_id": {"type": "STRING"}}, "required": ["event_id"]}}
+google_calendar_recurring_tool = {"name": "google_calendar_recurring", "description": "Creates a recurring event on the connected primary Google Calendar. Requires confirmation.", "parameters": {"type": "OBJECT", "properties": {"title": {"type": "STRING"}, "date": {"type": "STRING"}, "time": {"type": "STRING"}, "recurrence": {"type": "STRING", "description": "RFC5545 rule such as RRULE:FREQ=WEEKLY;BYDAY=MO"}, "duration_minutes": {"type": "INTEGER"}, "description": {"type": "STRING"}}, "required": ["title", "date", "time", "recurrence"]}}
 
 desktop_control_tool = {
     "name": "desktop_control",
@@ -441,6 +486,52 @@ contacts_manager_tool = {
             "platform": {"type": "STRING", "description": "Messaging platform, e.g. whatsapp, telegram, discord, signal, instagram, messenger."}
         },
         "required": ["action"]
+    }
+}
+
+google_contacts_import_tool = {
+    "name": "google_contacts_import",
+    "description": "Imports contacts from connected Google Contacts into Friday's local contacts. Use this when the user asks to save, transfer, or import Google Contacts locally. Never claim completion unless this tool returns the saved count.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {"type": "STRING", "description": "Optional contact filter."},
+            "limit": {"type": "INTEGER", "description": "Maximum contacts to import, from 1 to 500."},
+            "platform": {"type": "STRING", "description": "Local channel, usually whatsapp."}
+        }
+    }
+}
+
+google_contacts_sync_tool = {
+    "name": "google_contacts_sync",
+    "description": "Synchronizes contacts between Friday local contacts and Google Contacts. Use direction from_google or to_google. Requires confirmation because it writes contacts.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "direction": {"type": "STRING", "description": "from_google or to_google"},
+            "limit": {"type": "INTEGER"},
+            "platform": {"type": "STRING", "description": "Local channel for imported contacts, usually whatsapp."}
+        },
+        "required": ["direction"]
+    }
+}
+
+sync_google_services_tool = {"name": "sync_google_services", "description": "Synchronizes unread Gmail, upcoming Google Calendar events, Google Contacts, and recent Google Drive files into Friday's local cache. Use this when the user asks Friday to sync with Google or refresh Google data.", "parameters": {"type": "OBJECT", "properties": {"limit": {"type": "INTEGER", "description": "Maximum items per service, from 1 to 100."}}}}
+google_drive_list_tool = {"name": "google_drive_list", "description": "Lists recent non-deleted files in the connected Google Drive.", "parameters": {"type": "OBJECT", "properties": {"query": {"type": "STRING"}, "limit": {"type": "INTEGER"}}}}
+
+build_custom_tool = {"name": "build_custom_tool", "description": "Builds, tests, verifies, persists, and registers a custom Friday tool. Supported templates: http_json_get, readonly_powershell, and python_module. Use python_module only when the user explicitly asks Friday to create a new coded tool.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "operation": {"type": "STRING"}, "parameters": {"type": "OBJECT"}, "config": {"type": "OBJECT", "description": "For python_module, include code that reads the arguments variable and prints a JSON result."}}, "required": ["name", "description", "operation"]}}
+test_custom_tool = {"name": "test_custom_tool", "description": "Validates and smoke-tests a registered custom Friday tool before it is used.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}}, "required": ["name"]}}
+run_custom_tool = {"name": "run_custom_tool", "description": "Runs a verified registered custom Friday tool by name.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "arguments": {"type": "OBJECT"}}, "required": ["name"]}}
+
+google_contacts_read_tool = {
+    "name": "google_contacts_read",
+    "description": "Reads contacts from the user's connected Google Contacts through the People API. Use this for requests about Google Contacts, not contacts_manager. Never use the web agent for Google Contacts.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "query": {"type": "STRING", "description": "Optional contact name, email, phone, or organization to search for."},
+            "limit": {"type": "INTEGER", "description": "Maximum number of contacts to return, from 1 to 100."}
+        }
     }
 }
 
@@ -568,12 +659,12 @@ manage_monitors_tool = {
 
 run_routine_tool = {
     "name": "run_routine",
-    "description": "Runs a predefined Jarvis workflow routine such as morning briefing, focus mode, work summary, or a dev assistant plan.",
+    "description": "Runs a predefined Jarvis workflow routine, including desktop-oriented routines like start_work_routine, prepare_environment, project_checkup, calendar_check, workspace_cleanup, and daily_report.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
-            "name": {"type": "STRING", "description": "Routine name: morning_briefing, focus_mode, work_summary, or dev_assistant."},
-            "payload": {"type": "OBJECT", "description": "Optional routine payload with context, tasks, system health, repo, or issue details."}
+            "name": {"type": "STRING", "description": "Routine name: morning_briefing, focus_mode, work_summary, dev_assistant, start_work_routine, prepare_environment, project_checkup, calendar_check, workspace_cleanup, or daily_report."},
+            "payload": {"type": "OBJECT", "description": "Optional routine payload with project context, tasks, system health, reminders, notes, or completed/remaining work."}
         },
         "required": ["name"]
     }
@@ -665,6 +756,10 @@ tools_list = [{"function_declarations": [
     manage_files_tool,
     open_application_tool,
     get_system_status_tool,
+    get_local_time_tool,
+    gmail_read_tool,
+    gmail_thread_read_tool,
+    gmail_draft_tool,
     undo_last_action_tool,
     manage_uploads_tool,
     cancel_current_task_tool,
@@ -675,11 +770,24 @@ tools_list = [{"function_declarations": [
     mute_alert_category_tool,
     get_weather_tool,
     set_reminder_tool,
+    google_calendar_create_tool,
+        google_calendar_list_tool,
+        google_calendar_update_tool,
+        google_calendar_delete_tool,
+        google_calendar_recurring_tool,
     desktop_control_tool,
     web_search_tool,
     send_message_tool,
     youtube_video_tool,
     contacts_manager_tool,
+    google_contacts_import_tool,
+    google_contacts_sync_tool,
+    sync_google_services_tool,
+    google_drive_list_tool,
+    build_custom_tool,
+    test_custom_tool,
+    run_custom_tool,
+    google_contacts_read_tool,
     browser_control_tool,
     code_helper_tool,
     build_project_tool,

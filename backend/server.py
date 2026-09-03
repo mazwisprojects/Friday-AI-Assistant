@@ -21,11 +21,17 @@ from pathlib import Path
 
 
 
-# Ensure we can import friday
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Ensure we can import both backend modules and repo-root modules.
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(BACKEND_DIR)
+for candidate in (BACKEND_DIR, ROOT_DIR):
+    if candidate not in sys.path:
+        sys.path.append(candidate)
 
 import friday
+from actions import system_monitor as system_monitor_module
 from contacts_manager import ContactsManager
+from google_account import GoogleAccount
 from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
@@ -71,43 +77,75 @@ SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
     "face_auth_enabled": False, # Default OFF as requested
     "tool_permissions": {
-        "generate_cad": True,
-        "run_web_agent": True,
-        "write_file": True,
-        "read_directory": True,
-        "read_file": True,
-        "create_project": True,
-        "switch_project": True,
-        "list_projects": True,
-        "search_memory": True,
-        "computer_control": True,
-        "computer_settings": True,
-        "manage_files": True,
-        "open_application": True,
+        "generate_cad": False,
+        "run_web_agent": False,
+        "write_file": False,
+        "read_directory": False,
+        "read_file": False,
+        "create_project": False,
+        "switch_project": False,
+        "list_projects": False,
+        "search_memory": False,
+        "list_smart_devices": False,
+        "control_light": False,
+        "discover_printers": False,
+        "print_stl": False,
+        "get_print_status": False,
+        "iterate_cad": False,
+        "computer_control": False,
+        "computer_settings": False,
+        "manage_files": False,
+        "open_application": False,
         "get_system_status": False,
+        "get_local_time": False,
+        "gmail_read": False,
+        "gmail_thread_read": False,
+        "gmail_create_draft": False,
         "get_weather": False,
-        "set_reminder": True,
-        "desktop_control": True,
+        "google_calendar_create": False,
+        "google_calendar_list": False,
+        "google_calendar_update": False,
+        "google_calendar_delete": False,
+        "google_calendar_recurring": False,
+        "set_reminder": False,
+        "desktop_control": False,
         "web_search": False,
-        "send_message": True,
-        "youtube_video": True,
-        "browser_control": True,
-        "code_helper": True,
-        "build_project": True,
-        "find_flights": True,
-        "game_updater": True,
-        "process_file": True,
-        "manage_monitors": True,
-        "contacts_manager": True,
-        "undo_last_action": True,
-        "manage_uploads": True,
+        "send_message": False,
+        "youtube_video": False,
+        "browser_control": False,
+        "code_helper": False,
+        "build_project": False,
+        "find_flights": False,
+        "game_updater": False,
+        "process_file": False,
+        "manage_monitors": False,
+        "contacts_manager": False,
+        "google_contacts_import": False,
+        "google_contacts_sync": False,
+        "sync_google_services": False,
+        "google_drive_list": False,
+        "google_contacts_read": False,
+        "mute_alert_category": False,
+        "undo_last_action": False,
+        "manage_uploads": False,
         "cancel_current_task": False,
-        "self_maintenance": True
+        "self_maintenance": False,
+        "run_powershell_command": False,
+        "git_workflow": False,
+        "deploy_agent": False,
+        "run_routine": False
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
     "camera_flipped": False, # Invert cursor horizontal direction
     "system_alerts_enabled": True,
+    "quiet_mode": False,
+    "interrupt_preferences": {
+        "urgent_only": False,
+        "emergencies_only": False,
+        "custom_categories": []
+    },
+    "current_mode": "active",
     "muted_alert_categories": [],
     "alert_cooldowns": {
         "cpu": 1800,
@@ -122,6 +160,7 @@ DEFAULT_SETTINGS = {
 SETTINGS = DEFAULT_SETTINGS.copy()
 contacts_manager = ContactsManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 global_memory_manager = MemoryManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+google_account = GoogleAccount(BACKEND_DIR)
 
 async def ensure_audio_ready(sid, require_session=True):
     if not audio_loop:
@@ -138,24 +177,28 @@ def load_settings():
         try:
             with open(SETTINGS_FILE, 'r') as f:
                 loaded = json.load(f)
-                # Merge with defaults to ensure new keys exist
-                # Deep merge for tool_permissions would be better but shallow merge of top keys + tool_permissions check is okay for now
-                for k, v in loaded.items():
-                    if k == "tool_permissions" and isinstance(v, dict):
-                         SETTINGS["tool_permissions"].update(v)
-                    else:
-                        SETTINGS[k] = v
+                if isinstance(loaded, dict):
+                    for k, v in loaded.items():
+                        if k == "tool_permissions" and isinstance(v, dict):
+                            SETTINGS["tool_permissions"].update(v)
+                        else:
+                            SETTINGS[k] = v
             print(f"Loaded settings: {SETTINGS}")
         except Exception as e:
             print(f"Error loading settings: {e}")
+    return SETTINGS
 
-def save_settings():
+def save_settings(settings=None):
+    global SETTINGS
+    if settings is not None:
+        SETTINGS = settings
     try:
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(SETTINGS, f, indent=4)
         print("Settings saved.")
     except Exception as e:
         print(f"Error saving settings: {e}")
+    return SETTINGS
 
 # Load on startup
 load_settings()
@@ -346,10 +389,20 @@ async def start_audio(sid, data=None):
         asyncio.create_task(sio.emit('project_update', {'project': project_name}))
 
     # Callback to send Device Update to frontend
+    previous_device_states = {}
+
     def on_device_update(devices):
         # devices is a list of dicts
         print(f"Sending Kasa Device Update: {len(devices)} devices")
         asyncio.create_task(sio.emit('kasa_devices', devices))
+        for device in devices:
+            device_id = device.get("ip") or device.get("alias")
+            state = device.get("is_on")
+            if device_id and device_id in previous_device_states and previous_device_states[device_id] != state:
+                if audio_loop:
+                    asyncio.create_task(audio_loop.notifications.notify("smart_home", "Smart-home update", f"{device.get('alias', device_id)} is now {'on' if state else 'off'}."))
+            if device_id:
+                previous_device_states[device_id] = state
 
     # Callback to send Error to frontend
     def on_error(msg):
@@ -358,6 +411,9 @@ async def start_audio(sid, data=None):
 
     def on_plan_update(plan):
         asyncio.create_task(sio.emit('action_plan', plan))
+
+    def on_notification(notification):
+        asyncio.create_task(sio.emit('unified_notification', notification))
 
     def on_alert_settings_update(alert_settings):
         SETTINGS.update(alert_settings)
@@ -381,6 +437,7 @@ async def start_audio(sid, data=None):
             on_error=on_error,
             on_alert_settings_update=on_alert_settings_update,
             on_plan_update=on_plan_update,
+            on_notification=on_notification,
             authenticated=(not SETTINGS.get("face_auth_enabled", False) or bool(authenticator and authenticator.authenticated)),
 
             input_device_index=device_index,
@@ -423,6 +480,24 @@ async def start_audio(sid, data=None):
         
         print("Emitting 'F.R.I.D.A.Y Started'")
         await sio.emit('status', {'msg': 'F.R.I.D.A.Y Started'})
+        
+        # Send initial dashboard data
+        async def send_initial_dashboard():
+            await asyncio.sleep(0.5)
+            dashboard_data = {
+                'active_tasks': get_active_tasks(),
+                'pending_approvals': get_pending_approvals(),
+                'memory_summary': build_memory_summary(),
+                'proactive_suggestions': build_proactive_suggestions(),
+                'routine_queue': list_routine_queue(),
+                'quiet_mode': get_quiet_mode(),
+                'interrupt_preferences': get_interrupt_preferences(),
+                'system_health': system_monitor_module.get_system_status() if hasattr(system_monitor_module, 'get_system_status') else {},
+                'current_mode': 'active',
+            }
+            await sio.emit('dashboard_data', dashboard_data)
+        
+        asyncio.create_task(send_initial_dashboard())
 
         # Load saved printers
         saved_printers = SETTINGS.get("printers", [])
@@ -451,6 +526,7 @@ async def start_audio(sid, data=None):
 async def monitor_printers_loop():
     """Background task to query printer status periodically."""
     print("[SERVER] Starting Printer Monitor Loop")
+    previous_states = {}
     while audio_loop and audio_loop.printer_agent:
         try:
             agent = audio_loop.printer_agent
@@ -470,7 +546,16 @@ async def monitor_printers_loop():
                         pass # Ignore errors for now
                     elif res:
                         # res is PrintStatus object
-                        await sio.emit('print_status_update', res.to_dict())
+                        status_data = res.to_dict()
+                        await sio.emit('print_status_update', status_data)
+                        printer_id = status_data.get('printer') or status_data.get('name') or status_data.get('host')
+                        state = str(status_data.get('state', '')).lower()
+                        old_state = previous_states.get(printer_id)
+                        if printer_id and old_state and old_state != state and state in {'complete', 'completed', 'finished', 'idle'}:
+                            if audio_loop:
+                                await audio_loop.notifications.notify('printer', 'Print complete', f'{printer_id} finished printing.')
+                        if printer_id:
+                            previous_states[printer_id] = state
                         
         except asyncio.CancelledError:
             print("[SERVER] Printer Monitor Cancelled")
@@ -601,6 +686,15 @@ async def video_frame(sid, data):
         # We don't await this because we don't want to block the socket handler
         # But send_frame is async, so we create a task
         asyncio.create_task(audio_loop.send_frame(image_data))
+
+@sio.event
+async def set_live_video(sid, data):
+    """Enable/disable continuous webcam streaming into the Gemini Live session."""
+    enabled = bool((data or {}).get('enabled', False))
+    print(f"[SERVER] Live vision {'enabled' if enabled else 'disabled'} by client.")
+    if audio_loop:
+        audio_loop.set_live_video(enabled)
+    await sio.emit('video_status', {'enabled': enabled and bool(audio_loop)}, room=sid)
 
 @sio.event
 async def save_memory(sid, data):
@@ -1167,6 +1261,31 @@ async def control_kasa(sid, data):
 @sio.event
 async def get_settings(sid):
     await sio.emit('settings', SETTINGS)
+    await sio.emit('google_account_status', google_account.status(), room=sid)
+
+@sio.event
+async def connect_google_account(sid):
+    """Open Google consent in the system browser and persist the local refresh token."""
+    try:
+        await sio.emit('google_account_status', {'connecting': True, **google_account.status()}, room=sid)
+        account_status = await asyncio.to_thread(google_account.connect)
+        if audio_loop:
+            audio_loop.google_account = google_account
+        await sio.emit('google_account_status', account_status, room=sid)
+    except Exception as exc:
+        print(f"[GOOGLE] Connection failed: {exc}")
+        await sio.emit('google_account_status', {'connected': False, 'error': str(exc)}, room=sid)
+
+@sio.event
+async def disconnect_google_account(sid):
+    """Remove Friday's local Google refresh token from this computer."""
+    try:
+        account_status = google_account.disconnect()
+        if audio_loop:
+            audio_loop.google_account = google_account
+        await sio.emit('google_account_status', account_status, room=sid)
+    except Exception as exc:
+        await sio.emit('google_account_status', {'connected': False, 'error': str(exc)}, room=sid)
 
 @sio.event
 async def update_settings(sid, data):
@@ -1196,6 +1315,15 @@ async def update_settings(sid, data):
         SETTINGS["system_alerts_enabled"] = bool(data["system_alerts_enabled"])
         if audio_loop:
             audio_loop.system_monitor.configure(alerts_enabled=SETTINGS["system_alerts_enabled"])
+
+    if "quiet_mode" in data:
+        SETTINGS["quiet_mode"] = bool(data["quiet_mode"])
+
+    if "interrupt_preferences" in data and isinstance(data["interrupt_preferences"], dict):
+        SETTINGS["interrupt_preferences"].update(data["interrupt_preferences"])
+
+    if "current_mode" in data and data["current_mode"] in {"active", "focus", "away"}:
+        SETTINGS["current_mode"] = data["current_mode"]
 
     if "muted_alert_categories" in data and isinstance(data["muted_alert_categories"], list):
         SETTINGS["muted_alert_categories"] = data["muted_alert_categories"]
@@ -1234,6 +1362,8 @@ async def get_system_monitor(sid):
     try:
         data = get_system_status()
         await sio.emit('system_monitor_data', data)
+        # Also emit to dashboard for real-time updates
+        await sio.emit('dashboard_system_update', data)
     except Exception as e:
         print(f"Error getting system monitor data: {e}")
 
@@ -1552,6 +1682,310 @@ async def update_game(sid, data):
         await sio.emit('status', {'msg': 'Game updating'})
     except Exception as e:
         print(f"Error updating game: {e}")
+
+# Dashboard event handlers
+@sio.event
+async def get_dashboard_data(sid, data=None):
+    """Get comprehensive dashboard data."""
+    try:
+        dashboard_data = {
+            'active_tasks': get_active_tasks(),
+            'pending_approvals': get_pending_approvals(),
+            'memory_summary': build_memory_summary(),
+            'proactive_suggestions': build_proactive_suggestions(),
+            'routine_queue': list_routine_queue(),
+            'quiet_mode': get_quiet_mode(),
+            'interrupt_preferences': get_interrupt_preferences(),
+            'current_mode': get_current_mode()
+        }
+        await sio.emit('dashboard_data', dashboard_data)
+    except Exception as e:
+        print(f"Error getting dashboard data: {e}")
+
+@sio.event
+async def task_action(sid, data):
+    """Handle task actions (pause, cancel, resume)."""
+    payload = data or {}
+    task_id = payload.get('task_id')
+    action = payload.get('action')
+    try:
+        if audio_loop:
+            if action == 'cancel':
+                audio_loop.cancel_current_action()
+            elif action == 'pause':
+                pass
+            elif action == 'resume':
+                pass
+        await sio.emit('task_action_response', {'task_id': task_id, 'action': action, 'success': True})
+    except Exception as e:
+        print(f"Error handling task action: {e}")
+        await sio.emit('task_action_response', {'task_id': task_id, 'action': action, 'success': False})
+
+@sio.event
+async def approval_response(sid, data):
+    """Handle approval responses from dashboard."""
+    payload = data or {}
+    approval_id = payload.get('approval_id')
+    approved = payload.get('approved')
+    try:
+        if audio_loop:
+            audio_loop.resolve_tool_confirmation(approval_id, approved)
+        await sio.emit('approval_response_ack', {'approval_id': approval_id, 'approved': approved})
+    except Exception as e:
+        print(f"Error handling approval response: {e}")
+
+@sio.event
+async def set_quiet_mode(sid, data):
+    """Set quiet mode state."""
+    try:
+        payload = data or {}
+        enabled = bool(payload.get('enabled', False))
+        settings = load_settings() or {}
+        settings['quiet_mode'] = enabled
+        save_settings(settings)
+        await sio.emit('quiet_mode_set', {'enabled': enabled})
+    except Exception as e:
+        print(f"Error setting quiet mode: {e}")
+
+@sio.event
+async def set_interrupt_preferences(sid, data):
+    """Set interrupt preferences."""
+    try:
+        payload = data or {}
+        settings = load_settings() or {}
+        if 'interrupt_preferences' not in settings:
+            settings['interrupt_preferences'] = {}
+        settings['interrupt_preferences'].update(payload)
+        save_settings(settings)
+        await sio.emit('interrupt_preferences_set', payload)
+    except Exception as e:
+        print(f"Error setting interrupt preferences: {e}")
+
+@sio.event
+async def get_routine_queue(sid):
+    """Return the routines currently available to the desktop client."""
+    await sio.emit('routine_queue_update', {'routines': list_routine_queue()}, room=sid)
+
+@sio.event
+async def get_memory_summary(sid):
+    """Return memory statistics to the dedicated memory window."""
+    await sio.emit('memory_summary_update', build_memory_summary(), room=sid)
+
+@sio.event
+async def compact_memory(sid):
+    """Compact long-term memory using the active Friday runtime."""
+    try:
+        if audio_loop and hasattr(audio_loop, 'compact_memory'):
+            await audio_loop.compact_memory()
+        elif global_memory_manager and hasattr(global_memory_manager, 'compact_low_value_facts'):
+            global_memory_manager.compact_low_value_facts()
+        await sio.emit('memory_compacted', {'success': True, 'summary': build_memory_summary()}, room=sid)
+    except Exception as e:
+        print(f"Error compacting memory: {e}")
+        await sio.emit('memory_compacted', {'success': False, 'error': str(e)}, room=sid)
+
+@sio.event
+async def get_proactive_suggestions(sid):
+    """Return live proactive recommendations to the dedicated window."""
+    await sio.emit('proactive_suggestions', {'suggestions': build_proactive_suggestions()}, room=sid)
+
+@sio.event
+async def suggestion_action(sid, data):
+    """Record a user's response to a proactive suggestion."""
+    payload = data or {}
+    suggestion_id = payload.get('id')
+    action = payload.get('action')
+    try:
+        if action not in {'accept', 'remind_later'}:
+            raise ValueError('Unsupported suggestion action')
+        await sio.emit('suggestion_action_result', {'id': suggestion_id, 'action': action, 'success': True}, room=sid)
+    except Exception as e:
+        print(f"Error handling suggestion action: {e}")
+        await sio.emit('suggestion_action_result', {'id': suggestion_id, 'success': False, 'error': str(e)}, room=sid)
+
+@sio.event
+async def run_routine(sid, data):
+    """Execute a named routine through the active Friday runtime."""
+    payload = data or {}
+    name = payload.get('name')
+    try:
+        if not audio_loop or not hasattr(audio_loop, 'routine_manager'):
+            raise RuntimeError('Friday runtime is not ready')
+        result = audio_loop.routine_manager.execute_runtime(name, payload.get('payload'), runtime=audio_loop)
+        await sio.emit('routine_execution_result', {'name': name, 'success': True, 'result': result}, room=sid)
+    except Exception as e:
+        print(f"Error running routine: {e}")
+        await sio.emit('routine_execution_result', {'name': name, 'success': False, 'error': str(e)}, room=sid)
+
+# Helper functions for dashboard data
+def get_active_tasks():
+    """Get list of active tasks."""
+    if audio_loop and hasattr(audio_loop, '_background_tasks'):
+        tasks = []
+        for task in audio_loop._background_tasks:
+            if task.done():
+                continue
+            coro = getattr(task, '_coro', None)
+            coro_name = getattr(coro, '__name__', 'Unknown Task') if hasattr(coro, '__name__') else 'Unknown Task'
+            tasks.append({
+                'id': str(id(task)),
+                'name': coro_name,
+                'status': 'running'
+            })
+        return tasks
+    return []
+
+def get_pending_approvals():
+    """Get list of pending approvals."""
+    if audio_loop and hasattr(audio_loop, '_pending_confirmations'):
+        approvals = []
+        for request_id, data in audio_loop._pending_confirmations.items():
+            if not isinstance(data, dict):
+                approvals.append({
+                    'id': request_id,
+                    'tool': 'Unknown',
+                    'description': 'Pending confirmation request'
+                })
+                continue
+            approvals.append({
+                'id': request_id,
+                'tool': data.get('tool', 'Unknown'),
+                'description': f"{data.get('tool', 'Unknown')} with args: {data.get('args', {})}"
+            })
+        return approvals
+    return []
+
+def build_memory_summary():
+    """Get memory summary statistics."""
+    try:
+        memory_backend = None
+        if audio_loop and getattr(audio_loop, 'memory_manager', None):
+            memory_backend = audio_loop.memory_manager
+        elif global_memory_manager:
+            memory_backend = global_memory_manager
+
+        if memory_backend:
+            facts = memory_backend.get_all_facts() if hasattr(memory_backend, 'get_all_facts') else []
+            transcripts_dir = Path(ROOT_DIR) / "long_term_memory" / "transcripts"
+            projects_dir = Path(ROOT_DIR) / "projects"
+
+            total_facts = len(facts)
+            recent_conversations = len(list(transcripts_dir.glob("*.txt"))) if transcripts_dir.exists() else 0
+            projects_count = len([d for d in projects_dir.iterdir() if d.is_dir()]) if projects_dir.exists() else 0
+
+            storage_used = 0
+            long_term_dir = Path(ROOT_DIR) / "long_term_memory"
+            if long_term_dir.exists():
+                for item in long_term_dir.rglob("*"):
+                    if item.is_file():
+                        storage_used += item.stat().st_size
+
+            storage_mb = storage_used / (1024 * 1024)
+            storage_str = f"{storage_mb:.1f} MB" if storage_mb < 1024 else f"{storage_mb/1024:.1f} GB"
+
+            return {
+                'total_facts': total_facts,
+                'recent_conversations': recent_conversations,
+                'projects_count': projects_count,
+                'storage_used': storage_str
+            }
+    except Exception as e:
+        print(f"Error getting memory summary: {e}")
+
+    return {
+        'total_facts': 0,
+        'recent_conversations': 0,
+        'projects_count': 0,
+        'storage_used': '0 MB'
+    }
+
+def build_proactive_suggestions():
+    """Get proactive suggestions."""
+    try:
+        suggestions = []
+        status = {}
+
+        if audio_loop and hasattr(audio_loop, 'system_monitor'):
+            monitor = getattr(audio_loop, 'system_monitor', None)
+            if monitor and hasattr(monitor, 'check'):
+                try:
+                    status = system_monitor_module.get_system_status() if hasattr(system_monitor_module, 'get_system_status') else {}
+                except Exception:
+                    status = {}
+        elif system_monitor_module and hasattr(system_monitor_module, 'get_system_status'):
+            status = system_monitor_module.get_system_status() or {}
+
+        if status.get('cpu_percent', 0) > 70:
+            suggestions.append({
+                'id': 'cpu_high',
+                'type': 'System Performance',
+                'message': 'CPU usage is elevated',
+                'reason': f"Currently at {status.get('cpu_percent', 0)}%",
+                'action': 'Consider reducing background tasks'
+            })
+
+        if status.get('ram_percent', 0) > 70:
+            suggestions.append({
+                'id': 'ram_high',
+                'type': 'Memory Warning',
+                'message': 'RAM usage is high',
+                'reason': f"Currently at {status.get('ram_percent', 0)}%",
+                'action': 'Consider closing unused applications'
+            })
+
+        if audio_loop and hasattr(audio_loop, 'proactive_engine'):
+            try:
+                engine = audio_loop.proactive_engine
+                if hasattr(engine, 'get_suggestions'):
+                    engine_suggestions = engine.get_suggestions() or []
+                    if engine_suggestions:
+                        suggestions.extend(engine_suggestions)
+            except Exception:
+                pass
+
+        return suggestions
+    except Exception as e:
+        print(f"Error getting proactive suggestions: {e}")
+    return []
+
+def list_routine_queue():
+    """Get scheduled routines."""
+    # This would integrate with the routine system
+    if audio_loop and hasattr(audio_loop, 'routine_manager'):
+        try:
+            # Return available routines from the routine manager
+            return [
+                {
+                    'id': name,
+                    'name': name.replace('_', ' ').title(),
+                    'description': f'Workflow routine: {name}',
+                    'scheduled_time': 'On-demand',
+                    'status': 'ready'
+                }
+                for name in audio_loop.routine_manager.routines.keys()
+            ]
+        except Exception as e:
+            print(f"Error getting routine queue: {e}")
+    return []
+
+def get_quiet_mode():
+    """Get quiet mode state."""
+    settings = load_settings() or {}
+    return settings.get('quiet_mode', False)
+
+def get_interrupt_preferences():
+    """Get interrupt preferences."""
+    settings = load_settings() or {}
+    return settings.get('interrupt_preferences', {
+        'urgent_only': False,
+        'emergencies_only': False,
+        'custom_categories': []
+    })
+
+def get_current_mode():
+    """Get current assistant mode."""
+    settings = load_settings() or {}
+    return settings.get('current_mode', 'active')
 
 if __name__ == "__main__":
     uvicorn.run(

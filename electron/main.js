@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, shell } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -24,6 +24,11 @@ function createWindow() {
         frame: false, // Frameless for custom UI
         titleBarStyle: 'hidden',
         show: false, // Don't show until ready
+    });
+
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+        shell.openExternal(url);
+        return { action: 'deny' };
     });
 
     // In dev, load Vite server. In prod, load index.html

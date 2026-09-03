@@ -1,13 +1,12 @@
 import React, { useEffect, useState, useRef } from 'react';
 import io from 'socket.io-client';
 
-import Visualizer from './components/Visualizer';
 import TopAudioBar from './components/TopAudioBar';
 import CadWindow from './components/CadWindow';
 import BrowserWindow from './components/BrowserWindow';
 import ChatModule from './components/ChatModule';
 import ToolsModule from './components/ToolsModule';
-import { Mic, MicOff, Settings, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock } from 'lucide-react';
+import { CalendarDays, CloudSun, FolderOpen, Mail, MapPinned, Mic, MicOff, Search, Settings, ShoppingBag, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock, Youtube } from 'lucide-react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 // MemoryPrompt removed - memory is now actively saved to project
 import ConfirmationPopup from './components/ConfirmationPopup';
@@ -22,15 +21,16 @@ import FileManagerWindow from './components/FileManagerWindow';
 import FlightWindow from './components/FlightWindow';
 import GameWindow from './components/GameWindow';
 import MessageWindow from './components/MessageWindow';
+import MemoryWindow from './components/MemoryWindow';
 import ProcessWindow from './components/ProcessWindow';
+import ProactiveWindow from './components/ProactiveWindow';
 import ReminderWindow from './components/ReminderWindow';
+import RoutinesWindow from './components/RoutinesWindow';
 import SearchWindow from './components/SearchWindow';
 import SystemMonitorWindow from './components/SystemMonitorWindow';
 import WeatherWindow from './components/WeatherWindow';
 import YouTubeWindow from './components/YouTubeWindow';
 import ContactsWindow from './components/ContactsWindow';
-
-
 
 const socket = io('http://localhost:8000');
 window.socket = socket;
@@ -62,6 +62,9 @@ function App() {
     const [isMuted, setIsMuted] = useState(true); // Mic state DEFAULT MUTED
     const [isVideoOn, setIsVideoOn] = useState(false); // Video state
     const [messages, setMessages] = useState([]);
+    const [notificationCount, setNotificationCount] = useState(0);
+    const [weatherCard, setWeatherCard] = useState(null);
+    const [googleServiceCard, setGoogleServiceCard] = useState(null);
     const [inputValue, setInputValue] = useState('');
     const [cadData, setCadData] = useState(null);
     const [cadThoughts, setCadThoughts] = useState(''); // Streaming AI thoughts
@@ -83,8 +86,11 @@ function App() {
         flights: false,
         games: false,
         messages: false,
+        memory: false,
         processes: false,
+        proactive: false,
         reminders: false,
+        routines: false,
         search: false,
         system: false,
         weather: false,
@@ -116,12 +122,18 @@ function App() {
     const [selectedWebcamId, setSelectedWebcamId] = useState(() => localStorage.getItem('selectedWebcamId') || '');
     const [showSettings, setShowSettings] = useState(false);
     const [currentProject, setCurrentProject] = useState('default');
+    const [systemStats, setSystemStats] = useState({
+        cpu_percent: 0,
+        ram_percent: 0,
+        cpu_temp_c: null,
+        gpu_percent: null,
+        uptime: '0h 0m'
+    });
 
     // Modular Mode State
     const [isModularMode, setIsModularMode] = useState(false);
     const [elementPositions, setElementPositions] = useState({
         video: { x: 40, y: 80 }, // Initial positions (approximate)
-        visualizer: { x: window.innerWidth / 2, y: window.innerHeight / 2 - 150 },
         chat: { x: window.innerWidth / 2, y: window.innerHeight / 2 + 100 },
         cad: { x: window.innerWidth / 2 + 300, y: window.innerHeight / 2 },
         browser: { x: window.innerWidth / 2 - 300, y: window.innerHeight / 2 },
@@ -134,8 +146,11 @@ function App() {
         flights: { x: 400, y: 410 },
         games: { x: 420, y: 430 },
         messages: { x: 440, y: 450 },
+        memory: { x: 460, y: 430 },
         processes: { x: 460, y: 470 },
+        proactive: { x: 480, y: 450 },
         reminders: { x: 480, y: 490 },
+        routines: { x: 500, y: 450 },
         search: { x: 500, y: 510 },
         system: { x: 520, y: 530 },
         weather: { x: 540, y: 550 },
@@ -145,9 +160,8 @@ function App() {
     });
 
     const [elementSizes, setElementSizes] = useState({
-        visualizer: { w: 550, h: 350 },
-        chat: { w: 550, h: 220 },
-        tools: { w: 500, h: 80 }, // Approx
+        chat: { w: 760, h: 220 },
+        tools: { w: 760, h: 80 },
         cad: { w: 400, h: 400 },
         browser: { w: 550, h: 380 },
         video: { w: 320, h: 180 },
@@ -160,8 +174,11 @@ function App() {
         flights: { w: 500, h: 500 },
         games: { w: 500, h: 450 },
         messages: { w: 450, h: 500 },
+        memory: { w: 420, h: 360 },
         processes: { w: 550, h: 400 },
+        proactive: { w: 440, h: 420 },
         reminders: { w: 420, h: 400 },
+        routines: { w: 420, h: 400 },
         search: { w: 480, h: 400 },
         system: { w: 380, h: 360 },
         weather: { w: 400, h: 300 },
@@ -172,9 +189,9 @@ function App() {
 
     // Z-Index Stacking Order (last element = highest z-index)
     const [zIndexOrder, setZIndexOrder] = useState([
-        'visualizer', 'chat', 'tools', 'video', 'cad', 'browser', 'kasa', 'printer',
+        'chat', 'tools', 'video', 'cad', 'browser', 'kasa', 'printer',
         'code', 'control', 'desktop', 'files', 'flights', 'games', 'messages',
-        'processes', 'reminders', 'search', 'system', 'weather', 'youtube', 'contacts'
+        'memory', 'processes', 'proactive', 'reminders', 'routines', 'search', 'system', 'weather', 'youtube', 'contacts'
     ]);
 
     // Hand Control State
@@ -252,51 +269,24 @@ function App() {
             // ToolsModule uses translate(-50%, -50%); keep its lower edge near the HUD frame.
             const toolsCenterY = height - 26;
 
-            const gap = 20;
+            // Chat is top-anchored; keep its lower edge just above the toggle bar.
+            const toggleBarTop = toolsCenterY - 40;
+            const chatBottomLimit = toggleBarTop - 0;
 
-            // Chat: Anchor is Top-Center (translate(-50%, 0)).
-            // We want Chat Bottom to be above Tools Top.
-            // Tools Top = toolsCenterY - (ToolsHeight/2) approx 40 = height - 140;
-            const chatBottomLimit = height - 140;
-
-            // Dynamic Height Calculation to fit screen
-            // Standard Heights
-            let vizH = 400;
-            let chatH = 250;
+            // Let chat use the former dashboard area without exceeding the HUD controls.
+            let chatH = Math.min(360, Math.max(180, chatBottomLimit - 80));
             const topBarHeight = 60;
-
-            // Total needed: TopBar + Viz + Gap + Chat + Gap + Tools (140 reserved)
-            const totalNeeded = topBarHeight + vizH + gap + chatH + gap + 140;
-
-            if (height < totalNeeded) {
-                // Scale down
-                const available = height - topBarHeight - 140 - (gap * 2);
-                // Allocate 60% to Viz, 40% to Chat
-                vizH = available * 0.6;
-                chatH = available * 0.4;
-            }
-
-            // Positions
-            // Visualizer (Center Anchored)
-            // Top of Viz = TopBarHeight. Center = TopBarHeight + VizH/2
-            const vizY = topBarHeight + (vizH / 2); // Removed buffer
-
-            // Chat (Top Anchored)
-            // Top of Chat = TopBarHeight + VizH + Gap
-            const chatY = topBarHeight + vizH + gap;
+            const chatY = Math.max(topBarHeight + 20, chatBottomLimit - chatH);
+            const controlBarWidth = Math.min(760, width - 32);
 
             setElementSizes(prev => ({
                 ...prev,
-                visualizer: { w: Math.min(600, width * 0.8), h: vizH },
-                chat: { w: Math.min(600, width * 0.9), h: chatH }
+                chat: { w: controlBarWidth, h: chatH },
+                tools: { ...prev.tools, w: controlBarWidth }
             }));
 
             setElementPositions(prev => ({
                 ...prev,
-                visualizer: {
-                    x: width / 2,
-                    y: vizY
-                },
                 chat: {
                     x: width / 2,
                     y: chatY
@@ -394,6 +384,16 @@ function App() {
                 setStatus('Connected');
             }
         });
+        socket.on('unified_notification', (notification) => {
+            setNotificationCount(count => count + 1);
+            if (notification?.category === 'weather' && notification.weather) {
+                setWeatherCard(notification.weather);
+            }
+            if (notification?.service) {
+                setGoogleServiceCard(notification);
+            }
+            addMessage(notification?.title || 'Friday', notification?.message || 'New notification');
+        });
         socket.on('action_plan', (plan) => {
             setActionPlan(plan);
             if (plan.steps?.every((step) => ['done', 'error', 'cancelled'].includes(step.status))) {
@@ -431,6 +431,18 @@ function App() {
             if (typeof settings.camera_flipped !== 'undefined') {
                 console.log("[Settings] Camera flip set to:", settings.camera_flipped);
                 setIsCameraFlipped(settings.camera_flipped);
+            }
+        });
+
+        socket.on('system_monitor_data', (data) => {
+            if (data && typeof data === 'object') {
+                setSystemStats(prev => ({ ...prev, ...data }));
+            }
+        });
+
+        socket.on('dashboard_data', (data) => {
+            if (data && data.system_health && typeof data.system_health === 'object') {
+                setSystemStats(prev => ({ ...prev, ...data.system_health }));
             }
         });
         socket.on('error', (data) => {
@@ -691,6 +703,7 @@ function App() {
             socket.off('connect');
             socket.off('disconnect');
             socket.off('status');
+            socket.off('unified_notification');
             socket.off('audio_data');
             socket.off('cad_data');
             socket.off('cad_thought');
@@ -814,6 +827,9 @@ function App() {
 
             setIsVideoOn(true);
             isVideoOnRef.current = true; // Update ref for loop
+
+            // Tell the backend to stream the webcam into the Live session
+            socket.emit('set_live_video', { enabled: true });
 
             console.log("Starting video loop with webcam:", selectedWebcamId || "default");
             requestAnimationFrame(predictWebcam);
@@ -1122,6 +1138,8 @@ function App() {
     };
 
     const stopVideo = () => {
+        // Stop live vision streaming to the model
+        socket.emit('set_live_video', { enabled: false });
         if (videoRef.current && videoRef.current.srcObject) {
             videoRef.current.srcObject.getTracks().forEach(track => track.stop());
             videoRef.current.srcObject = null;
@@ -1146,6 +1164,8 @@ function App() {
     const togglePower = () => {
         if (isConnected) {
             socket.emit('stop_audio');
+            // Live vision has no session to stream to once powered off
+            socket.emit('set_live_video', { enabled: false });
             setIsConnected(false);
             setIsMuted(false); // Reset mute state
         } else {
@@ -1418,6 +1438,10 @@ function App() {
         setShowPrinterWindow(!showPrinterWindow);
     };
 
+    const openExternalApp = (url) => {
+        window.open(url, '_blank', 'noopener,noreferrer');
+    };
+
     const toggleActionWindow = (id) => {
         setActionWindows(prev => ({ ...prev, [id]: !prev[id] }));
         if (!actionWindows[id]) {
@@ -1444,8 +1468,11 @@ function App() {
         { id: 'flights', component: FlightWindow },
         { id: 'games', component: GameWindow },
         { id: 'messages', component: MessageWindow },
+        { id: 'memory', component: MemoryWindow },
         { id: 'processes', component: ProcessWindow },
+        { id: 'proactive', component: ProactiveWindow },
         { id: 'reminders', component: ReminderWindow },
+        { id: 'routines', component: RoutinesWindow },
         { id: 'search', component: SearchWindow },
         { id: 'system', component: SystemMonitorWindow },
         { id: 'weather', component: WeatherWindow },
@@ -1540,12 +1567,26 @@ function App() {
                     )}
                 </div>
 
+                <div className="flex items-center gap-2 text-[10px] font-mono text-cyan-300/80 mx-4" style={{ WebkitAppRegion: 'no-drag' }}>
+                    {notificationCount > 0 && <div className="border border-amber-400/40 bg-amber-400/10 px-2 py-1 rounded text-amber-200">ALERTS {notificationCount}</div>}
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">CPU {Math.round(systemStats.cpu_percent || 0)}%</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">RAM {Math.round(systemStats.ram_percent || 0)}%</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">{systemStats.cpu_temp_c ? `TEMP ${Math.round(systemStats.cpu_temp_c)}°C` : 'TEMP --'}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">UP {systemStats.uptime || '0h 0m'}</div>
+                </div>
+
                 {/* Top Visualizer (User Mic) */}
                 <div className="flex-1 flex justify-center mx-4">
                     <TopAudioBar audioData={micAudioData} />
                 </div>
 
                 <div className="flex items-center gap-2 pr-2" style={{ WebkitAppRegion: 'no-drag' }}>
+                    <div className="hidden xl:flex items-center gap-2 text-[9px] font-mono text-cyan-500/70">
+                        <span>FRIDAY // CORE</span>
+                        <span className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'LINK STABLE' : 'LINK LOST'}</span>
+                        <span>PROJECT // {currentProject?.toUpperCase()}</span>
+                        <span>MEM // ACTIVE</span>
+                    </div>
                     {/* Live Clock */}
                     <div className="flex items-center gap-1.5 text-[11px] text-cyan-300/70 font-mono px-2">
                         <Clock size={12} className="text-cyan-500/50" />
@@ -1569,19 +1610,31 @@ function App() {
                 <div className="hud-edge-rail hud-edge-rail-left" aria-hidden="true" />
                 <div className="hud-edge-rail hud-edge-rail-right" aria-hidden="true" />
 
-                <div className="hud-telemetry hud-telemetry-left" aria-label="System telemetry">
+                <aside className="hud-sidebar hud-sidebar-left" aria-label="System telemetry">
                     <span className="hud-kicker">SYS // TELEMETRY</span>
+                    <div className="hud-sidebar-rule" />
                     <span><b className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'ONLINE' : 'OFFLINE'}</b> / {status.toUpperCase()}</span>
                     <span>MIC // {isMuted ? 'MUTED' : 'LIVE'}</span>
                     <span>CAM // {isVideoOn ? 'ACTIVE' : 'STANDBY'}</span>
-                </div>
+                    <span>CPU // {Math.round(systemStats.cpu_percent || 0)}%</span>
+                    <span>RAM // {Math.round(systemStats.ram_percent || 0)}%</span>
+                    <span>UP // {systemStats.uptime || '0h 0m'}</span>
+                </aside>
 
-                <div className="hud-telemetry hud-telemetry-right" aria-label="Session telemetry">
-                    <span className="hud-kicker">SESSION // {currentProject?.toUpperCase()}</span>
-                    <span>MODE // {isModularMode ? 'MODULAR' : 'CORE'}</span>
-                    <span>DEVICES // {kasaDevices.length.toString().padStart(2, '0')}</span>
-                    <span>PRINTERS // {printerCount.toString().padStart(2, '0')}</span>
-                </div>
+                <aside className="hud-sidebar hud-sidebar-right" aria-label="Session controls">
+                    <span className="hud-kicker">HUD // APPLICATIONS</span>
+                    <div className="hud-sidebar-rule" />
+                    <div className="hud-sidebar-actions">
+                        <button type="button" onClick={() => openExternalApp('https://www.google.com/search?q=weather')}><CloudSun size={14} /><span>Google Weather</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://maps.google.com')}><MapPinned size={14} /><span>Google Maps</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://www.google.com')}><Search size={14} /><span>Google Search</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://calendar.google.com')}><CalendarDays size={14} /><span>Google Calendar</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://mail.google.com')}><Mail size={14} /><span>Gmail</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://drive.google.com')}><FolderOpen size={14} /><span>Google Drive</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://www.youtube.com')}><Youtube size={14} /><span>YouTube</span></button>
+                        <button type="button" onClick={() => openExternalApp('https://www.amazon.com')}><ShoppingBag size={14} /><span>Amazon</span></button>
+                    </div>
+                </aside>
 
                 {actionPlan && (
                     <div className="hud-action-plan" aria-live="polite">
@@ -1611,43 +1664,6 @@ function App() {
                 <div className="hud-registration hud-registration-top-right" aria-hidden="true" />
                 <div className="hud-registration hud-registration-bottom-left" aria-hidden="true" />
                 <div className="hud-registration hud-registration-bottom-right" aria-hidden="true" />
-
-                <div className="hud-diagnostics" aria-label="Friday diagnostics">
-                    <span>FRIDAY // CORE</span>
-                    <span className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'LINK STABLE' : 'LINK LOST'}</span>
-                    <span>PROJECT // {currentProject?.toUpperCase()}</span>
-                    <span>MEM // ACTIVE</span>
-                    <span>{currentTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
-                </div>
-
-                {/* Central Visualizer (AI Audio) */}
-                <div
-                    id="visualizer"
-                    className={`absolute flex items-center justify-center transition-all duration-200 
-                        backdrop-blur-xl bg-black/30 border border-white/10 shadow-2xl overflow-visible
-                        ${isModularMode ? (activeDragElement === 'visualizer' ? 'ring-2 ring-green-500 bg-green-500/10' : 'ring-1 ring-yellow-500/30 bg-yellow-500/5') + ' rounded-2xl pointer-events-auto' : 'rounded-2xl pointer-events-none'}
-                    `}
-                    style={{
-                        left: elementPositions.visualizer.x,
-                        top: elementPositions.visualizer.y,
-                        transform: 'translate(-50%, -50%)',
-                        width: elementSizes.visualizer.w,
-                        height: elementSizes.visualizer.h
-                    }}
-                    onMouseDown={(e) => handleMouseDown(e, 'visualizer')}
-                >
-                    <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
-                    <div className="relative z-20">
-                        <Visualizer
-                            audioData={aiAudioData}
-                            isListening={isConnected && !isMuted}
-                            intensity={audioAmp}
-                            width={elementSizes.visualizer.w}
-                            height={elementSizes.visualizer.h}
-                        />
-                    </div>
-                    {isModularMode && <div className={`absolute top-2 right-2 text-xs font-bold tracking-widest z-20 ${activeDragElement === 'visualizer' ? 'text-green-500' : 'text-yellow-500/50'}`}>VISUALIZER</div>}
-                </div>
 
                 {/* Video Feed Overlay */}
                 {/* Floating Project Label */}
@@ -1815,6 +1831,9 @@ function App() {
                     width={elementSizes.chat.w}
                     height={elementSizes.chat.h}
                     onMouseDown={(e) => handleMouseDown(e, 'chat')}
+                    weatherCard={weatherCard}
+                    googleServiceCard={googleServiceCard}
+                    actionPlan={actionPlan}
                 />
 
                 {/* Footer Controls / Tools Module */}
@@ -1842,6 +1861,7 @@ function App() {
                         showActionMenu={showActionMenu}
                         activeDragElement={activeDragElement}
                         position={elementPositions.tools}
+                        width={elementSizes.tools.w}
                         onMouseDown={(e) => handleMouseDown(e, 'tools')}
                     />
                 </div>

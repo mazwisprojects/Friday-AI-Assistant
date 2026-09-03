@@ -7,7 +7,7 @@ import sys
 import traceback
 from dotenv import load_dotenv
 import cv2
-import pyaudio
+import sounddevice as sd
 import PIL.Image
 import mss
 import argparse
@@ -17,6 +17,7 @@ import struct
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from google import genai
 from google.genai import types
@@ -66,6 +67,9 @@ from actions import agent_dispatcher as agent_dispatcher_module
 from actions.proactive import ProactiveEngine
 from memory.memory_manager import load_memory as load_legacy_memory
 from contacts_manager import ContactsManager
+from google_account import GoogleAccount
+from notification_manager import NotificationManager
+from tool_builder import ToolBuilder
 from undo_manager import UndoManager
 from config import FACT_GEMINI_MODEL, MAIN_GEMINI_MODEL
 
@@ -74,7 +78,7 @@ from config import FACT_GEMINI_MODEL, MAIN_GEMINI_MODEL
 load_dotenv()
 youtube_video_module._ask_for_url = lambda *args, **kwargs: None
 
-FORMAT = pyaudio.paInt16
+DTYPE = "int16"
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
 RECEIVE_SAMPLE_RATE = 24000
@@ -91,7 +95,8 @@ DEFAULT_MODE = "camera"
 load_dotenv()
 client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
 
-tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:]}]
+custom_tool_builder = ToolBuilder(os.path.dirname(os.path.abspath(__file__)))
+tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
@@ -104,6 +109,10 @@ config = types.LiveConnectConfig(
         "Your creator is Sinegugu, and you address him as 'Sir'. "
         "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
         "You have a fun personality. "
+        "When the user asks for a morning briefing, always use the morning_briefing routine so it gathers current Gmail, Google Calendar, and system information before answering. "
+        "When asked to self-build, use self_maintenance with action self_build; when asked to self-heal, use self_maintenance with action self_heal; when asked to self-upgrade, use self_maintenance with action self_upgrade and report exactly what changed. "
+        "For every question about the current time or date, always use get_local_time and report Johannesburg, South Africa time (SAST), never UTC. When the user asks to put a reminder or event on Google Calendar, use google_calendar_create; use set_reminder only for a local notification. "
+        "When the user asks to check, read, search, or summarize emails, always use the gmail_read tool; never use run_web_agent or web_search for Gmail. When the user asks for Google Contacts, always use google_contacts_read; when they ask to save, transfer, import, or synchronize contacts, use the appropriate Google Contacts write tool and report its actual result; use contacts_manager only for Friday's local contacts. "
         "Before ever telling the user you don't know a personal detail about them (name, relationships, family, "
         "job, preferences, past decisions, or anything they may have told you in a previous conversation), you must "
         "first silently call the search_memory tool with relevant keywords to check your long-term memory. Only say "
@@ -118,8 +127,6 @@ config = types.LiveConnectConfig(
     )
 )
 
-pya = pyaudio.PyAudio()
-
 from cad_agent import CadAgent
 from web_agent import WebAgent
 from kasa_agent import KasaAgent
@@ -128,7 +135,7 @@ from agents.agent_supervisor import AgentSupervisor
 from agents.routine_manager import RoutineManager
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, on_notification=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -144,6 +151,7 @@ class AudioLoop:
         self.on_error = on_error
         self.on_alert_settings_update = on_alert_settings_update
         self.on_plan_update = on_plan_update
+        self.on_notification = on_notification
         self.authenticated = authenticated
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
@@ -187,19 +195,22 @@ class AudioLoop:
         self.routine_manager = RoutineManager()
         self.system_monitor = system_monitor_module.SystemMonitor()
         self.proactive_engine = ProactiveEngine()
+        self.notifications = NotificationManager(on_hud=on_notification, on_voice=self._voice_notification)
         self._last_user_speech = time.monotonic()
         self.last_uploaded_image = None
         self.last_uploaded_file = None
         self.undo_manager = None
         self._active_plan = None
+        self._active_task_id = None
         self._plan_pending = False
 
         self.send_text_task = None
         self.stop_event = asyncio.Event()
         
         self.stop_event = asyncio.Event()
-        
-        self.permissions = {} # Default Empty (Will treat unset as True)
+
+        # Default to automatic execution unless the user explicitly marks a tool as confirmation-required.
+        self.permissions = {}
         self._pending_confirmations = {}
 
         # Video buffering state
@@ -221,6 +232,8 @@ class AudioLoop:
         project_root = os.path.dirname(current_dir)
         self.project_manager = ProjectManager(project_root)
         self.contacts_manager = ContactsManager(project_root)
+        self.google_account = GoogleAccount(current_dir)
+        self.tool_builder = custom_tool_builder
         self.undo_manager = UndoManager(project_root)
         file_controller_module.configure_undo_manager(self.undo_manager)
 
@@ -316,6 +329,14 @@ class AudioLoop:
         return None
 
     def start_action_plan(self, tool_name: str, args: dict):
+        task = self.supervisor.create_task(
+            f"Execute {tool_name}",
+            {"tool": tool_name, "args": args},
+            deadline_seconds=600,
+        )
+        self._active_task_id = task["task_id"]
+        self.supervisor.plan_task(self._active_task_id)
+
         plan = self.supervisor.plan_tool_call(tool_name, args)
         steps = plan.get("steps", [])
         if not steps:
@@ -347,6 +368,15 @@ class AudioLoop:
                 step["status"] = "error"
         if self.on_plan_update:
             self.on_plan_update(self._active_plan)
+
+        if self._active_task_id:
+            summary = f"{self._active_plan['title']} completed successfully." if success else f"{self._active_plan['title']} failed or was cancelled."
+            self.supervisor.validate_task_result(
+                self._active_task_id,
+                {"ok": bool(success), "summary": summary, "result": self._active_plan},
+            )
+            self._active_task_id = None
+
         self._active_plan = None
 
     @staticmethod
@@ -464,8 +494,24 @@ class AudioLoop:
         print(f"[FRIDAY DEBUG] [CONFIG] Updating tool permissions: {new_perms}")
         self.permissions.update(new_perms)
 
+    def get_system_status(self):
+        return system_monitor_module.get_system_status()
+
+    def run_powershell_command(self, params):
+        return powershell_command_module.run_powershell_command(params)
+
+    def set_reminder(self, params):
+        return reminder_module.reminder(params)
+
+    def desktop_control(self, params):
+        return desktop_module.desktop_control(params)
+
     def set_paused(self, paused):
         self.paused = paused
+
+    async def _voice_notification(self, message, priority="normal"):
+        if self.session and not self.paused:
+            await self.session.send(input=f"System Notification: {message}", end_of_turn=True)
 
     def stop(self):
         self.stop_event.set()
@@ -500,6 +546,8 @@ class AudioLoop:
             outcome = self.supervisor.record_execution(tool_name, result)
             if not outcome["ok"]:
                 self.finish_action_plan(False)
+                self_maintenance_module.record_tool_failure(tool_name, str(result))
+                await self.notifications.notify("long_running_action", f"{tool_name} failed", f"{tool_name} reported a failed result.", "high")
                 if self.session:
                     await self.session.send(
                         input=f"System Notification: {tool_name} reported a failed result. Outcome:\n{result}",
@@ -508,6 +556,7 @@ class AudioLoop:
                 return
 
             self.finish_action_plan(True)
+            await self.notifications.notify("long_running_action", f"{tool_name} complete", f"{tool_name} finished successfully.")
             if self.session:
                 await self.session.send(
                     input=f"System Notification: {tool_name} completed. Result:\n{result}",
@@ -519,6 +568,8 @@ class AudioLoop:
         except Exception as error:
             print(f"[FRIDAY DEBUG] [ERR] {tool_name} background task failed: {error}")
             self.finish_action_plan(False)
+            self_maintenance_module.record_tool_failure(tool_name, str(error))
+            await self.notifications.notify("long_running_action", f"{tool_name} failed", f"{tool_name} failed: {error}", "high")
 
     async def cleanup_resources(self):
         for task in list(self._background_tasks):
@@ -637,20 +688,20 @@ class AudioLoop:
             await self.session.send(input=msg, end_of_turn=False)
 
     async def listen_audio(self):
-        mic_info = pya.get_default_input_device_info()
+        default_input = sd.default.device[0]
 
         # Resolve Input Device by Name if provided
         resolved_input_device_index = None
         
         if self.input_device_name:
             print(f"[FRIDAY] Attempting to find input device matching: '{self.input_device_name}'")
-            count = pya.get_device_count()
+            count = len(sd.query_devices())
             best_match = None
             
             for i in range(count):
                 try:
-                    info = pya.get_device_info_by_index(i)
-                    if info['maxInputChannels'] > 0:
+                    info = sd.query_devices(i)
+                    if info['max_input_channels'] > 0:
                         name = info.get('name', '')
                         # Simple case-insensitive check
                         if self.input_device_name.lower() in name.lower() or name.lower() in self.input_device_name.lower():
@@ -681,14 +732,14 @@ class AudioLoop:
 
         try:
             self.audio_stream = await asyncio.to_thread(
-                pya.open,
-                format=FORMAT,
+                sd.RawInputStream,
+                samplerate=SEND_SAMPLE_RATE,
                 channels=CHANNELS,
-                rate=SEND_SAMPLE_RATE,
-                input=True,
-                input_device_index=resolved_input_device_index if resolved_input_device_index is not None else mic_info["index"],
-                frames_per_buffer=CHUNK_SIZE,
+                dtype=DTYPE,
+                device=resolved_input_device_index if resolved_input_device_index is not None else default_input,
+                blocksize=CHUNK_SIZE,
             )
+            await asyncio.to_thread(self.audio_stream.start)
         except OSError as e:
             print(f"[FRIDAY] [ERR] Failed to open audio input stream: {e}")
             print("[FRIDAY] [WARN] Audio features will be disabled. Please check microphone permissions.")
@@ -709,7 +760,8 @@ class AudioLoop:
                 continue
 
             try:
-                data = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE, **kwargs)
+                raw_data, _ = await asyncio.to_thread(self.audio_stream.read, CHUNK_SIZE)
+                data = bytes(raw_data)
                 
                 # 1. Send Audio
                 if self.out_queue:
@@ -1026,7 +1078,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_weather", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "run_routine"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "build_custom_tool", "test_custom_tool", "run_custom_tool", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "run_routine"] or fc.name in self.tool_builder.tools:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -1046,9 +1098,9 @@ class AudioLoop:
                                     self._update_plan_step(1, "done")
                                     self._update_plan_step(2, "active")
                                 
-                                # Check Permissions (Default to True if not set)
-                                confirmation_required = self.permissions.get(fc.name, True)
-                                
+                                # All registered tools run automatically by user request.
+                                confirmation_required = fc.name in {"gmail_create_draft", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "google_contacts_import", "google_contacts_sync"}
+
                                 if not confirmation_required:
                                     print(f"[FRIDAY DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
                                     # Skip confirmation block and jump to execution
@@ -1518,6 +1570,69 @@ class AudioLoop:
                                     )
                                     function_responses.append(function_response)
 
+                                elif fc.name == "get_local_time":
+                                    local_time = datetime.now(ZoneInfo("Africa/Johannesburg"))
+                                    result_str = local_time.strftime("%A, %d %B %Y at %H:%M:%S SAST (Johannesburg, South Africa)")
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "google_calendar_create":
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'google_calendar_create'")
+                                    try:
+                                        event = await asyncio.to_thread(
+                                            self.google_account.create_calendar_event,
+                                            fc.args.get("title", "Friday reminder"),
+                                            fc.args.get("date", ""),
+                                            fc.args.get("time", ""),
+                                            fc.args.get("duration_minutes", 30),
+                                            fc.args.get("description", ""),
+                                        )
+                                        result_str = json.dumps({"success": True, "event": event}, ensure_ascii=False)
+                                        if self.on_notification:
+                                            self.on_notification({"category": "google_calendar", "title": "Google Calendar", "message": "Event created.", "service": "calendar", "items": [event]})
+                                    except Exception as exc:
+                                        result_str = f"Google Calendar unavailable: {exc}"
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "google_calendar_list":
+                                    try:
+                                        events = await asyncio.to_thread(self.google_account.list_calendar_events, fc.args.get("query", ""), fc.args.get("days", 7), fc.args.get("limit", 25))
+                                        result_str = json.dumps(events, ensure_ascii=False)
+                                        if self.on_notification:
+                                            self.on_notification({"category": "google_calendar", "title": "Google Calendar", "message": f"Found {len(events)} upcoming event(s).", "service": "calendar", "items": events})
+                                    except Exception as exc:
+                                        result_str = f"Google Calendar unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "google_calendar_update":
+                                    try:
+                                        event = await asyncio.to_thread(self.google_account.update_calendar_event, fc.args.get("event_id", ""), fc.args.get("title"), fc.args.get("date"), fc.args.get("time"), fc.args.get("duration_minutes", 30), fc.args.get("description"))
+                                        result_str = json.dumps({"success": True, "event": event}, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = f"Google Calendar update unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "google_calendar_delete":
+                                    try:
+                                        await asyncio.to_thread(self.google_account.delete_calendar_event, fc.args.get("event_id", ""))
+                                        result_str = json.dumps({"success": True, "deleted": fc.args.get("event_id", "")})
+                                    except Exception as exc:
+                                        result_str = f"Google Calendar delete unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "google_calendar_recurring":
+                                    try:
+                                        event = await asyncio.to_thread(self.google_account.create_recurring_event, fc.args.get("title", "Friday event"), fc.args.get("date", ""), fc.args.get("time", ""), fc.args.get("recurrence", ""), fc.args.get("duration_minutes", 30), fc.args.get("description", ""))
+                                        result_str = json.dumps({"success": True, "event": event}, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = f"Recurring Google Calendar event unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
                                 elif fc.name == "mute_alert_category":
                                     action = fc.args.get("action", "").lower().strip()
                                     category = fc.args.get("category", "").lower().strip()
@@ -1635,6 +1750,13 @@ class AudioLoop:
                                 elif fc.name == "get_weather":
                                     city = fc.args.get("city", "")
                                     print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_weather' city='{city}'")
+                                    weather_card = None
+                                    try:
+                                        weather_card = await asyncio.to_thread(weather_report_module.get_weather_data, city)
+                                    except Exception:
+                                        pass
+                                    if weather_card and self.on_notification:
+                                        self.on_notification({"category": "weather", "title": "Weather", "message": weather_card["summary"], "weather": weather_card})
                                     result_str = await asyncio.to_thread(
                                         weather_report_module.weather_action,
                                         {"city": city, "time": fc.args.get("time", "today")}
@@ -1695,6 +1817,132 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "gmail_read":
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'gmail_read'")
+                                    try:
+                                        emails = await asyncio.to_thread(
+                                            self.google_account.read_emails,
+                                            fc.args.get("query", "is:unread"),
+                                            fc.args.get("limit", 10),
+                                        )
+                                        result_str = json.dumps(emails, ensure_ascii=False)
+                                        if self.on_notification:
+                                            self.on_notification({"category": "google_gmail", "title": "Gmail", "message": f"Found {len(emails)} email(s).", "service": "gmail", "items": emails})
+                                    except Exception as exc:
+                                        result_str = f"Gmail unavailable: {exc}"
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "gmail_thread_read":
+                                    try:
+                                        messages = await asyncio.to_thread(self.google_account.read_gmail_thread, fc.args.get("thread_id", ""))
+                                        result_str = json.dumps(messages, ensure_ascii=False)
+                                        if self.on_notification:
+                                            self.on_notification({"category": "google_gmail", "title": "Gmail thread", "message": f"Loaded {len(messages)} message(s).", "service": "gmail", "items": messages})
+                                    except Exception as exc:
+                                        result_str = f"Gmail thread unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "gmail_create_draft":
+                                    try:
+                                        result_str = json.dumps(await asyncio.to_thread(self.google_account.create_gmail_draft, fc.args.get("to", ""), fc.args.get("subject", ""), fc.args.get("body", ""), fc.args.get("thread_id", "")), ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = f"Gmail draft unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "google_contacts_read":
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'google_contacts_read'")
+                                    try:
+                                        contacts = await asyncio.to_thread(
+                                            self.google_account.read_contacts,
+                                            fc.args.get("query", ""),
+                                            fc.args.get("limit", 25),
+                                        )
+                                        result_str = json.dumps(contacts, ensure_ascii=False)
+                                        if self.on_notification:
+                                            self.on_notification({"category": "google_contacts", "title": "Google Contacts", "message": f"Found {len(contacts)} contact(s).", "service": "contacts", "items": contacts})
+                                    except Exception as exc:
+                                        result_str = f"Google Contacts unavailable: {exc}"
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "google_contacts_import":
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'google_contacts_import'")
+                                    try:
+                                        contacts = await asyncio.to_thread(
+                                            self.google_account.read_contacts,
+                                            fc.args.get("query", ""),
+                                            min(fc.args.get("limit", 500), 500),
+                                        )
+                                        platform = fc.args.get("platform", "whatsapp")
+                                        saved = 0
+                                        skipped = 0
+                                        for contact in contacts:
+                                            name = contact.get("name", "").strip()
+                                            recipient = (contact.get("emails") or contact.get("phones") or [""])[0].strip()
+                                            if not name or not recipient:
+                                                skipped += 1
+                                                continue
+                                            self.contacts_manager.add_or_update(name, recipient, platform)
+                                            saved += 1
+                                        result_str = json.dumps({"found": len(contacts), "saved": saved, "skipped": skipped, "platform": platform})
+                                    except Exception as exc:
+                                        result_str = f"Google Contacts import unavailable: {exc}"
+                                    function_response = types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": result_str}
+                                    )
+                                    function_responses.append(function_response)
+
+                                elif fc.name == "google_contacts_sync":
+                                    direction = fc.args.get("direction", "from_google")
+                                    platform = fc.args.get("platform", "whatsapp")
+                                    try:
+                                        if direction == "from_google":
+                                            contacts = await asyncio.to_thread(self.google_account.read_contacts, "", min(fc.args.get("limit", 500), 500))
+                                            saved = 0
+                                            for contact in contacts:
+                                                name = contact.get("name", "").strip()
+                                                recipient = (contact.get("emails") or contact.get("phones") or [""])[0].strip()
+                                                if name and recipient:
+                                                    self.contacts_manager.add_or_update(name, recipient, platform)
+                                                    saved += 1
+                                            result_str = json.dumps({"direction": direction, "found": len(contacts), "saved": saved, "platform": platform})
+                                        elif direction == "to_google":
+                                            local_contacts = self.contacts_manager.list_contacts()
+                                            created = 0
+                                            for contact in local_contacts[:min(fc.args.get("limit", 500), 500)]:
+                                                channels = contact.get("channels", {})
+                                                email = channels.get("email", "")
+                                                phone = channels.get("phone", "") or channels.get("whatsapp", "")
+                                                await asyncio.to_thread(self.google_account.create_contact, contact.get("name", ""), email, phone)
+                                                created += 1
+                                            result_str = json.dumps({"direction": direction, "found": len(local_contacts), "created": created})
+                                        else:
+                                            result_str = "Sync direction must be from_google or to_google."
+                                    except Exception as exc:
+                                        result_str = f"Google Contacts sync unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "sync_google_services":
+                                    try:
+                                        result = await asyncio.to_thread(self.google_account.sync_snapshot, min(fc.args.get("limit", 25), 100))
+                                        result_str = json.dumps({"success": True, "synced": result}, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = f"Google sync unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "google_drive_list":
+                                    try:
+                                        files = await asyncio.to_thread(self.google_account.list_drive_files, fc.args.get("query", "trashed = false"), fc.args.get("limit", 25))
+                                        result_str = json.dumps(files, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = f"Google Drive unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
 
                                 elif fc.name == "send_message":
                                     receiver = fc.args.get("receiver", "")
@@ -1860,7 +2108,7 @@ class AudioLoop:
                                             payload = {}
                                     print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'run_routine' name='{routine_name}'")
                                     try:
-                                        result = self.routine_manager.run_routine(routine_name, payload)
+                                        result = self.routine_manager.execute_runtime(routine_name, payload, runtime=self)
                                         result_str = json.dumps(result, ensure_ascii=False)
                                     except ValueError as exc:
                                         result_str = json.dumps({"error": str(exc)}, ensure_ascii=False)
@@ -1868,6 +2116,37 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": result_str}
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "build_custom_tool":
+                                    try:
+                                        result = self.tool_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("operation", ""), fc.args.get("parameters", {}), fc.args.get("config", {}))
+                                        tools[1]["function_declarations"].append(self.tool_builder.declarations()[-1])
+                                        result_str = json.dumps(result, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = json.dumps({"registered": False, "error": str(exc)})
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "test_custom_tool":
+                                    manifest = self.tool_builder.tools.get(fc.args.get("name", ""))
+                                    result_str = json.dumps(self.tool_builder.test(manifest) if manifest else {"ok": False, "error": "Tool is not registered"})
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "run_custom_tool":
+                                    custom_name = fc.args.get("name", "")
+                                    try:
+                                        result_str = json.dumps(self.tool_builder.execute(custom_name, fc.args.get("arguments", {})), ensure_ascii=False)
+                                    except Exception as exc:
+                                        self_maintenance_module.record_tool_failure(custom_name or "run_custom_tool", str(exc))
+                                        result_str = json.dumps({"ok": False, "error": str(exc)})
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name in self.tool_builder.tools:
+                                    try:
+                                        result_str = json.dumps(self.tool_builder.execute(fc.name, fc.args), ensure_ascii=False)
+                                    except Exception as exc:
+                                        self_maintenance_module.record_tool_failure(fc.name, str(exc))
+                                        result_str = json.dumps({"ok": False, "error": str(exc)})
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
                         if not self._plan_pending:
                             self.finish_action_plan(True)
                         if function_responses:
@@ -1886,13 +2165,14 @@ class AudioLoop:
 
     async def play_audio(self):
         self.output_stream = await asyncio.to_thread(
-            pya.open,
-            format=FORMAT,
+            sd.RawOutputStream,
+            samplerate=RECEIVE_SAMPLE_RATE,
             channels=CHANNELS,
-            rate=RECEIVE_SAMPLE_RATE,
-            output=True,
-            output_device_index=self.output_device_index,
+            dtype=DTYPE,
+            device=self.output_device_index,
+            blocksize=CHUNK_SIZE,
         )
+        await asyncio.to_thread(self.output_stream.start)
         try:
             while True:
                 bytestream = await self.audio_in_queue.get()
@@ -1960,16 +2240,32 @@ class AudioLoop:
                 await self.out_queue.put(frame)
 
     async def monitor_system(self):
-        """Periodically checks CPU/RAM/GPU/temperature and voices alerts via the model."""
+        """Poll system, Google, and long-running state through one notification channel."""
+        seen_calendar = set()
+        seen_email = set()
         while True:
             await asyncio.sleep(20)
             alert = await asyncio.to_thread(self.system_monitor.check)
-            if alert and self.session:
+            if alert:
                 print(f"[FRIDAY DEBUG] [MONITOR] {alert}")
+                await self.notifications.notify("system_overload", "System health", alert, "high")
+
+            if self.google_account.credentials and self.google_account.credentials.valid:
                 try:
-                    await self.session.send(input=f"System Notification: {alert}", end_of_turn=True)
-                except Exception as e:
-                    print(f"[FRIDAY DEBUG] [ERR] Failed to send system alert: {e}")
+                    important = await asyncio.to_thread(self.google_account.read_emails, "is:unread is:important", 5)
+                    for email in important:
+                        if email["id"] not in seen_email:
+                            seen_email.add(email["id"])
+                            await self.notifications.notify("important_email", "Important email", f"New important email from {email['from']}: {email['subject']}")
+                    events = await asyncio.to_thread(self.google_account.list_calendar_events, "", 1, 10)
+                    for event in events:
+                        event_id = event.get("id")
+                        start = event.get("start", {}).get("dateTime", "")
+                        if event_id and event_id not in seen_calendar and start:
+                            seen_calendar.add(event_id)
+                            await self.notifications.notify("calendar_event", "Upcoming calendar event", f"{event.get('summary', 'Untitled')} starts at {start}.")
+                except Exception as error:
+                    print(f"[FRIDAY DEBUG] [NOTIFY] Google polling failed: {error}")
 
     async def proactive_loop(self):
         """Periodically checks if Friday should speak unprompted based on silence, stall patterns, and system state."""
@@ -2101,6 +2397,12 @@ class AudioLoop:
             except Exception as e:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
                 print(f"[FRIDAY DEBUG] [ERR] Connection Error: {e}")
+                if isinstance(e, BaseExceptionGroup):
+                    for nested_error in e.exceptions:
+                        print(f"[FRIDAY DEBUG] [ERR] Task failure: {nested_error!r}")
+                        traceback.print_exception(type(nested_error), nested_error, nested_error.__traceback__)
+                else:
+                    traceback.print_exception(type(e), e, e.__traceback__)
                 
                 # Notify user of connection error
                 try:
@@ -2121,25 +2423,17 @@ class AudioLoop:
                 await self.cleanup_resources()
 
 def get_input_devices():
-    p = pyaudio.PyAudio()
-    info = p.get_host_api_info_by_index(0)
-    numdevices = info.get('deviceCount')
     devices = []
-    for i in range(0, numdevices):
-        if (p.get_device_info_by_host_api_device_index(0, i).get('maxInputChannels')) > 0:
-            devices.append((i, p.get_device_info_by_host_api_device_index(0, i).get('name')))
-    p.terminate()
+    for i, info in enumerate(sd.query_devices()):
+        if info.get('max_input_channels', 0) > 0:
+            devices.append((i, info.get('name')))
     return devices
 
 def get_output_devices():
-    p = pyaudio.PyAudio()
-    info = p.get_host_api_info_by_index(0)
-    numdevices = info.get('deviceCount')
     devices = []
-    for i in range(0, numdevices):
-        if (p.get_device_info_by_host_api_device_index(0, i).get('maxOutputChannels')) > 0:
-            devices.append((i, p.get_device_info_by_host_api_device_index(0, i).get('name')))
-    p.terminate()
+    for i, info in enumerate(sd.query_devices()):
+        if info.get('max_output_channels', 0) > 0:
+            devices.append((i, info.get('name')))
     return devices
 
 if __name__ == "__main__":

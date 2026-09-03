@@ -7,9 +7,12 @@ pytest
 pytest-asyncio
 # Google GenAI SDK (v1beta)
 google-genai
+# Google account connection for Gmail, Calendar, and Contacts
+google-api-python-client
+google-auth-oauthlib
 # Computer Vision & Audio
 opencv-python
-pyaudio
+sounddevice
 pillow
 mss
 # Browser Automation

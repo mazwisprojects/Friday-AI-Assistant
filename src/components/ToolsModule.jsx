@@ -26,6 +26,7 @@ const ToolsModule = ({
     activeDragElement,
 
     position,
+    width,
     onMouseDown
 }) => {
     return (
@@ -38,6 +39,7 @@ const ToolsModule = ({
                 left: position.x,
                 top: position.y,
                 transform: 'translate(-50%, -50%)',
+                width,
                 pointerEvents: 'auto'
             }}
         >

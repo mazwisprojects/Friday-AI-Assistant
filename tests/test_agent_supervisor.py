@@ -147,12 +147,90 @@ def test_routine_manager_dev_assistant_can_plan_a_fix():
     assert "import" in plan["next_steps"][0].lower()
 
 
+def test_routine_manager_supports_real_desktop_workflows():
+    manager = RoutineManager()
+
+    start = manager.run_routine("start_work_routine", {"project": "Friday", "tasks": ["fix auth bug"]})
+    prep = manager.run_routine("prepare_environment", {"project": "Friday"})
+    checkup = manager.run_routine("project_checkup", {"project": "Friday", "test_command": "pytest -q"})
+    calendar = manager.run_routine("calendar_check", {"events": ["design review at 4:00 PM"]})
+    cleanup = manager.run_routine("workspace_cleanup", {"notes": ["Review PR"]})
+    report = manager.run_routine("daily_report", {"completed": ["tests passed"], "remaining": ["deploy build"]})
+
+    assert start["routine"] == "start_work_routine"
+    assert len(start["actions"]) >= 3
+    assert prep["routine"] == "prepare_environment"
+    assert checkup["routine"] == "project_checkup"
+    assert calendar["routine"] == "calendar_check"
+    assert cleanup["routine"] == "workspace_cleanup"
+    assert report["routine"] == "daily_report"
+    assert report["summary"]["remaining_count"] == 1
+
+
+def test_routine_manager_executes_real_runtime_actions():
+    manager = RoutineManager()
+
+    class DummyRuntime:
+        def __init__(self):
+            self.calls = []
+
+        def get_system_status(self):
+            self.calls.append("status")
+            return {"cpu_percent": 25, "ram_percent": 40}
+
+        def run_powershell_command(self, params):
+            self.calls.append(params["command"])
+            return "pytest passed"
+
+        def set_reminder(self, params):
+            self.calls.append(params["message"])
+            return "Reminder created"
+
+        def desktop_control(self, params):
+            self.calls.append(params["action"])
+            return "desktop action complete"
+
+    runtime = DummyRuntime()
+    result = manager.execute_runtime(
+        "project_checkup",
+        {"project": "Friday", "test_command": "pytest -q", "cwd": "."},
+        runtime=runtime,
+    )
+
+    assert result["routine"] == "project_checkup"
+    assert "pytest passed" in str(result["execution"]["test_result"])
+    assert "status" in runtime.calls or "pytest -q" in runtime.calls
+
+
 def test_routine_tool_is_exposed_to_the_assistant():
     from tools import tools_list
 
     names = {tool["name"] for tool in tools_list[0]["function_declarations"]}
 
     assert "run_routine" in names
+
+
+def test_supervisor_orchestrates_multi_step_task_journal():
+    supervisor = AgentSupervisor()
+
+    task = supervisor.create_task(
+        "Investigate the import error",
+        {"tool": "read_file", "args": {"path": "backend/friday.py"}},
+        deadline_seconds=600,
+    )
+
+    task_id = task["task_id"]
+    planned = supervisor.plan_task(task_id)
+
+    assert planned["status"] == "planned"
+    assert [step["name"] for step in planned["steps"][:3]] == ["observe", "plan", "execute"]
+    assert any(step["name"] == "summarize" for step in planned["steps"])
+
+    verified = supervisor.validate_task_result(task_id, {"ok": True, "summary": "Import path looks good."})
+    assert verified["verified"] is True
+
+    journal = supervisor.get_task_journal()
+    assert task_id in {item["task_id"] for item in journal["active"] + journal["failed"] + journal["completed"]}
 
 
 def test_proactive_engine_detects_stall_and_system_overload():

@@ -8,6 +8,7 @@ import json
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from contextlib import redirect_stdout
 from pathlib import Path
 
@@ -24,6 +25,7 @@ def _missing_python_packages(packages: list[str]) -> list[str]:
 _BACKEND_DIR = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _BACKEND_DIR.parent
 _MAX_OUTPUT_CHARS = 6000
+_FAILURE_LOG = _BACKEND_DIR / "tool_failures.json"
 
 
 def _truncate(text: str, limit: int = _MAX_OUTPUT_CHARS) -> str:
@@ -172,6 +174,120 @@ def install_frontend_dependencies() -> dict:
     return result
 
 
+def dependency_audit() -> dict:
+    """Report outdated Python and Node dependencies without changing them."""
+    python_result = _run_command([sys.executable, "-m", "pip", "list", "--outdated", "--format", "json"], _PROJECT_ROOT, timeout=180)
+    npm = _resolve_npm()
+    npm_result = _run_command([npm, "outdated", "--json"], _PROJECT_ROOT, timeout=180) if npm else {"ok": False, "stdout": "", "stderr": "npm was not found"}
+    return {"python": python_result, "node": npm_result}
+
+
+def capability_audit() -> dict:
+    """Build a local registry of declared Friday tools and maintenance actions."""
+    registry = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "maintenance_actions": ["run_tests", "compile_check", "build_frontend", "full_check", "self_build", "self_heal", "self_upgrade"],
+        "backend_modules": sorted(path.stem for path in _BACKEND_DIR.rglob("*.py") if path.name != "__init__.py"),
+    }
+    try:
+        sys.path.insert(0, str(_BACKEND_DIR))
+        from tools import tools_list
+        registry["tools"] = sorted(tool.get("name") for tool in tools_list[0].get("function_declarations", []) if tool.get("name"))
+    except Exception as error:
+        registry["tools_error"] = str(error)
+    registry_path = _BACKEND_DIR / "capability_registry.json"
+    registry_path.write_text(json.dumps(registry, indent=2), encoding="utf-8")
+    return {"path": str(registry_path), "tool_count": len(registry.get("tools", [])), "module_count": len(registry["backend_modules"])}
+
+
+def record_tool_failure(tool_name: str, error: str) -> None:
+    """Persist small failure counters so future repair runs can prioritize issues."""
+    try:
+        data = json.loads(_FAILURE_LOG.read_text(encoding="utf-8")) if _FAILURE_LOG.exists() else {}
+        entry = data.setdefault(tool_name, {"count": 0, "last_error": ""})
+        entry["count"] += 1
+        entry["last_error"] = str(error)[:500]
+        _FAILURE_LOG.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def deprecation_audit() -> list[str]:
+    """Find common deprecated API markers for Friday to review."""
+    markers = ("deprecated", "DeprecationWarning", "use-angle", "google.genai", "pyaudio")
+    findings = []
+    for path in _PROJECT_ROOT.rglob("*.py"):
+        if any(part in {".git", "node_modules", "__pycache__", "dist"} for part in path.parts):
+            continue
+        try:
+            for line_number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), 1):
+                if any(marker in line for marker in markers):
+                    findings.append(f"{path.relative_to(_PROJECT_ROOT)}:{line_number}: {line.strip()}")
+        except OSError:
+            continue
+    return findings[:50]
+
+
+def self_heal() -> str:
+    """Recover dependency/build failures without modifying source code."""
+    checks = [compile_check_backend(), run_backend_tests(), build_frontend()]
+    if all(result.get("ok") for result in checks):
+        return "Self-heal: all checks already pass. No repair was needed."
+
+    backup_dir = _PROJECT_ROOT / ".friday-recovery" / datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("requirements.txt", "package.json", "package-lock.json"):
+        source = _PROJECT_ROOT / filename
+        if source.exists():
+            shutil.copy2(source, backup_dir / filename)
+
+    python_install = install_python_dependencies()
+    frontend_install = install_frontend_dependencies()
+    checks_after = [compile_check_backend(), run_backend_tests(), build_frontend()]
+    status = "recovered" if all(result.get("ok") for result in checks_after) else "needs source-code repair"
+    return "\n".join([
+        f"Self-heal: {status}.",
+        f"Recovery backup: {backup_dir}",
+        f"Dependency repair: Python={'OK' if python_install.get('ok') else 'FAILED'}, Frontend={'OK' if frontend_install.get('ok') else 'FAILED'}",
+        f"Final checks: compile={'OK' if checks_after[0].get('ok') else 'FAILED'}, tests={'OK' if checks_after[1].get('ok') else 'FAILED'}, build={'OK' if checks_after[2].get('ok') else 'FAILED'}",
+    ])
+
+
+def self_upgrade() -> str:
+    """Refresh declared dependencies, then verify the project."""
+    audit = dependency_audit()
+    python_result = _run_command([sys.executable, "-m", "pip", "install", "--upgrade", "-r", str(_PROJECT_ROOT / "requirements.txt")], _PROJECT_ROOT, timeout=900)
+    npm = _resolve_npm()
+    frontend_result = _run_command([npm, "update"], _PROJECT_ROOT, timeout=900) if npm else {"ok": False}
+    verification = compile_check_backend()
+    registry = capability_audit()
+    deprecations = deprecation_audit()
+    return "\n".join([
+        f"Outdated dependency audit captured: Python={'OK' if audit['python'].get('ok') else 'FAILED'}, Node={'OK' if audit['node'].get('ok') else 'FAILED'}",
+        f"Self-upgrade dependencies: Python={'OK' if python_result.get('ok') else 'FAILED'}, Frontend={'OK' if frontend_result.get('ok') else 'FAILED'}",
+        f"Post-upgrade backend compile: {'OK' if verification.get('ok') else 'FAILED'}",
+        f"Capability registry: {registry['tool_count']} tools, {registry['module_count']} backend modules.",
+        f"Deprecation findings: {len(deprecations)}.",
+        "Source code and prompts were not changed automatically.",
+    ])
+
+
+def self_build() -> str:
+    """Run the complete autonomous maintenance cycle and return a concise report."""
+    compile_result = compile_check_backend()
+    test_result = run_backend_tests()
+    build_result = build_frontend()
+    if compile_result.get("ok") and test_result.get("ok") and build_result.get("ok"):
+        return "Self-build: healthy. Backend compile, tests, and frontend build all passed."
+
+    recovery_report = self_heal()
+    return "\n".join([
+        "Self-build: initial verification failed.",
+        f"Initial checks: compile={'OK' if compile_result.get('ok') else 'FAILED'}, tests={'OK' if test_result.get('ok') else 'FAILED'}, build={'OK' if build_result.get('ok') else 'FAILED'}",
+        recovery_report,
+    ])
+
+
 def _summarize(name: str, result: dict) -> str:
     status = "OK" if result.get("ok") else "FAILED"
     lines = [f"{name}: {status}"]
@@ -214,5 +330,11 @@ def self_maintenance(parameters: dict) -> str:
             _summarize("Frontend build", build_frontend()),
         ]
         return "\n\n".join(parts)
+    if action == "self_build":
+        return self_build()
+    if action == "self_heal":
+        return self_heal()
+    if action == "self_upgrade":
+        return self_upgrade()
 
     return f"Unknown self_maintenance action: '{action}'"

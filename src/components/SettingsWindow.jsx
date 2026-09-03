@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { X } from 'lucide-react';
+import { Activity, Bell, Coffee, Home, Link, Unlink, Volume2, VolumeX, X } from 'lucide-react';
 
 const TOOLS = [
     { id: 'generate_cad', label: 'Generate CAD' },
@@ -62,6 +62,13 @@ const SettingsWindow = ({
     const [permissions, setPermissions] = useState({});
     const [faceAuthEnabled, setFaceAuthEnabled] = useState(false);
     const [systemAlertsEnabled, setSystemAlertsEnabled] = useState(true);
+    const [quietMode, setQuietMode] = useState(false);
+    const [interruptPreferences, setInterruptPreferences] = useState({
+        urgent_only: false,
+        emergencies_only: false
+    });
+    const [currentMode, setCurrentMode] = useState('active');
+    const [googleAccount, setGoogleAccount] = useState({ connected: false, connecting: false, error: '' });
 
     useEffect(() => {
         // Request initial permissions
@@ -79,27 +86,32 @@ const SettingsWindow = ({
                 if (typeof settings.system_alerts_enabled !== 'undefined') {
                     setSystemAlertsEnabled(settings.system_alerts_enabled);
                 }
+                if (typeof settings.quiet_mode !== 'undefined') {
+                    setQuietMode(settings.quiet_mode);
+                }
+                if (settings.interrupt_preferences) {
+                    setInterruptPreferences(prev => ({ ...prev, ...settings.interrupt_preferences }));
+                }
+                if (settings.current_mode) {
+                    setCurrentMode(settings.current_mode);
+                }
             }
         };
 
         socket.on('settings', handleSettings);
+        const handleGoogleStatus = (account) => setGoogleAccount(account || { connected: false });
+        socket.on('google_account_status', handleGoogleStatus);
         // Also listen for legacy tool_permissions if needed, but 'settings' covers it
         // socket.on('tool_permissions', handlePermissions); 
 
         return () => {
             socket.off('settings', handleSettings);
+            socket.off('google_account_status', handleGoogleStatus);
         };
     }, [socket]);
 
     const togglePermission = (toolId) => {
-        const currentVal = permissions[toolId] !== false; // Default True
-        const nextVal = !currentVal;
-
-        // Update local mostly for responsiveness, but socket roundtrip handles truth
-        // setPermissions(prev => ({ ...prev, [toolId]: nextVal }));
-
-        // Send update
-        socket.emit('update_settings', { tool_permissions: { [toolId]: nextVal } });
+        socket.emit('update_settings', { tool_permissions: { [toolId]: false } });
     };
 
     const toggleFaceAuth = () => {
@@ -120,6 +132,25 @@ const SettingsWindow = ({
         setSystemAlertsEnabled(newVal);
         socket.emit('update_settings', { system_alerts_enabled: newVal });
     };
+
+    const toggleQuietMode = () => {
+        const newValue = !quietMode;
+        setQuietMode(newValue);
+        socket.emit('update_settings', { quiet_mode: newValue });
+    };
+
+    const updateInterruptPreference = (key, value) => {
+        setInterruptPreferences(prev => ({ ...prev, [key]: value }));
+        socket.emit('update_settings', { interrupt_preferences: { [key]: value } });
+    };
+
+    const selectMode = (mode) => {
+        setCurrentMode(mode);
+        socket.emit('update_settings', { current_mode: mode });
+    };
+
+    const connectGoogleAccount = () => socket.emit('connect_google_account');
+    const disconnectGoogleAccount = () => socket.emit('disconnect_google_account');
 
     return (
         <div className="fixed top-20 right-4 sm:right-10 bg-black/95 border border-cyan-500/50 p-4 rounded-lg z-[1100] w-[calc(100vw-2rem)] max-w-80 max-h-[calc(100vh-5rem)] overflow-hidden backdrop-blur-xl shadow-[0_0_30px_rgba(6,182,212,0.2)]">
@@ -160,6 +191,74 @@ const SettingsWindow = ({
                         <span>{systemAlertsEnabled ? 'ON' : 'OFF'}</span>
                         <i />
                     </button>
+                </div>
+            </div>
+
+            <div className="mb-6">
+                <h3 className="text-cyan-400 font-bold mb-3 text-xs uppercase tracking-wider opacity-80">Google Account</h3>
+                <div className="space-y-2 bg-gray-900/50 p-3 rounded border border-cyan-900/30">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                        <span className={googleAccount.connected ? 'text-green-300' : 'text-cyan-100/80'}>
+                            {googleAccount.connected ? 'Connected: Gmail, Calendar, Contacts' : 'Not connected'}
+                        </span>
+                        {googleAccount.connected ? (
+                            <button type="button" onClick={disconnectGoogleAccount} className="flex items-center gap-1 text-red-300 hover:text-red-200">
+                                <Unlink size={14} /> Disconnect
+                            </button>
+                        ) : (
+                            <button type="button" onClick={connectGoogleAccount} disabled={googleAccount.connecting} className="flex items-center gap-1 text-cyan-300 hover:text-cyan-100 disabled:opacity-50">
+                                <Link size={14} /> {googleAccount.connecting ? 'Connecting...' : 'Connect'}
+                            </button>
+                        )}
+                    </div>
+                    <p className="text-[10px] leading-relaxed text-cyan-500/60">Friday requests read access only. Google opens a consent page in your browser; the token stays on this computer.</p>
+                    {googleAccount.error && <p className="text-[10px] leading-relaxed text-red-300">{googleAccount.error}</p>}
+                </div>
+            </div>
+
+            <div className="mb-6">
+                <h3 className="text-cyan-400 font-bold mb-3 text-xs uppercase tracking-wider opacity-80">Assistant Behavior</h3>
+                <div className="space-y-2">
+                    <div className="flex items-center justify-between text-xs bg-gray-900/50 p-2 rounded border border-cyan-900/30">
+                        <span className="flex items-center gap-2 text-cyan-100/80">
+                            {quietMode ? <VolumeX size={14} /> : <Volume2 size={14} />}
+                            Quiet Mode
+                        </span>
+                        <button
+                            onClick={toggleQuietMode}
+                            aria-label={`Quiet mode ${quietMode ? 'on' : 'off'}`}
+                            className={`hud-toggle ${quietMode ? 'hud-toggle-on' : ''}`}
+                        >
+                            <span>{quietMode ? 'ON' : 'OFF'}</span>
+                            <i />
+                        </button>
+                    </div>
+                    <label className="flex items-center gap-2 text-xs bg-gray-900/50 p-2 rounded border border-cyan-900/30 text-cyan-100/80">
+                        <input type="checkbox" checked={interruptPreferences.urgent_only} onChange={(event) => updateInterruptPreference('urgent_only', event.target.checked)} />
+                        Urgent alerts only
+                    </label>
+                    <label className="flex items-center gap-2 text-xs bg-gray-900/50 p-2 rounded border border-cyan-900/30 text-cyan-100/80">
+                        <input type="checkbox" checked={interruptPreferences.emergencies_only} onChange={(event) => updateInterruptPreference('emergencies_only', event.target.checked)} />
+                        Emergencies only
+                    </label>
+                    <div className="grid grid-cols-3 gap-1">
+                        {[
+                            { id: 'active', label: 'Active', icon: Activity },
+                            { id: 'focus', label: 'Focus', icon: Coffee },
+                            { id: 'away', label: 'Away', icon: Home }
+                        ].map(({ id, label, icon: Icon }) => (
+                            <button
+                                key={id}
+                                type="button"
+                                aria-pressed={currentMode === id}
+                                onClick={() => selectMode(id)}
+                                className={`flex items-center justify-center gap-1 rounded border px-1 py-2 text-[10px] transition-colors ${currentMode === id ? 'border-cyan-400 bg-cyan-500/20 text-cyan-100' : 'border-cyan-900/50 bg-gray-900/50 text-cyan-500/70 hover:border-cyan-600'}`}
+                            >
+                                <Icon size={12} />
+                                {label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
             </div>
 
@@ -249,16 +348,15 @@ const SettingsWindow = ({
                 <h3 className="text-cyan-400 font-bold mb-3 text-xs uppercase tracking-wider opacity-80">Tool Confirmations</h3>
                 <div className="space-y-2 max-h-40 overflow-y-auto pr-2 custom-scrollbar">
                     {TOOLS.map(tool => {
-                        const isRequired = permissions[tool.id] !== false; // Default True
                         return (
                             <div key={tool.id} className="flex items-center justify-between text-xs bg-gray-900/50 p-2 rounded border border-cyan-900/30">
                                 <span className="text-cyan-100/80">{tool.label}</span>
                                 <button
                                     onClick={() => togglePermission(tool.id)}
-                                    aria-label={`${tool.label} confirmation ${isRequired ? 'required' : 'automatic'}`}
-                                    className={`hud-toggle ${isRequired ? 'hud-toggle-on' : ''}`}
+                                    aria-label={`${tool.label} runs automatically`}
+                                    className="hud-toggle hud-toggle-on"
                                 >
-                                    <span>{isRequired ? 'REQ' : 'AUTO'}</span>
+                                    <span>AUTO</span>
                                     <i />
                                 </button>
                             </div>

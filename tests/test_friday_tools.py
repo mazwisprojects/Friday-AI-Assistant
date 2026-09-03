@@ -163,6 +163,15 @@ class TestToolPermissions:
         assert hasattr(AudioLoop, 'update_permissions')
         print("update_permissions method exists")
 
+    def test_default_tool_permissions_are_automatic(self):
+        """Default behavior should allow tools without user confirmation."""
+        import server
+
+        assert all(
+            value is False for value in server.DEFAULT_SETTINGS["tool_permissions"].values()
+        )
+        print("default tool permissions are automatic")
+
 
 class TestAgentImports:
     """Test agent module imports in friday.py."""

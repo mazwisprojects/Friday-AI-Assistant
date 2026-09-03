@@ -36,6 +36,11 @@ except ImportError:
 from google import genai
 from google.genai import types as gtypes
 
+# Import centralized config
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import get_config_path, load_config, get_api_key as get_env_api_key
+
 def _base_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
@@ -43,19 +48,12 @@ def _base_dir() -> Path:
 
 
 _BASE        = _base_dir()
-_CONFIG_PATH = _BASE / "config" / "api_keys.json"
-
-
-def _load_config() -> dict:
-    try:
-        return json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+_CONFIG_PATH = get_config_path()
 
 
 def _save_config_key(key: str, value) -> None:
     try:
-        cfg = _load_config()
+        cfg = load_config()
         cfg[key] = value
         _CONFIG_PATH.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
     except Exception as e:
@@ -63,14 +61,14 @@ def _save_config_key(key: str, value) -> None:
 
 
 def _get_api_key() -> str:
-    key = _load_config().get("gemini_api_key", "")
+    key = load_config().get("gemini_api_key", get_env_api_key())
     if not key:
         raise RuntimeError("gemini_api_key not found in config.")
     return key
 
 
 def _get_os() -> str:
-    return _load_config().get("os_system", "windows").lower()
+    return load_config().get("os_system", "windows").lower()
 
 _LIVE_MODEL         = "models/gemini-2.5-flash-native-audio-preview-12-2025"
 _CHANNELS           = 1
@@ -167,7 +165,7 @@ def _detect_camera_index() -> int:
 
 
 def _get_camera_index() -> int:
-    cfg = _load_config()
+    cfg = load_config()
     if "camera_index" in cfg:
         return int(cfg["camera_index"])
     return _detect_camera_index()
@@ -255,7 +253,7 @@ class _VisionSession:
         self._audio_in  = asyncio.Queue()
 
         client = genai.Client(
-            api_key=_get_api_key(),
+            api_key=get_api_key(),
             http_options={"api_version": "v1beta"},
         )
         config = gtypes.LiveConnectConfig(

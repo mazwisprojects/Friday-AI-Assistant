@@ -10,6 +10,13 @@ env/
 # FRIDAY Specific Local Data
 backend/reference.jpg
 backend/settings.json
+backend/google_client_secret.json
+backend/google_token.json
+backend/google_sync.json
+backend/capability_registry.json
+backend/tool_failures.json
+backend/custom_tools.json
+.friday-recovery/
 settings.json
 backend/last_cad_generation.json
 long_term_memory/
