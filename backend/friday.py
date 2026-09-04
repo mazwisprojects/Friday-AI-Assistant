@@ -212,6 +212,7 @@ class AudioLoop:
         self.paused = False
 
         self.session = None
+        self._pending_runtime_notifications = []
         self.audio_stream = None
         self.output_stream = None
         self.camera_capture = None
@@ -399,6 +400,14 @@ class AudioLoop:
         return None
 
     def start_action_plan(self, tool_name: str, args: dict):
+        known_tools = {
+            declaration.get("name")
+            for declaration in tools_list[0].get("function_declarations", [])
+        }
+        known_tools.update(self.tool_builder.tools)
+        known_tools.update(self.agent_builder.agents)
+        if tool_name not in known_tools:
+            return
         task = self.supervisor.create_task(
             f"Execute {tool_name}",
             {"tool": tool_name, "args": args},
@@ -578,8 +587,21 @@ class AudioLoop:
         self.paused = paused
 
     async def _voice_notification(self, message, priority="normal"):
-        if self.session and not self.paused:
-            await self.session.send(input=f"System Notification: {message}", end_of_turn=True)
+        await self.inject_runtime_event(message, priority)
+
+    async def inject_runtime_event(self, message: str, priority: str = "normal"):
+        """Deliver background events to Gemini Live, even when audio output is paused."""
+        payload = f"System Notification ({priority}): {message}"
+        if not self.session:
+            self._pending_runtime_notifications.append(payload)
+            print(f"[FRIDAY DEBUG] [RUNTIME EVENT] queued: {message}")
+            return
+        try:
+            await self.session.send(input=payload, end_of_turn=True)
+            print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivered: {message}")
+        except Exception as error:
+            self._pending_runtime_notifications.append(payload)
+            print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivery failed: {error}")
 
     def stop(self):
         self.stop_event.set()
@@ -2536,7 +2558,12 @@ class AudioLoop:
                         start = event.get("start", {}).get("dateTime", "")
                         if event_id and event_id not in seen_calendar and start:
                             seen_calendar.add(event_id)
-                            await self.notifications.notify("calendar_event", "Upcoming calendar event", f"{event.get('summary', 'Untitled')} starts at {start}.")
+                            local_start = start
+                            try:
+                                local_start = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M %Z")
+                            except ValueError:
+                                pass
+                            await self.notifications.notify("calendar_event", "Upcoming calendar event", f"{event.get('summary', 'Untitled')} starts at {local_start}.")
                 except Exception as error:
                     print(f"[FRIDAY DEBUG] [NOTIFY] Google polling failed: {error}")
 
@@ -2608,6 +2635,13 @@ class AudioLoop:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
+
+                    if self._pending_runtime_notifications:
+                        pending_events = self._pending_runtime_notifications
+                        self._pending_runtime_notifications = []
+                        for event in pending_events:
+                            await self.session.send(input=event, end_of_turn=True)
+                        print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivered {len(pending_events)} queued event(s)")
 
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)

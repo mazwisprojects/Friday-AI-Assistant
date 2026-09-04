@@ -37,6 +37,7 @@ from openclaw_bridge import OpenClawBridge
 from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
+from actions import agent_dispatcher as agent_dispatcher_module
 
 # Create a Socket.IO server with restricted CORS
 # Allow localhost for development and Electron app origins
@@ -1341,20 +1342,26 @@ async def get_openclaw_capabilities(sid):
 @sio.event
 async def get_agent_console(sid):
     """Return agent lifecycle, schedules, and execution history for the OpenClaw window."""
+    runtime = audio_loop
     await sio.emit('agent_console', {
-        'plugins': friday.plugin_manager.list_plugins(),
-        'schedules': friday.agent_scheduler.list(),
-        'executions': friday.agent_dispatcher_module.ledger.list(25) if hasattr(friday, 'agent_dispatcher_module') else [],
+        'plugins': runtime.plugin_manager.list_plugins() if runtime else [],
+        'schedules': runtime.agent_scheduler.list() if runtime else [],
+        'executions': agent_dispatcher_module.ledger.list(25),
     }, room=sid)
 
 @sio.event
 async def get_autonomy_status(sid):
-    await sio.emit('autonomy_status', friday.autonomy_pipeline.run_cycle(), room=sid)
+    if not audio_loop:
+        await sio.emit('autonomy_status', {'error': 'Friday runtime is not ready'}, room=sid)
+        return
+    await sio.emit('autonomy_status', audio_loop.autonomy_pipeline.run_cycle(), room=sid)
 
 @sio.event
 async def approve_autonomy_proposal(sid, data):
     try:
-        result = friday.autonomy_pipeline.approve((data or {}).get('proposal_id', ''))
+        if not audio_loop:
+            raise RuntimeError('Friday runtime is not ready')
+        result = audio_loop.autonomy_pipeline.approve((data or {}).get('proposal_id', ''))
     except Exception as exc:
         result = {'error': str(exc)}
     await sio.emit('autonomy_approval_result', result, room=sid)
@@ -1706,10 +1713,15 @@ async def get_code_snippets(sid):
 @sio.event
 async def get_process_list(sid):
     """Get process list for ProcessWindow."""
-    from actions.background_monitor import background_monitor_action
     try:
-        result = background_monitor_action({'action': 'list'})
-        await sio.emit('process_list', [])
+        import psutil
+        processes = []
+        for process in psutil.process_iter(['pid', 'name', 'username', 'memory_percent']):
+            try:
+                processes.append(process.info)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        await sio.emit('process_list', sorted(processes, key=lambda item: item.get('memory_percent') or 0, reverse=True)[:100], room=sid)
     except Exception as e:
         print(f"Error getting process list: {e}")
 

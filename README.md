@@ -1,6 +1,8 @@
 # F.R.I.D.A.Y
 
-F.R.I.D.A.Y is a Windows-focused desktop AI assistant built with Electron, React, Python, FastAPI, Socket.IO, and Google's Gemini Live API. It supports real-time voice conversation, persistent memory, computer control, web automation, smart-home devices, CAD generation, 3D printing, live vision, and comprehensive file workflows.
+### First Real Intelligent Designed Assistant Yet
+
+F.R.I.D.A.Y (First Real Intelligent Designed Assistant Yet) is a Windows-focused desktop AI assistant built with Electron, React, Python, FastAPI, Socket.IO, and Google's Gemini Live API. It supports real-time voice conversation, persistent memory, computer control, web automation, smart-home devices, CAD generation, 3D printing, live vision, and comprehensive file workflows.
 
 ## Features
 
