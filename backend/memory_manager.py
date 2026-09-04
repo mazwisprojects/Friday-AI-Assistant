@@ -201,6 +201,8 @@ class MemoryManager:
                 }
             else:
                 continue
+            if candidate["subject"] == "user.identity.name" and source.strip() and not MemoryManager._contains_explicit_name_claim(source):
+                continue
             if candidate["subject"] and candidate["value"] and len(candidate["value"]) <= 500 and not self._looks_like_secret(candidate["value"]):
                 candidates.append(candidate)
 
@@ -263,6 +265,12 @@ class MemoryManager:
                     self._flush_and_sync(f)
                     records.append(record)
                     self._backup_if_due()
+
+    @staticmethod
+    def _contains_explicit_name_claim(source: str) -> bool:
+        """Only accept a name when the user explicitly identifies it as their name."""
+        lowered = source.lower()
+        return bool(re.search(r"\b(my name is|call me|i am called)\b", lowered))
 
     @staticmethod
     def _subject_from_text(fact: str) -> str:
