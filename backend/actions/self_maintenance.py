@@ -254,21 +254,39 @@ def self_heal() -> str:
 
 
 def self_upgrade() -> str:
-    """Refresh declared dependencies, then verify the project."""
+    """Upgrade dependencies behind a recovery snapshot and verification gate."""
     audit = dependency_audit()
+    recovery_dir = _PROJECT_ROOT / ".friday-recovery" / f"upgrade_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    recovery_dir.mkdir(parents=True, exist_ok=True)
+    conda = shutil.which("conda")
+    if conda:
+        environment_result = _run_command([conda, "env", "export", "--name", "friday"], _PROJECT_ROOT, timeout=120)
+        (recovery_dir / "friday-conda-environment.yml").write_text(environment_result.get("stdout", ""), encoding="utf-8")
+    tracked_files = ["requirements.txt", "package.json", "package-lock.json"]
+    for filename in tracked_files:
+        source = _PROJECT_ROOT / filename
+        if source.exists():
+            shutil.copy2(source, recovery_dir / filename)
     python_result = _run_command([sys.executable, "-m", "pip", "install", "--upgrade", "-r", str(_PROJECT_ROOT / "requirements.txt")], _PROJECT_ROOT, timeout=900)
     npm = _resolve_npm()
     frontend_result = _run_command([npm, "update"], _PROJECT_ROOT, timeout=900) if npm else {"ok": False}
-    verification = compile_check_backend()
+    verification = [compile_check_backend(), run_backend_tests(), build_frontend()]
     registry = capability_audit()
     deprecations = deprecation_audit()
+    verified = all(result.get("ok") for result in verification)
+    if not verified:
+        for filename in tracked_files:
+            backup = recovery_dir / filename
+            if backup.exists():
+                shutil.copy2(backup, _PROJECT_ROOT / filename)
     return "\n".join([
         f"Outdated dependency audit captured: Python={'OK' if audit['python'].get('ok') else 'FAILED'}, Node={'OK' if audit['node'].get('ok') else 'FAILED'}",
         f"Self-upgrade dependencies: Python={'OK' if python_result.get('ok') else 'FAILED'}, Frontend={'OK' if frontend_result.get('ok') else 'FAILED'}",
-        f"Post-upgrade backend compile: {'OK' if verification.get('ok') else 'FAILED'}",
+        f"Post-upgrade verification: {'PASSED' if verified else 'FAILED; dependency files restored'} (compile={'OK' if verification[0].get('ok') else 'FAILED'}, tests={'OK' if verification[1].get('ok') else 'FAILED'}, build={'OK' if verification[2].get('ok') else 'FAILED'})",
+        f"Recovery snapshot: {recovery_dir}",
         f"Capability registry: {registry['tool_count']} tools, {registry['module_count']} backend modules.",
         f"Deprecation findings: {len(deprecations)}.",
-        "Source code and prompts were not changed automatically.",
+        "Source code and prompts were not changed automatically. Core upgrades require explicit user approval.",
     ])
 
 

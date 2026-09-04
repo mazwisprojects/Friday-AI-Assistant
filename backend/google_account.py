@@ -84,10 +84,12 @@ class GoogleAccount:
             headers = {header["name"].lower(): header["value"] for header in message.get("payload", {}).get("headers", [])}
             emails.append({
                 "id": message.get("id"),
+                "thread_id": message.get("threadId"),
                 "from": headers.get("from", ""),
                 "subject": headers.get("subject", "(no subject)"),
                 "date": headers.get("date", ""),
                 "snippet": message.get("snippet", ""),
+                "web_link": f"https://mail.google.com/mail/u/0/#all/{message.get('id')}" if message.get("id") else "",
             })
         return emails
 
@@ -122,6 +124,18 @@ class GoogleAccount:
             q=query or None, maxResults=max(1, min(limit, 100)), singleEvents=True, orderBy="startTime",
         ).execute()
         return [{"id": item.get("id"), "summary": item.get("summary", "(untitled)"), "start": item.get("start", {}), "end": item.get("end", {}), "description": item.get("description", ""), "html_link": item.get("htmlLink")} for item in response.get("items", [])]
+
+    def check_calendar_availability(self, date: str, time: str, duration_minutes: int = 60) -> dict:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+        if not self.credentials or not self.credentials.valid:
+            raise RuntimeError("Google account is not connected or needs to be reconnected")
+        start = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo("Africa/Johannesburg"))
+        end = start + timedelta(minutes=max(1, min(duration_minutes, 1440)))
+        service = build("calendar", "v3", credentials=self.credentials, cache_discovery=False)
+        response = service.events().list(calendarId="primary", timeMin=start.isoformat(), timeMax=end.isoformat(), maxResults=25, singleEvents=True, orderBy="startTime").execute()
+        conflicts = [{"id": item.get("id"), "summary": item.get("summary", "(untitled)"), "html_link": item.get("htmlLink")} for item in response.get("items", []) if item.get("status") != "cancelled"]
+        return {"date": date, "time": time, "duration_minutes": duration_minutes, "free": not conflicts, "conflicts": conflicts}
 
     def update_calendar_event(self, event_id: str, title: str | None = None, date: str | None = None, time: str | None = None, duration_minutes: int = 30, description: str | None = None) -> dict:
         from datetime import datetime, timedelta

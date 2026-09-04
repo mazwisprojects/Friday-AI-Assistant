@@ -188,6 +188,29 @@ body {
 .google-service-item strong { color: rgba(207, 250, 254, 0.9); font-size: 0.68rem; }
 .google-service-item span { color: rgba(165, 243, 252, 0.52); font-size: 0.56rem; }
 
+.task-card-strip {
+  position: absolute;
+  top: -126px;
+  left: 18px;
+  z-index: 12;
+  width: min(420px, calc(100% - 36px));
+  padding: 10px 12px;
+  background: linear-gradient(135deg, rgba(25, 21, 8, 0.97), rgba(10, 10, 5, 0.97));
+  border: 1px solid rgba(251, 191, 36, 0.42);
+  border-bottom: 2px solid rgba(251, 191, 36, 0.8);
+  box-shadow: 0 0 24px rgba(251, 191, 36, 0.1), 0 10px 24px rgba(0, 0, 0, 0.45);
+  animation: weather-tab-in 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.task-card-heading { display: flex; justify-content: space-between; color: #fcd34d; font-size: 0.58rem; letter-spacing: 0.14em; border-bottom: 1px solid rgba(251, 191, 36, 0.18); padding-bottom: 7px; }
+.task-card-list { display: grid; gap: 5px; padding-top: 7px; }
+.task-card { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px; border-left: 2px solid rgba(251, 191, 36, 0.45); background: rgba(251, 191, 36, 0.05); }
+.task-card-copy { min-width: 0; display: grid; gap: 2px; }
+.task-card-copy strong, .task-card-copy span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-card-copy strong { color: rgba(254, 243, 199, 0.92); font-size: 0.68rem; }
+.task-card-copy span { color: rgba(253, 230, 138, 0.55); font-size: 0.54rem; }
+.task-card button { flex: 0 0 auto; border: 1px solid rgba(251, 191, 36, 0.4); color: #fde68a; background: transparent; padding: 3px 6px; font-size: 0.52rem; letter-spacing: 0.08em; cursor: pointer; }
+.task-priority-urgent, .task-priority-high { border-left-color: #fb7185; }
+
 .action-status-tab {
   position: absolute;
   top: -142px;

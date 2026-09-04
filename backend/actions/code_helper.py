@@ -9,6 +9,7 @@ from pathlib import Path
 # Import centralized config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_api_key
+from claude_provider import get_text_provider
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -30,7 +31,16 @@ def _get_gemini(model: str = GEMINI_MODEL):
         def generate_content(self, contents):
             return _c.models.generate_content(model=model, contents=contents)
 
-    return _W()
+    gemini = _W()
+    text_provider = get_text_provider(lambda: gemini, model=model)
+
+    class _Hybrid:
+        def generate_content(self, contents):
+            if isinstance(contents, list) and any(not isinstance(item, str) for item in contents):
+                return gemini.generate_content(contents)
+            return text_provider.generate_content(contents)
+
+    return _Hybrid()
 
 
 def _clean_code(text: str) -> str:

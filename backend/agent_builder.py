@@ -5,8 +5,12 @@ from __future__ import annotations
 import ast
 import importlib.util
 import json
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any
+from plugin_governance import is_active, normalize_governance, validate_limits
+from agent_sandbox import validate_source
 
 
 class AgentBuilder:
@@ -56,7 +60,7 @@ class AgentBuilder:
         if changed:
             self._save()
 
-    def build(self, name: str, description: str, code: str, parameters: dict | None = None) -> dict:
+    def build(self, name: str, description: str, code: str, parameters: dict | None = None, governance: dict | None = None) -> dict:
         agent_name = self._normalise_name(name)
         manifest = {
             "name": agent_name,
@@ -64,15 +68,27 @@ class AgentBuilder:
             "enabled": True,
             "description": description.strip(),
             "parameters": parameters or {},
+            "governance": normalize_governance(governance),
         }
+        validate_limits(manifest["governance"])
         self._validate(manifest)
         compile(code, f"<agent:{agent_name}>", "exec")
+        validate_source(code)
         if "def run(" not in code:
             raise ValueError("Agent code must define run(goal, repo_path, log, cancel_event)")
+        previous = self.agents.get(agent_name)
         self.agents[agent_name] = {**manifest, "module_path": f"agents/{agent_name}.py", "line_count": len(code.splitlines())}
         module_path = self._write_module(manifest, code)
+        smoke_test = self.test(agent_name)
+        if not smoke_test["ok"]:
+            if previous:
+                self.agents[agent_name] = previous
+            else:
+                self.agents.pop(agent_name, None)
+            module_path.unlink(missing_ok=True)
+            raise ValueError(f"Agent smoke test failed: {smoke_test['error']}")
         self._save()
-        return {"registered": True, "agent": self.agents[agent_name], "module": str(module_path), "verified": True}
+        return {"registered": True, "agent": self.agents[agent_name], "module": str(module_path), "verified": True, "test": smoke_test}
 
     def test(self, name: str) -> dict:
         manifest = self.agents.get(name)
@@ -82,11 +98,20 @@ class AgentBuilder:
         try:
             source = path.read_text(encoding="utf-8")
             compile(source, str(path), "exec")
+            validate_source(source)
             tree = ast.parse(source, filename=str(path))
             has_run = any(isinstance(node, ast.FunctionDef) and node.name == "run" for node in tree.body)
             if not has_run:
                 raise ValueError("Agent run() entry point is missing")
-            return {"ok": True, "name": name, "line_count": len(source.splitlines())}
+            with tempfile.TemporaryDirectory(prefix="friday-agent-test-") as test_repo:
+                logs = []
+                cancel_event = threading.Event()
+                namespace = {}
+                exec(compile(source, str(path), "exec"), namespace)
+                result = namespace["run"]("Smoke test: validate this agent contract only.", test_repo, logs.append, cancel_event)
+                if not isinstance(result, dict):
+                    raise ValueError("Agent run() must return a dictionary")
+            return {"ok": True, "name": name, "line_count": len(source.splitlines()), "smoke_test": True, "result_keys": sorted(result.keys())}
         except Exception as exc:
             return {"ok": False, "name": name, "error": str(exc)}
 
@@ -108,7 +133,7 @@ class AgentBuilder:
         return run
 
     def declarations(self) -> list[dict]:
-        return [{"name": name, "description": manifest["description"], "parameters": {"type": "OBJECT", "properties": manifest.get("parameters", {})}} for name, manifest in self.agents.items() if manifest.get("enabled", True)]
+        return [{"name": name, "description": manifest["description"], "parameters": {"type": "OBJECT", "properties": manifest.get("parameters", {})}} for name, manifest in self.agents.items() if is_active(manifest)]
 
     def _save(self) -> None:
         self.registry_path.write_text(json.dumps(self.agents, indent=2), encoding="utf-8")

@@ -184,7 +184,7 @@ computer_control_tool = {
 
 computer_settings_tool = {
     "name": "computer_settings",
-    "description": "Controls OS-level settings: volume, brightness, window management (minimize/maximize/snap), browser tab/page navigation, dark mode, wifi toggle, lock screen, and restart/shutdown (requires confirmed='yes').",
+    "description": "Controls OS-level settings: volume, brightness, window management (minimize/maximize/snap), browser tab/page navigation, dark mode, wifi toggle, lock screen, and restart/shutdown. Restart and shutdown always require the user's explicit confirmation; they must never run automatically.",
     "parameters": {
         "type": "OBJECT",
         "properties": {
@@ -518,15 +518,23 @@ google_contacts_sync_tool = {
 
 sync_google_services_tool = {"name": "sync_google_services", "description": "Synchronizes unread Gmail, upcoming Google Calendar events, Google Contacts, and recent Google Drive files into Friday's local cache. Use this when the user asks Friday to sync with Google or refresh Google data.", "parameters": {"type": "OBJECT", "properties": {"limit": {"type": "INTEGER", "description": "Maximum items per service, from 1 to 100."}}}}
 google_drive_list_tool = {"name": "google_drive_list", "description": "Lists recent non-deleted files in the connected Google Drive.", "parameters": {"type": "OBJECT", "properties": {"query": {"type": "STRING"}, "limit": {"type": "INTEGER"}}}}
+google_calendar_availability_tool = {"name": "google_calendar_availability", "description": "Checks whether the user's primary Google Calendar is free during a requested local Johannesburg date/time window.", "parameters": {"type": "OBJECT", "properties": {"date": {"type": "STRING", "description": "YYYY-MM-DD"}, "time": {"type": "STRING", "description": "HH:MM"}, "duration_minutes": {"type": "INTEGER"}}, "required": ["date", "time"]}}
 
-build_custom_tool = {"name": "build_custom_tool", "description": "Builds, tests, verifies, persists, and registers a custom Friday tool. Supported templates: http_json_get, readonly_powershell, and python_module. Use python_module only when the user explicitly asks Friday to create a new coded tool.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "operation": {"type": "STRING"}, "parameters": {"type": "OBJECT"}, "config": {"type": "OBJECT", "description": "For python_module, include code that reads the arguments variable and prints a JSON result."}}, "required": ["name", "description", "operation"]}}
+build_custom_tool = {"name": "build_custom_tool", "description": "Builds and behavior-tests a governed custom Friday tool. New capabilities start pending review until approved.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "operation": {"type": "STRING"}, "parameters": {"type": "OBJECT"}, "config": {"type": "OBJECT"}, "governance": {"type": "OBJECT", "description": "permissions, dependencies, resource_limits, test_fixtures, expiry metadata"}}, "required": ["name", "description", "operation"]}}
 test_custom_tool = {"name": "test_custom_tool", "description": "Validates and smoke-tests a registered custom Friday tool before it is used.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}}, "required": ["name"]}}
 run_custom_tool = {"name": "run_custom_tool", "description": "Runs a verified registered custom Friday tool by name.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "arguments": {"type": "OBJECT"}}, "required": ["name"]}}
-build_agent_tool = {"name": "build_agent", "description": "Builds and verifies a background agent module under backend/agents. The module must define run(goal, repo_path, log, cancel_event).", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "code": {"type": "STRING", "description": "Python source defining run(goal, repo_path, log, cancel_event)."}, "parameters": {"type": "OBJECT"}}, "required": ["name", "description", "code"]}}
+build_agent_tool = {"name": "build_agent", "description": "Builds and behavior-tests a governed background agent under backend/agents. New capabilities start pending review until approved.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}, "description": {"type": "STRING"}, "code": {"type": "STRING"}, "parameters": {"type": "OBJECT"}, "governance": {"type": "OBJECT"}}, "required": ["name", "description", "code"]}}
 test_agent_tool = {"name": "test_agent", "description": "Compile-verifies a registered background agent module before deployment.", "parameters": {"type": "OBJECT", "properties": {"name": {"type": "STRING"}}, "required": ["name"]}}
-manage_plugins_tool = {"name": "manage_plugins", "description": "Manages generated tools and agents. Actions: list, health, snapshot, snapshots, rollback, enable, disable.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING"}, "kind": {"type": "STRING", "description": "tool or agent for enable/disable"}, "name": {"type": "STRING"}, "label": {"type": "STRING"}, "snapshot": {"type": "STRING"}}, "required": ["action"]}}
-manage_tasks_tool = {"name": "manage_tasks", "description": "Creates, lists, completes, and finds overdue persistent Friday tasks.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "create, list, complete, or overdue"}, "title": {"type": "STRING"}, "due": {"type": "STRING", "description": "ISO local date/time"}, "priority": {"type": "STRING"}, "project": {"type": "STRING"}, "notes": {"type": "STRING"}, "task_id": {"type": "STRING"}, "status": {"type": "STRING"}}, "required": ["action"]}}
-schedule_agent_tool = {"name": "schedule_agent", "description": "Schedules a registered Friday agent to run repeatedly in the background.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "schedule, list, or cancel"}, "agent_type": {"type": "STRING"}, "goal": {"type": "STRING"}, "interval_seconds": {"type": "INTEGER"}, "repo_path": {"type": "STRING"}, "schedule_id": {"type": "STRING"}}, "required": ["action"]}}
+manage_plugins_tool = {"name": "manage_plugins", "description": "Manages governed tools and agents. Actions: list, health, snapshot, snapshots, rollback, enable, disable, propose, review, expire, score.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING"}, "kind": {"type": "STRING"}, "name": {"type": "STRING"}, "label": {"type": "STRING"}, "snapshot": {"type": "STRING"}, "approved": {"type": "BOOLEAN"}, "security_review": {"type": "STRING"}, "permissions": {"type": "ARRAY", "items": {"type": "STRING"}}, "dependencies": {"type": "ARRAY", "items": {"type": "STRING"}}, "resource_limits": {"type": "OBJECT"}, "test_fixtures": {"type": "OBJECT"}, "expires_days": {"type": "INTEGER"}, "success": {"type": "BOOLEAN"}}, "required": ["action"]}}
+openclaw_plan_tool = {"name": "openclaw_plan", "description": "Uses Friday's Gemini-backed orchestration layer to create an execution plan from available tools and agents.", "parameters": {"type": "OBJECT", "properties": {"goal": {"type": "STRING"}}, "required": ["goal"]}}
+openclaw_execute_tool = {"name": "openclaw_execute", "description": "Validates and executes an OpenClaw plan through Friday's registered agents and custom tools. Friday core tools remain subject to their normal safety gates.", "parameters": {"type": "OBJECT", "properties": {"plan": {"type": "OBJECT"}, "repo_path": {"type": "STRING"}}, "required": ["plan"]}}
+openclaw_capabilities_tool = {"name": "openclaw_capabilities", "description": "Lists the tools, plugins, agents, and health information available to Friday's orchestration layer.", "parameters": {"type": "OBJECT", "properties": {}}}
+openclaw_delegate_tool = {"name": "openclaw_delegate", "description": "Delegates a goal to a registered Friday background agent through the orchestration layer.", "parameters": {"type": "OBJECT", "properties": {"agent_type": {"type": "STRING"}, "goal": {"type": "STRING"}, "repo_path": {"type": "STRING"}}, "required": ["agent_type", "goal"]}}
+manage_tasks_tool = {"name": "manage_tasks", "description": "Creates, lists, completes, and finds overdue persistent Friday tasks. Supports priorities, deadlines, projects, recurring tasks, calendar/email links, turning email into tasks, and weekly planning.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "create, create_from_email, list, complete, overdue, or plan_week"}, "title": {"type": "STRING"}, "subject": {"type": "STRING"}, "due": {"type": "STRING", "description": "ISO local date/time"}, "priority": {"type": "STRING"}, "project": {"type": "STRING"}, "notes": {"type": "STRING"}, "task_id": {"type": "STRING"}, "status": {"type": "STRING"}, "calendar_link": {"type": "STRING"}, "email_link": {"type": "STRING"}, "recurrence": {"type": "STRING", "description": "daily, weekly, or monthly"}}, "required": ["action"]}}
+schedule_agent_tool = {"name": "schedule_agent", "description": "Schedules and controls recurring Friday agents with retry and run history.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "schedule, list, cancel, enable, disable, or run_now"}, "agent_type": {"type": "STRING"}, "goal": {"type": "STRING"}, "interval_seconds": {"type": "INTEGER"}, "max_retries": {"type": "INTEGER"}, "repo_path": {"type": "STRING"}, "schedule_id": {"type": "STRING"}}, "required": ["action"]}}
+execution_history_tool = {"name": "execution_history", "description": "Lists recent Friday tool and agent executions with status, provider, result, and errors.", "parameters": {"type": "OBJECT", "properties": {"limit": {"type": "INTEGER"}}}}
+autonomy_status_tool = {"name": "autonomy_status", "description": "Reports Friday's governed self-improvement pipeline, pending proposals, tests, security findings, and failure patterns.", "parameters": {"type": "OBJECT", "properties": {}}}
+approve_autonomy_proposal_tool = {"name": "approve_autonomy_proposal", "description": "Approves a reviewed autonomy proposal for deployment after its security gate has passed.", "parameters": {"type": "OBJECT", "properties": {"proposal_id": {"type": "STRING"}}, "required": ["proposal_id"]}}
 
 google_contacts_read_tool = {
     "name": "google_contacts_read",
@@ -629,7 +637,7 @@ game_updater_tool = {
             "app_id": {"type": "STRING", "description": "Steam app ID, if known."},
             "hour": {"type": "INTEGER", "description": "Hour (0-23) for 'schedule'."},
             "minute": {"type": "INTEGER", "description": "Minute (0-59) for 'schedule'."},
-            "shutdown_when_done": {"type": "BOOLEAN", "description": "Shut down the computer after the update completes."}
+            "shutdown_when_done": {"type": "BOOLEAN", "description": "Shut down the computer after the update completes. Always requires explicit user confirmation."}
         },
         "required": ["action"]
     }
@@ -777,6 +785,7 @@ tools_list = [{"function_declarations": [
     set_reminder_tool,
     google_calendar_create_tool,
         google_calendar_list_tool,
+        google_calendar_availability_tool,
         google_calendar_update_tool,
         google_calendar_delete_tool,
         google_calendar_recurring_tool,
@@ -795,8 +804,15 @@ tools_list = [{"function_declarations": [
     build_agent_tool,
     test_agent_tool,
     manage_plugins_tool,
+    openclaw_plan_tool,
+    openclaw_execute_tool,
+    openclaw_capabilities_tool,
+    openclaw_delegate_tool,
     manage_tasks_tool,
     schedule_agent_tool,
+    execution_history_tool,
+    autonomy_status_tool,
+    approve_autonomy_proposal_tool,
     google_contacts_read_tool,
     browser_control_tool,
     code_helper_tool,

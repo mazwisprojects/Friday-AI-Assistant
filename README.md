@@ -6,6 +6,7 @@ F.R.I.D.A.Y is a Windows-focused desktop AI assistant built with Electron, React
 
 ### Core AI Capabilities
 - **Gemini Live voice:** streaming input/output audio, transcription, interruption handling, reconnect context, and text input with live video streaming
+- **Hybrid reasoning:** Gemini Live remains the voice and vision model; optional Claude handles text-heavy coding, long-document analysis, and development-agent reasoning
 - **Sounddevice audio:** low-latency microphone capture, speaker playback, device discovery, and PCM streaming without PyAudio
 - **Live camera vision:** continuous webcam streaming to Gemini Live for real-time scene awareness, "what am I looking at?" queries, and hands-free visual interaction
 - **Persistent memory:** project-scoped chat history remains in each project; global conversations are written to daily files under `long_term_memory/transcripts/`, indexed in `memory_index.jsonl`, and important facts are deduplicated in `facts.jsonl`
@@ -167,7 +168,17 @@ Create `.env` in the repository root. Never commit it:
 
 ```text
 GEMINI_API_KEY=your_api_key_here
+# Optional secondary text-reasoning provider
+CLAUDE_API_KEY=your_anthropic_key_here
+# auto uses Claude when configured; gemini keeps the existing text behavior
+FRIDAY_TEXT_PROVIDER=auto
 ```
+
+Claude is optional and is not permanently free through the official API. Without `CLAUDE_API_KEY`, Friday falls back to Gemini. Gemini Live remains unchanged for voice, audio, images, and live vision.
+
+The backend status endpoint at `http://127.0.0.1:8000/status` reports whether Gemini Live, Claude text reasoning, Google, and the audio runtime are available. With `FRIDAY_TEXT_PROVIDER=auto`, Claude is selected for supported text-only work when `CLAUDE_API_KEY` is present. Set `FRIDAY_TEXT_PROVIDER=gemini` to disable Claude without removing the key.
+
+Friday also includes a real OpenClaw integration. The bridge calls the installed `openclaw agent --json` CLI/Gateway for orchestration when its device identity is paired; if the Gateway is unavailable, it falls back to the existing direct Gemini client. It plans goals from the currently registered tools and agents, reports plugin health, and delegates approved goals to background agents. Gemini Live remains the voice and vision session.
 
 ### Google Account Setup
 
@@ -296,7 +307,7 @@ Friday's comprehensive tool set includes 40+ tools organized into categories:
 ### Automation
 - `run_routine` - Predefined workflow automation
 
-Tool permissions are stored in `settings.json` and can be viewed in the Settings window. Normal tool calls run automatically. Google Calendar updates/deletes, recurring events, Google Contacts writes, and Gmail draft creation use Friday's explicit confirmation flow before changing external data. Generated Python tools are stored in `backend/mytools/` and run in a timed subprocess.
+Tool permissions are stored in `settings.json` and can be viewed in the Settings window. Normal tool calls run automatically. Google Calendar updates/deletes, recurring events, Google Contacts writes, and Gmail draft creation use Friday's explicit confirmation flow before changing external data. Computer restart/shutdown and game-updater auto-shutdown always require explicit confirmation and fail closed if confirmation is unavailable. Generated Python tools are stored in `backend/mytools/` and run in a timed subprocess.
 
 ### Custom Tools
 
@@ -313,6 +324,26 @@ Supported templates are `http_json_get`, `readonly_powershell`, and `python_modu
 Friday can build background agents with `build_agent` and verify them with `test_agent`. Verified agents are written to `backend/agents/<agent_name>.py`, where they must expose `run(goal, repo_path, log, cancel_event)`. They are registered with the background dispatcher and deployed with `deploy_agent` using the returned `agent_type`. Agent manifests are stored in the local-only `backend/custom_agents.json` registry. Friday does not modify `friday.py` or add a new dispatcher branch for each generated agent.
 
 Generated agents are managed as plugins. `manage_plugins` can list plugin versions and enabled state, report agent health and recorded tool failures, create snapshots, list snapshots, roll back a snapshot, or enable/disable a generated tool or agent. Disabling a plugin removes it from future tool declarations or agent deployments without deleting its source module.
+
+Included dedicated agents are `email_triage_agent`, `calendar_briefing_agent`, `daily_planning_agent`, `project_health_agent`, `code_review_agent`, `tool_builder_agent`, `agent_builder_agent`, `flight_watch_agent`, `news_agent`, `smart_home_agent`, `printer_monitor_agent`, and `memory_cleanup_agent`. They can be compile-tested with `test_agent`, deployed with `deploy_agent`, scheduled with `schedule_agent`, monitored through `manage_plugins`, enabled or disabled, and restored from plugin snapshots.
+
+Provider routing is configurable in Settings. Gemini Live remains the voice and vision provider; text reasoning, coding, and documents can use Gemini or OpenClaw; background agents use OpenClaw. The selected text route is shown in the top telemetry bar. Google-connected requests use Gmail and Calendar directly for focused email search, unread summaries, email-to-task conversion, meeting preparation, availability checks, calendar event creation, weekly planning, and travel-email discovery before flight monitoring.
+
+Friday records tool and agent executions in `long_term_memory/execution_ledger.json`. Use `execution_history` to review recent status, provider, result, and error details. Scheduled agents support retry backoff, maximum retry counts, last-run metadata, `run_now`, and enable/disable controls through `schedule_agent`.
+
+### Always-On Autonomy
+
+The live `AutonomySupervisor` runs inside Friday's runtime loop and continuously observes overdue tasks, failed agents, system health, and enabled scheduled workflows. It deduplicates alerts and can notify Friday without a user prompt. Automatic operation remains human-governed: read-only checks, monitoring, reports, and safe task updates may run autonomously, while shutdown/restart, external messages, destructive file actions, credential changes, calendar mutations, Git publishing, and core upgrades remain approval-gated.
+
+Self-upgrade is staged behind explicit approval. Friday records a recovery snapshot of dependency manifests, audits Python and Node packages, upgrades them, runs backend compilation, the test suite, and the frontend build, and restores the manifests when verification fails. The Python environment itself is not silently downgraded; use a pinned lockfile or environment snapshot when exact package rollback is required.
+
+Generated capabilities use governance metadata for permissions, dependencies, resource limits, test fixtures, security review, rollback planning, expiry, and success/failure scoring. New tools and agents are behavior-tested but start as `pending_review` and inactive. Use `manage_plugins` with `propose`, `review`, `expire`, or `score` before enabling them; unapproved, expired, or security-unreviewed custom tools cannot execute.
+
+Friday and OpenClaw share the human-control policy in `backend/action_policy.py`. Read-only and bounded operations may run automatically; tool creation, agent deployment, and scheduling report results; external changes, messages, file mutation, Git publishing, credential-related actions, dependency upgrades, shutdown, and restart require explicit confirmation and fail closed when confirmation is unavailable.
+
+### Default Scheduled Workflows
+
+Friday installs these workflows once and stores them under `long_term_memory/agent_schedules.json`. Daily and weekly jobs use `Africa/Johannesburg` time: morning briefing at 07:00, email triage every 15 minutes, calendar reminders every 5 minutes, daily project health at 18:00, flight watch daily at 09:00, morning news at 07:15, printer checks every 2 minutes, smart-home check-in at 21:00, weekly memory cleanup on Sunday at 20:00, and dependency/deprecation audit on Saturday at 10:00. Use `schedule_agent` to list, add, or cancel schedules.
 
 ### Self-Build and Self-Upgrade
 

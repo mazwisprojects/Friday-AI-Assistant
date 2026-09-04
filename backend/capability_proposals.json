@@ -1,0 +1,23 @@
+[
+  {
+    "name": "printer_monitor_agent",
+    "kind": "workflow",
+    "reason": "Capability used 5 times; consider a governed reusable workflow.",
+    "usage_count": 5,
+    "status": "pending_review"
+  },
+  {
+    "name": "calendar_briefing_agent",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "status": "pending_review"
+  },
+  {
+    "name": "worker",
+    "kind": "workflow",
+    "reason": "Capability used 4 times; consider a governed reusable workflow.",
+    "usage_count": 4,
+    "status": "pending_review"
+  }
+]

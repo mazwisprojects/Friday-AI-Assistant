@@ -32,6 +32,8 @@ import friday
 from actions import system_monitor as system_monitor_module
 from contacts_manager import ContactsManager
 from google_account import GoogleAccount
+from claude_provider import ClaudeProvider
+from openclaw_bridge import OpenClawBridge
 from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
@@ -75,6 +77,13 @@ kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
 
 DEFAULT_SETTINGS = {
+    "provider_routing": {
+        "voice_vision": "Gemini Live",
+        "text_reasoning": "Gemini",
+        "coding": "OpenClaw",
+        "documents": "OpenClaw",
+        "background_agents": "OpenClaw",
+    },
     "face_auth_enabled": False, # Default OFF as requested
     "tool_permissions": {
         "generate_cad": False,
@@ -227,7 +236,15 @@ async def startup_event():
 
 @app.get("/status")
 async def status():
-    return {"status": "running", "service": "F.R.I.D.A.Y Backend"}
+    return {
+        "status": "running",
+        "service": "F.R.I.D.A.Y Backend",
+        "gemini_live": bool(os.getenv("GEMINI_API_KEY")),
+        "claude_text": ClaudeProvider().available,
+        "google_account": google_account.status()["connected"],
+        "audio_runtime": bool(audio_loop),
+        "openclaw": friday.openclaw_bridge.status(),
+    }
 
 @sio.event
 async def get_contacts(sid, data=None):
@@ -514,6 +531,7 @@ async def start_audio(sid, data=None):
         
         # Start Printer Monitor
         asyncio.create_task(monitor_printers_loop())
+        asyncio.create_task(monitor_tasks_loop())
         
     except Exception as e:
         print(f"CRITICAL ERROR STARTING FRIDAY: {e}")
@@ -562,6 +580,27 @@ async def monitor_printers_loop():
             break
         except Exception as e:
             print(f"[SERVER] Monitor Loop Error: {e}")
+
+async def monitor_tasks_loop():
+    """Push task cards and alert once when an open task becomes overdue."""
+    print("[SERVER] Starting Task Monitor Loop")
+    alerted = set()
+    while audio_loop:
+        try:
+            tasks = audio_loop.task_manager.list('open')
+            overdue = audio_loop.task_manager.overdue()
+            await sio.emit('task_cards', tasks)
+            for task in overdue:
+                if task['id'] not in alerted:
+                    alerted.add(task['id'])
+                    await audio_loop.notifications.notify('tasks', 'Overdue task', task.get('title', 'A task is overdue'), 'high')
+            alerted.intersection_update({task['id'] for task in overdue})
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"[SERVER] Task Monitor Error: {e}")
+            await asyncio.sleep(60)
             
         await asyncio.sleep(2) # Update every 2 seconds for responsiveness
 
@@ -658,6 +697,24 @@ async def user_input(sid, data):
 
         # Reset the proactive-speech silence timer
         audio_loop.notify_activity()
+
+        if audio_loop.openclaw_bridge.should_route(text):
+            await sio.emit('status', {'msg': 'OpenClaw is planning this request...'}, room=sid)
+
+            async def run_openclaw_request():
+                try:
+                    plan = await asyncio.to_thread(audio_loop.openclaw_bridge.plan, text)
+                    result = json.dumps(plan, ensure_ascii=False, indent=2)
+                    await sio.emit('transcription', {'sender': 'FRIDAY', 'text': f"\nOpenClaw plan:\n{result}\n"}, room=sid)
+                    await sio.emit('unified_notification', {
+                        'category': 'openclaw', 'title': 'OpenClaw plan ready',
+                        'message': f"Prepared {len(plan.get('steps', []))} step(s).",
+                    }, room=sid)
+                except Exception as error:
+                    await sio.emit('error', {'msg': f'OpenClaw planning failed: {error}'}, room=sid)
+
+            audio_loop.spawn_background_task(run_openclaw_request())
+            return
 
         # Use the same 'send' method that worked for audio, as 'send_realtime_input' and 'send_client_content' seem unstable in this env
         # INJECT VIDEO FRAME IF AVAILABLE (VAD-style logic for Text Input)
@@ -1261,7 +1318,75 @@ async def control_kasa(sid, data):
 @sio.event
 async def get_settings(sid):
     await sio.emit('settings', SETTINGS)
+    await sio.emit('provider_routing', SETTINGS.get('provider_routing', {}), room=sid)
     await sio.emit('google_account_status', google_account.status(), room=sid)
+    await sio.emit('openclaw_status', friday.openclaw_bridge.status(), room=sid)
+
+@sio.event
+async def get_openclaw_status(sid):
+    """Return current external OpenClaw Gateway health for Friday's control window."""
+    await sio.emit('openclaw_status', friday.openclaw_bridge.status(), room=sid)
+
+@sio.event
+async def get_openclaw_capabilities(sid):
+    """Return the Friday tools and agents exposed to OpenClaw planning."""
+    await sio.emit('openclaw_capabilities', friday.openclaw_bridge.capabilities(), room=sid)
+    claude = ClaudeProvider()
+    await sio.emit('text_provider_status', {
+        'provider': 'claude' if claude.available and os.getenv('FRIDAY_TEXT_PROVIDER', 'auto').lower() != 'gemini' else 'gemini',
+        'claude_available': claude.available,
+        'model': claude.model if claude.available else None,
+    }, room=sid)
+
+@sio.event
+async def get_agent_console(sid):
+    """Return agent lifecycle, schedules, and execution history for the OpenClaw window."""
+    await sio.emit('agent_console', {
+        'plugins': friday.plugin_manager.list_plugins(),
+        'schedules': friday.agent_scheduler.list(),
+        'executions': friday.agent_dispatcher_module.ledger.list(25) if hasattr(friday, 'agent_dispatcher_module') else [],
+    }, room=sid)
+
+@sio.event
+async def get_autonomy_status(sid):
+    await sio.emit('autonomy_status', friday.autonomy_pipeline.run_cycle(), room=sid)
+
+@sio.event
+async def approve_autonomy_proposal(sid, data):
+    try:
+        result = friday.autonomy_pipeline.approve((data or {}).get('proposal_id', ''))
+    except Exception as exc:
+        result = {'error': str(exc)}
+    await sio.emit('autonomy_approval_result', result, room=sid)
+    await get_autonomy_status(sid)
+
+@sio.event
+async def agent_console_action(sid, data):
+    payload = data or {}
+    action = str(payload.get('action', '')).lower()
+    try:
+        if action == 'test':
+            result = friday.agent_builder.test(payload['name'])
+        elif action == 'enable' or action == 'disable':
+            result = friday.plugin_manager.set_enabled('agent', payload['name'], action == 'enable')
+        elif action == 'rollback':
+            result = friday.plugin_manager.rollback(payload['snapshot'])
+        elif action == 'deploy':
+            result = friday.openclaw_bridge.delegate(payload['name'], payload.get('goal', 'Run agent task.'), payload.get('repo_path', '.'))
+        elif action == 'run_now':
+            result = friday.agent_scheduler.run_now(payload['schedule_id'])
+        elif action == 'schedule':
+            result = friday.agent_scheduler.schedule(payload['name'], payload.get('goal', 'Run scheduled agent task.'), int(payload.get('interval_seconds', 900)), payload.get('repo_path', '.'), int(payload.get('max_retries', 3)))
+        elif action == 'cancel_schedule':
+            result = {'cancelled': friday.agent_scheduler.cancel(payload['schedule_id'])}
+        elif action == 'enable_schedule' or action == 'disable_schedule':
+            result = {'updated': friday.agent_scheduler.set_enabled(payload['schedule_id'], action == 'enable_schedule')}
+        else:
+            result = {'error': f'Unknown agent console action: {action}'}
+    except Exception as exc:
+        result = {'error': str(exc)}
+    await sio.emit('agent_console_action_result', result, room=sid)
+    await get_agent_console(sid)
 
 @sio.event
 async def connect_google_account(sid):
@@ -1297,6 +1422,19 @@ async def update_settings(sid, data):
         SETTINGS["tool_permissions"].update(data["tool_permissions"])
         if audio_loop:
             audio_loop.update_permissions(SETTINGS["tool_permissions"])
+
+    if "provider_routing" in data and isinstance(data["provider_routing"], dict):
+        allowed = {
+            "voice_vision": {"Gemini Live"},
+            "text_reasoning": {"Gemini", "OpenClaw"},
+            "coding": {"Gemini", "OpenClaw"},
+            "documents": {"Gemini", "OpenClaw"},
+            "background_agents": {"OpenClaw"},
+        }
+        routing = SETTINGS.setdefault("provider_routing", {})
+        for key, value in data["provider_routing"].items():
+            if key in allowed and value in allowed[key]:
+                routing[key] = value
             
     if "face_auth_enabled" in data:
         SETTINGS["face_auth_enabled"] = data["face_auth_enabled"]
@@ -1710,7 +1848,11 @@ async def task_action(sid, data):
     action = payload.get('action')
     try:
         if audio_loop:
-            if action == 'cancel':
+            if action == 'complete':
+                task = audio_loop.task_manager.complete(task_id)
+                await audio_loop.notifications.notify('tasks', 'Task completed', task.get('title', 'Task completed'))
+                await sio.emit('task_cards', audio_loop.task_manager.list('open'))
+            elif action == 'cancel':
                 audio_loop.cancel_current_action()
             elif action == 'pause':
                 pass
@@ -1720,6 +1862,14 @@ async def task_action(sid, data):
     except Exception as e:
         print(f"Error handling task action: {e}")
         await sio.emit('task_action_response', {'task_id': task_id, 'action': action, 'success': False})
+
+@sio.event
+async def get_task_cards(sid, data=None):
+    """Return open tasks for the HUD task-card strip."""
+    try:
+        await sio.emit('task_cards', audio_loop.task_manager.list('open') if audio_loop else [])
+    except Exception as e:
+        print(f"Error getting task cards: {e}")
 
 @sio.event
 async def approval_response(sid, data):

@@ -1,6 +1,8 @@
 import threading
 import time
 import uuid
+import inspect
+from execution_ledger import ExecutionLedger
 
 from actions import repo_repair_agent
 
@@ -12,10 +14,14 @@ class AgentDispatcher:
     via get_status()/list_agents() instead of waiting on the deploy call.
     """
 
-    def __init__(self):
+    def __init__(self, context=None):
         self._registry = {}
         self._agents = {}
         self._lock = threading.Lock()
+        self.context = context
+
+    def set_context(self, context) -> None:
+        self.context = context
 
     def register_agent(self, agent_type: str, function):
         self._registry[agent_type] = function
@@ -23,24 +29,38 @@ class AgentDispatcher:
     def unregister_agent(self, agent_type: str):
         self._registry.pop(agent_type, None)
 
+    def quarantine_agent(self, agent_type: str) -> bool:
+        removed = self._registry.pop(agent_type, None) is not None
+        with self._lock:
+            for entry in self._agents.values():
+                if entry.get("agent_type") == agent_type and entry.get("status") == "running":
+                    entry["_cancel_event"].set()
+        return removed
+
     def _run(self, agent_id: str, agent_type: str, function, goal: str, repo_path: str, cancel_event: threading.Event):
         entry = self._agents[agent_id]
+        ledger_id = ledger.start("agent", agent_type, goal)
 
         def log(message: str):
             with self._lock:
                 entry["log"].append({"time": time.time(), "message": message})
 
         try:
-            result = function(goal, repo_path, log, cancel_event)
+            if len(inspect.signature(function).parameters) >= 5:
+                result = function(goal, repo_path, log, cancel_event, self.context)
+            else:
+                result = function(goal, repo_path, log, cancel_event)
             with self._lock:
                 entry["status"] = "cancelled" if cancel_event.is_set() else "done"
                 entry["result"] = result
                 entry["finished_at"] = time.time()
+            ledger.finish(ledger_id, entry["status"], result)
         except Exception as error:
             with self._lock:
                 entry["status"] = "failed"
                 entry["error"] = str(error)
                 entry["finished_at"] = time.time()
+            ledger.finish(ledger_id, "failed", error=str(error))
 
     def deploy_agent(self, agent_type: str, goal: str, repo_path: str = ".") -> str:
         function = self._registry.get(agent_type)
@@ -83,6 +103,10 @@ class AgentDispatcher:
         with self._lock:
             return [{k: v for k, v in entry.items() if not k.startswith("_")} for entry in self._agents.values()]
 
+    def registered_agents(self) -> list[str]:
+        with self._lock:
+            return list(self._registry)
+
     def cancel(self, agent_id: str) -> bool:
         with self._lock:
             entry = self._agents.get(agent_id)
@@ -94,6 +118,7 @@ class AgentDispatcher:
 
 dispatcher = AgentDispatcher()
 dispatcher.register_agent("repo_repair", repo_repair_agent.run)
+ledger = ExecutionLedger(__import__("pathlib").Path(__file__).resolve().parents[1])
 
 
 def agent_dispatcher_action(parameters: dict, dispatcher: AgentDispatcher = dispatcher) -> dict:

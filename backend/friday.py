@@ -70,10 +70,18 @@ from contacts_manager import ContactsManager
 from google_account import GoogleAccount
 from notification_manager import NotificationManager
 from tool_builder import ToolBuilder
+from claude_provider import ClaudeProvider, get_text_provider
 from agent_builder import AgentBuilder
+from agent_context import AgentContext
 from plugin_manager import PluginManager
+from plugin_governance import is_active
+from action_policy import decision
+from openclaw_bridge import OpenClawBridge
 from task_manager import TaskManager
 from agent_scheduler import AgentScheduler
+from autonomy_supervisor import AutonomySupervisor
+from capability_learning import CapabilityLearning
+from autonomy_pipeline import AutonomyPipeline
 from undo_manager import UndoManager
 from config import FACT_GEMINI_MODEL, MAIN_GEMINI_MODEL
 
@@ -99,9 +107,19 @@ DEFAULT_MODE = "camera"
 load_dotenv()
 client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv("GEMINI_API_KEY"))
 
+
+def get_text_model(model: str = FACT_GEMINI_MODEL):
+    """Return Claude for text reasoning when configured, with Gemini fallback."""
+    class GeminiTextModel:
+        def generate_content(self, contents):
+            return client.models.generate_content(model=model, contents=contents)
+
+    return get_text_provider(lambda: GeminiTextModel(), model=model)
+
 custom_tool_builder = ToolBuilder(os.path.dirname(os.path.abspath(__file__)))
 agent_builder = AgentBuilder(os.path.dirname(os.path.abspath(__file__)))
 plugin_manager = PluginManager(os.path.dirname(os.path.abspath(__file__)), custom_tool_builder, agent_builder, agent_dispatcher_module.dispatcher)
+openclaw_bridge = OpenClawBridge(plugin_manager, agent_dispatcher_module.dispatcher)
 task_manager = TaskManager(ROOT_DIR)
 agent_scheduler = AgentScheduler(ROOT_DIR, agent_dispatcher_module.dispatcher)
 tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
@@ -118,10 +136,12 @@ config = types.LiveConnectConfig(
         "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
         "You have a fun personality. "
         "When the user asks for a morning briefing, always use the morning_briefing routine so it gathers current Gmail, Google Calendar, and system information before answering. "
+        "For email and calendar intelligence, use Gmail and Calendar tools directly: search Gmail with a focused query for people or topics, list the next calendar events for meeting preparation or availability, and combine both sources when preparing a meeting. To turn an email into a task, pass its subject, web_link, and thread_id context to manage_tasks with action create_from_email. For weekly planning, use manage_tasks with action plan_week and include calendar deadlines. For travel emails, search Gmail for flight, booking, itinerary, or airline terms before using find_flights for price monitoring. "
+        "For weather requests, always use get_weather. For news requests, use the registered news_reporter plugin through run_custom_tool; never use run_web_agent unless the user explicitly asks to browse the web. "
         "When asked to self-build, use self_maintenance with action self_build; when asked to self-heal, use self_maintenance with action self_heal; when asked to self-upgrade, use self_maintenance with action self_upgrade and report exactly what changed. "
         "When the user explicitly asks you to commit and push yourself to Git, use git_workflow with action publish and a clear commit message. Never force-push or reset history. "
         "For every question about the current time or date, always use get_local_time and report Johannesburg, South Africa time (SAST), never UTC. When the user asks to put a reminder or event on Google Calendar, use google_calendar_create; use set_reminder only for a local notification. "
-        "When the user asks to check, read, search, or summarize emails, always use the gmail_read tool; never use run_web_agent or web_search for Gmail. When the user asks for Google Contacts, always use google_contacts_read; when they ask to save, transfer, import, or synchronize contacts, use the appropriate Google Contacts write tool and report its actual result; use contacts_manager only for Friday's local contacts. "
+        "When the user asks to check, read, search, or summarize emails, always use the gmail_read tool; never use run_web_agent or web_search for Gmail. Important unread email summaries should use gmail_read with is:unread and a focused query when appropriate. When the user asks for Google Contacts, always use google_contacts_read; when they ask to save, transfer, import, or synchronize contacts, use the appropriate Google Contacts write tool and report its actual result; use contacts_manager only for Friday's local contacts. "
         "Before ever telling the user you don't know a personal detail about them (name, relationships, family, "
         "job, preferences, past decisions, or anything they may have told you in a previous conversation), you must "
         "first silently call the search_memory tool with relevant keywords to check your long-term memory. Only say "
@@ -143,11 +163,14 @@ from printer_agent import PrinterAgent
 from agents.agent_supervisor import AgentSupervisor
 from agents.routine_manager import RoutineManager
 
-for generated_agent_name in agent_builder.agents:
+for generated_agent_name, generated_agent_manifest in agent_builder.agents.items():
     try:
-        agent_dispatcher_module.dispatcher.register_agent(generated_agent_name, agent_builder.load_callable(generated_agent_name))
+        if is_active(generated_agent_manifest):
+            agent_dispatcher_module.dispatcher.register_agent(generated_agent_name, agent_builder.load_callable(generated_agent_name))
     except Exception as exc:
         print(f"[AGENTS] Could not register {generated_agent_name}: {exc}")
+
+agent_scheduler.ensure_default_workflows()
 
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, on_notification=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
@@ -251,8 +274,34 @@ class AudioLoop:
         self.tool_builder = custom_tool_builder
         self.agent_builder = agent_builder
         self.plugin_manager = plugin_manager
+        self.openclaw_bridge = openclaw_bridge
         self.task_manager = task_manager
         self.agent_scheduler = agent_scheduler
+        self.capability_learning = CapabilityLearning(
+            current_dir, agent_dispatcher_module.ledger, self.plugin_manager
+        )
+        self.autonomy_pipeline = AutonomyPipeline(
+            current_dir, self.capability_learning, self.plugin_manager, agent_dispatcher_module.ledger
+        )
+        self.autonomy_supervisor = AutonomySupervisor(
+            self.task_manager,
+            agent_dispatcher_module.dispatcher,
+            self.agent_scheduler,
+            self.system_monitor,
+            self.notifications,
+            self.capability_learning,
+            self.autonomy_pipeline,
+        )
+        self.openclaw_bridge.set_tool_executor(self.execute_openclaw_tool)
+        agent_dispatcher_module.dispatcher.set_context(AgentContext(
+            task_manager=self.task_manager,
+            google_account=self.google_account,
+            notification_manager=self.notifications,
+            plugin_manager=self.plugin_manager,
+            openclaw_bridge=self.openclaw_bridge,
+            kasa_agent=self.kasa_agent,
+            printer_agent=self.printer_agent,
+        ))
         self.undo_manager = UndoManager(project_root)
         file_controller_module.configure_undo_manager(self.undo_manager)
 
@@ -448,8 +497,7 @@ class AudioLoop:
 
         try:
             response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=FACT_GEMINI_MODEL,
+                get_text_model(FACT_GEMINI_MODEL).generate_content,
                 contents=prompt,
             )
             raw = (response.text or "").strip()
@@ -492,8 +540,7 @@ class AudioLoop:
             )
             try:
                 response = await asyncio.to_thread(
-                    client.models.generate_content,
-                    model=FACT_GEMINI_MODEL,
+                    get_text_model(FACT_GEMINI_MODEL).generate_content,
                     contents=prompt,
                 )
                 raw = (response.text or "{}").strip()
@@ -554,8 +601,43 @@ class AudioLoop:
             self.finish_action_plan(success=False, cancelled=True)
         return f"Cancellation requested for {cancelled} background task(s)."
 
+    def execute_openclaw_tool(self, tool_name: str, args: dict):
+        """Execute OpenClaw-selected read-only/core tools through Friday's guards."""
+        policy = decision(tool_name, args)
+        if policy["tier"] in {"approval_required", "always_confirm"}:
+            raise PermissionError(f"OpenClaw cannot execute approval-required tool automatically: {tool_name}. {policy['reason']}")
+        if tool_name == "gmail_read":
+            return self.google_account.read_emails(args.get("query", "is:unread"), args.get("limit", 10))
+        if tool_name == "gmail_thread_read":
+            return self.google_account.read_gmail_thread(args.get("thread_id", ""))
+        if tool_name == "google_calendar_list":
+            return self.google_account.list_calendar_events(args.get("query", ""), args.get("days", 7), args.get("limit", 25))
+        if tool_name == "google_calendar_availability":
+            return self.google_account.check_calendar_availability(args.get("date", ""), args.get("time", ""), args.get("duration_minutes", 60))
+        if tool_name == "manage_tasks":
+            return self.task_manager.manage(args.get("action", "list"), **args)
+        if tool_name == "schedule_agent":
+            action = args.get("action", "list")
+            if action == "list":
+                return self.agent_scheduler.list()
+            if action == "run_now":
+                return self.agent_scheduler.run_now(args["schedule_id"])
+            if action in {"enable", "disable"}:
+                return {"updated": self.agent_scheduler.set_enabled(args["schedule_id"], action == "enable")}
+            return self.agent_scheduler.schedule(args["agent_type"], args.get("goal", "Run scheduled agent task."), int(args["interval_seconds"]), args.get("repo_path", "."), int(args.get("max_retries", 3)))
+        if tool_name == "get_weather":
+            return weather_report_module.get_weather_data(args.get("city", ""))
+        if tool_name == "find_flights":
+            return flight_finder_module.flight_finder(args)
+        if tool_name == "get_system_status":
+            return system_monitor_module.get_system_status()
+        if tool_name in self.tool_builder.tools:
+            return self.tool_builder.execute(tool_name, args)
+        raise ValueError(f"OpenClaw tool is registered but not executable through the live boundary: {tool_name}")
+
     async def run_background_tool(self, tool_name: str, function, params: dict):
         """Run blocking action code off-loop and report its result after completion."""
+        ledger_id = agent_dispatcher_module.ledger.start("tool", tool_name, arguments=params)
         try:
             params = {**params, "_cancel_event": self._cancel_event}
             result = await asyncio.to_thread(function, params)
@@ -564,6 +646,7 @@ class AudioLoop:
 
             outcome = self.supervisor.record_execution(tool_name, result)
             if not outcome["ok"]:
+                agent_dispatcher_module.ledger.finish(ledger_id, "failed", result)
                 self.finish_action_plan(False)
                 self_maintenance_module.record_tool_failure(tool_name, str(result))
                 await self.notifications.notify("long_running_action", f"{tool_name} failed", f"{tool_name} reported a failed result.", "high")
@@ -575,6 +658,7 @@ class AudioLoop:
                 return
 
             self.finish_action_plan(True)
+            agent_dispatcher_module.ledger.finish(ledger_id, "done", result)
             await self.notifications.notify("long_running_action", f"{tool_name} complete", f"{tool_name} finished successfully.")
             if self.session:
                 await self.session.send(
@@ -582,9 +666,11 @@ class AudioLoop:
                     end_of_turn=True,
                 )
         except asyncio.CancelledError:
+            agent_dispatcher_module.ledger.finish(ledger_id, "cancelled")
             print(f"[FRIDAY DEBUG] [CANCELLED] {tool_name} task cancelled.")
             self.finish_action_plan(False, cancelled=True)
         except Exception as error:
+            agent_dispatcher_module.ledger.finish(ledger_id, "failed", error=str(error))
             print(f"[FRIDAY DEBUG] [ERR] {tool_name} background task failed: {error}")
             self.finish_action_plan(False)
             self_maintenance_module.record_tool_failure(tool_name, str(error))
@@ -1097,7 +1183,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "build_custom_tool", "test_custom_tool", "run_custom_tool", "build_agent", "test_agent", "manage_plugins", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "run_routine"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "schedule_agent", "manage_tasks", "run_routine"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -1117,14 +1203,22 @@ class AudioLoop:
                                     self._update_plan_step(1, "done")
                                     self._update_plan_step(2, "active")
                                 
-                                # All registered tools run automatically by user request.
-                                confirmation_required = fc.name in {"gmail_create_draft", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "google_contacts_import", "google_contacts_sync"}
+                                policy = decision(fc.name, fc.args)
+                                confirmation_required = policy["tier"] in {"approval_required", "always_confirm"}
 
                                 if not confirmation_required:
                                     print(f"[FRIDAY DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
                                     # Skip confirmation block and jump to execution
                                     pass
                                 elif not self.on_tool_confirmation:
+                                    if confirmation_required:
+                                        result = f"Safety stop: explicit confirmation is required. {policy['reason']}"
+                                        print(f"[FRIDAY DEBUG] [BLOCKED] {result}")
+                                        function_responses.append(types.FunctionResponse(
+                                            id=fc.id, name=fc.name, response={"result": result}
+                                        ))
+                                        self.finish_action_plan(False)
+                                        continue
                                     print(f"[FRIDAY DEBUG] [TOOL] No confirmation callback configured for '{fc.name}' -> AUTO-ALLOW")
                                 else:
                                     # Confirmation Logic
@@ -1628,6 +1722,17 @@ class AudioLoop:
                                         result_str = f"Google Calendar unavailable: {exc}"
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
 
+                                elif fc.name == "google_calendar_availability":
+                                    try:
+                                        availability = await asyncio.to_thread(
+                                            self.google_account.check_calendar_availability,
+                                            fc.args.get("date", ""), fc.args.get("time", ""), fc.args.get("duration_minutes", 60)
+                                        )
+                                        result_str = json.dumps(availability, ensure_ascii=False)
+                                    except Exception as exc:
+                                        result_str = f"Google Calendar availability unavailable: {exc}"
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
                                 elif fc.name == "google_calendar_update":
                                     try:
                                         event = await asyncio.to_thread(self.google_account.update_calendar_event, fc.args.get("event_id", ""), fc.args.get("title"), fc.args.get("date"), fc.args.get("time"), fc.args.get("duration_minutes", 30), fc.args.get("description"))
@@ -1765,6 +1870,69 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}
                                     )
                                     function_responses.append(function_response)
+
+                                elif fc.name == "schedule_agent":
+                                    action = fc.args.get("action", "list").lower()
+                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'schedule_agent' action='{action}'")
+                                    if action == "schedule":
+                                        result = self.agent_scheduler.schedule(
+                                            fc.args["agent_type"],
+                                            fc.args.get("goal", "Run scheduled agent task."),
+                                            int(fc.args["interval_seconds"]),
+                                            fc.args.get("repo_path", "."),
+                                            int(fc.args.get("max_retries", 3)),
+                                        )
+                                    elif action == "cancel":
+                                        result = {"cancelled": self.agent_scheduler.cancel(fc.args["schedule_id"])}
+                                    elif action in {"enable", "disable"}:
+                                        result = {"updated": self.agent_scheduler.set_enabled(fc.args["schedule_id"], action == "enable")}
+                                    elif action == "run_now":
+                                        result = self.agent_scheduler.run_now(fc.args["schedule_id"])
+                                    elif action == "list":
+                                        result = self.agent_scheduler.list()
+                                    else:
+                                        result = {"error": "Unsupported schedule action. Use schedule, list, cancel, enable, disable, or run_now."}
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}
+                                    ))
+
+                                elif fc.name == "execution_history":
+                                    result = agent_dispatcher_module.ledger.list(int(fc.args.get("limit", 50)))
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}
+                                    ))
+
+                                elif fc.name == "autonomy_status":
+                                    result = self.autonomy_pipeline.run_cycle()
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}
+                                    ))
+
+                                elif fc.name == "approve_autonomy_proposal":
+                                    try:
+                                        result = self.autonomy_pipeline.approve(fc.args.get("proposal_id", ""))
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}
+                                    ))
+
+                                elif fc.name == "manage_tasks":
+                                    action = fc.args.get("action", "list").lower()
+                                    try:
+                                        if action == "plan_week":
+                                            result = {"tasks": self.task_manager.list("open"), "overdue": self.task_manager.overdue(), "message": "Use these open tasks and deadlines to plan the week."}
+                                        else:
+                                            result = self.task_manager.manage(action, **dict(fc.args))
+                                        if action in {"create", "create_from_email", "complete"} and self.on_notification:
+                                            title = "Task completed" if action == "complete" else "Task created"
+                                            message = result.get("title", "Task updated") if isinstance(result, dict) else "Task updated"
+                                            self.on_notification({"category": "tasks", "title": title, "message": message, "tasks": self.task_manager.list("open")})
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}
+                                    ))
 
                                 elif fc.name == "get_weather":
                                     city = fc.args.get("city", "")
@@ -2138,15 +2306,16 @@ class AudioLoop:
 
                                 elif fc.name == "build_custom_tool":
                                     try:
-                                        result = self.tool_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("operation", ""), fc.args.get("parameters", {}), fc.args.get("config", {}))
-                                        declaration = self.tool_builder.declarations()[-1]
+                                        result = self.tool_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("operation", ""), fc.args.get("parameters", {}), fc.args.get("config", {}), fc.args.get("governance", {}))
+                                        manifest = result["tool"]
+                                        declaration = {"name": manifest["name"], "description": manifest["description"], "parameters": {"type": "OBJECT", "properties": manifest.get("parameters", {})}}
                                         declarations = tools[1]["function_declarations"]
                                         existing_index = next((index for index, item in enumerate(declarations) if item.get("name") == declaration["name"]), None)
                                         if existing_index is None:
                                             declarations.append(declaration)
                                         else:
                                             declarations[existing_index] = declaration
-                                        if self.session:
+                                        if self.session and result["tool"].get("governance", {}).get("approval") == "approved":
                                             await self.session.send(
                                                 input=(
                                                     f"System Notification: Custom tool '{declaration['name']}' was built, tested, verified, and registered live. "
@@ -2175,9 +2344,10 @@ class AudioLoop:
 
                                 elif fc.name == "build_agent":
                                     try:
-                                        result = self.agent_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("code", ""), fc.args.get("parameters", {}))
+                                        result = self.agent_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("code", ""), fc.args.get("parameters", {}), fc.args.get("governance", {}))
                                         agent_name = result["agent"]["name"]
-                                        agent_dispatcher_module.dispatcher.register_agent(agent_name, self.agent_builder.load_callable(agent_name))
+                                        if is_active(result["agent"]):
+                                            agent_dispatcher_module.dispatcher.register_agent(agent_name, self.agent_builder.load_callable(agent_name))
                                         result_str = json.dumps({**result, "deploy_with": "deploy_agent", "agent_type": agent_name}, ensure_ascii=False)
                                     except Exception as exc:
                                         result_str = json.dumps({"registered": False, "error": str(exc)})
@@ -2202,8 +2372,41 @@ class AudioLoop:
                                             result = self.plugin_manager.rollback(fc.args.get("snapshot", ""))
                                         elif action in {"enable", "disable"}:
                                             result = self.plugin_manager.set_enabled(fc.args.get("kind", "tool"), fc.args.get("name", ""), action == "enable")
+                                        elif action == "propose":
+                                            result = self.plugin_manager.propose(fc.args.get("kind", "tool"), fc.args.get("name", ""), fc.args.get("permissions"), fc.args.get("dependencies"), fc.args.get("resource_limits"), fc.args.get("test_fixtures"), int(fc.args.get("expires_days", 90)))
+                                        elif action == "review":
+                                            result = self.plugin_manager.review(fc.args.get("kind", "tool"), fc.args.get("name", ""), bool(fc.args.get("approved", False)), fc.args.get("security_review", "approved"))
+                                        elif action == "expire":
+                                            result = {"expired": self.plugin_manager.expire()}
+                                        elif action == "score":
+                                            result = self.plugin_manager.score(fc.args.get("kind", "tool"), fc.args.get("name", ""), bool(fc.args.get("success", False)))
                                         else:
-                                            result = {"error": "Plugin action must be list, health, enable, or disable."}
+                                            result = {"error": "Plugin action must be list, health, snapshot, snapshots, rollback, enable, disable, propose, review, expire, or score."}
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}))
+
+                                elif fc.name == "openclaw_plan":
+                                    try:
+                                        result = self.openclaw_bridge.plan(fc.args.get("goal", ""))
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}))
+
+                                elif fc.name == "openclaw_execute":
+                                    try:
+                                        result = self.openclaw_bridge.execute_plan(fc.args.get("plan", {}), fc.args.get("repo_path", "."))
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "openclaw_capabilities":
+                                    result = self.openclaw_bridge.capabilities()
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "openclaw_delegate":
+                                    try:
+                                        result = self.openclaw_bridge.delegate(fc.args.get("agent_type", ""), fc.args.get("goal", ""), fc.args.get("repo_path", "."))
                                     except Exception as exc:
                                         result = {"error": str(exc)}
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}))
@@ -2335,6 +2538,23 @@ class AudioLoop:
                 except Exception as error:
                     print(f"[FRIDAY DEBUG] [NOTIFY] Google polling failed: {error}")
 
+    async def autonomy_loop(self):
+        """Continuously observe Friday's world and escalate risky decisions for approval."""
+        while True:
+            await asyncio.sleep(30)
+            try:
+                report = await asyncio.to_thread(self.autonomy_supervisor.inspect)
+                for notification in report.notifications:
+                    await self.notifications.notify(
+                        notification["category"], notification["title"], notification["message"], notification.get("priority", "normal")
+                    )
+                if report.observations:
+                    print(f"[FRIDAY DEBUG] [AUTONOMY] {'; '.join(report.observations)}")
+            except asyncio.CancelledError:
+                break
+            except Exception as error:
+                print(f"[FRIDAY DEBUG] [ERR] Autonomy loop failed: {error}")
+
     async def proactive_loop(self):
         """Periodically checks if Friday should speak unprompted based on silence, stall patterns, and system state."""
         while True:
@@ -2402,6 +2622,7 @@ class AudioLoop:
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
                     tg.create_task(self.monitor_system())
+                    tg.create_task(self.autonomy_loop())
                     tg.create_task(self.proactive_loop())
                     tg.create_task(self.compact_memory())
                     tg.create_task(self._send_live_video())

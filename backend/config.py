@@ -14,6 +14,8 @@ MAIN_GEMINI_MODEL = os.getenv(
 )
 FACT_GEMINI_MODEL = os.getenv("FRIDAY_FACT_MODEL", "models/gemini-3.5-flash-lite")
 CAD_GEMINI_MODEL = os.getenv("FRIDAY_CAD_MODEL", "gemini-3-pro-preview")
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-3-5-sonnet-latest")
+TEXT_PROVIDER = os.getenv("FRIDAY_TEXT_PROVIDER", "auto")
 
 _SYSTEM = platform.system()  # "Windows" | "Darwin" | "Linux"
 

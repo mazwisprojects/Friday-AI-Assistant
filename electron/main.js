@@ -10,6 +10,7 @@ app.commandLine.appendSwitch('ignore-gpu-blocklist');
 
 let mainWindow;
 let pythonProcess;
+let openClawProcess;
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -116,7 +117,7 @@ app.whenReady().then(() => {
         if (mainWindow) mainWindow.close();
     });
 
-    checkBackendPort(8000).then((isTaken) => {
+    startOpenClawGateway().then(() => checkBackendPort(8000)).then((isTaken) => {
         if (isTaken) {
             console.log('Port 8000 is taken. Assuming backend is already running manually.');
             waitForBackend().then(createWindow);
@@ -133,6 +134,36 @@ app.whenReady().then(() => {
         if (BrowserWindow.getAllWindows().length === 0) createWindow();
     });
 });
+
+function startOpenClawGateway() {
+    return new Promise((resolve) => {
+        checkBackendPort(18789).then((isTaken) => {
+            if (isTaken) {
+                console.log('OpenClaw Gateway already running.');
+                resolve();
+                return;
+            }
+
+            const openClawCommand = process.env.FRIDAY_OPENCLAW_COMMAND || (process.platform === 'win32' ? 'openclaw.cmd' : 'openclaw');
+            console.log(`Starting OpenClaw Gateway with ${openClawCommand}...`);
+            openClawProcess = spawn(openClawCommand, ['gateway', 'run', '--allow-unconfigured', '--bind', 'loopback', '--port', '18789'], {
+                detached: true,
+                stdio: 'ignore',
+                windowsHide: true,
+                shell: openClawCommand.endsWith('.cmd'),
+            });
+            openClawProcess.unref();
+            openClawProcess.once('error', (error) => {
+                console.error(`OpenClaw Gateway could not start: ${error.message}`);
+                resolve();
+            });
+            waitForPort(18789, 90000).then((ready) => {
+                console.log(ready ? 'OpenClaw Gateway is ready.' : 'OpenClaw Gateway did not become ready; Friday will use its Gemini fallback.');
+                resolve();
+            });
+        });
+    });
+}
 
 function checkBackendPort(port) {
     return new Promise((resolve) => {
@@ -168,6 +199,29 @@ function waitForBackend() {
             }).on('error', (err) => {
                 console.log('Waiting for backend...');
                 setTimeout(check, 1000);
+            });
+        };
+        check();
+    });
+}
+
+function waitForPort(port, timeoutMs) {
+    return new Promise((resolve) => {
+        const startedAt = Date.now();
+        const check = () => {
+            const net = require('net');
+            const socket = net.createConnection({ host: '127.0.0.1', port });
+            socket.once('connect', () => {
+                socket.destroy();
+                resolve(true);
+            });
+            socket.once('error', () => {
+                socket.destroy();
+                if (Date.now() - startedAt >= timeoutMs) {
+                    resolve(false);
+                } else {
+                    setTimeout(check, 1000);
+                }
             });
         };
         check();

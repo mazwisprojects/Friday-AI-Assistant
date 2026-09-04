@@ -69,6 +69,9 @@ const SettingsWindow = ({
     });
     const [currentMode, setCurrentMode] = useState('active');
     const [googleAccount, setGoogleAccount] = useState({ connected: false, connecting: false, error: '' });
+    const [providerRouting, setProviderRouting] = useState({
+        voice_vision: 'Gemini Live', text_reasoning: 'Gemini', coding: 'OpenClaw', documents: 'OpenClaw', background_agents: 'OpenClaw'
+    });
 
     useEffect(() => {
         // Request initial permissions
@@ -94,6 +97,9 @@ const SettingsWindow = ({
                 }
                 if (settings.current_mode) {
                     setCurrentMode(settings.current_mode);
+                }
+                if (settings.provider_routing) {
+                    setProviderRouting(prev => ({ ...prev, ...settings.provider_routing }));
                 }
             }
         };
@@ -151,6 +157,10 @@ const SettingsWindow = ({
 
     const connectGoogleAccount = () => socket.emit('connect_google_account');
     const disconnectGoogleAccount = () => socket.emit('disconnect_google_account');
+    const updateProvider = (key, value) => {
+        setProviderRouting(prev => ({ ...prev, [key]: value }));
+        socket.emit('update_settings', { provider_routing: { [key]: value } });
+    };
 
     return (
         <div className="fixed top-20 right-4 sm:right-10 bg-black/95 border border-cyan-500/50 p-4 rounded-lg z-[1100] w-[calc(100vw-2rem)] max-w-80 max-h-[calc(100vh-5rem)] overflow-hidden backdrop-blur-xl shadow-[0_0_30px_rgba(6,182,212,0.2)]">
@@ -213,6 +223,20 @@ const SettingsWindow = ({
                     </div>
                     <p className="text-[10px] leading-relaxed text-cyan-500/60">Friday requests read access only. Google opens a consent page in your browser; the token stays on this computer.</p>
                     {googleAccount.error && <p className="text-[10px] leading-relaxed text-red-300">{googleAccount.error}</p>}
+                </div>
+            </div>
+
+            <div className="mb-6">
+                <h3 className="text-cyan-400 font-bold mb-3 text-xs uppercase tracking-wider opacity-80">Provider Routing</h3>
+                <div className="space-y-2 bg-gray-900/50 p-3 rounded border border-cyan-900/30">
+                    {[['voice_vision', 'Voice + vision', ['Gemini Live']], ['text_reasoning', 'Text reasoning', ['Gemini', 'OpenClaw']], ['coding', 'Coding', ['Gemini', 'OpenClaw']], ['documents', 'Documents', ['Gemini', 'OpenClaw']], ['background_agents', 'Background agents', ['OpenClaw']]].map(([key, label, options]) => (
+                        <label key={key} className="flex items-center justify-between gap-2 text-[10px] text-cyan-100/80">
+                            <span>{label}</span>
+                            <select value={providerRouting[key]} onChange={(event) => updateProvider(key, event.target.value)} className="bg-black border border-cyan-700/50 px-1 py-1 text-cyan-200">
+                                {options.map(option => <option key={option}>{option}</option>)}
+                            </select>
+                        </label>
+                    ))}
                 </div>
             </div>
 

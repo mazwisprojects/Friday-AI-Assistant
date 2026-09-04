@@ -11,10 +11,12 @@ import ast
 import subprocess
 import sys
 import textwrap
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import requests
+from plugin_governance import is_active, normalize_governance, validate_limits
 
 
 class ToolBuilder:
@@ -60,18 +62,23 @@ class ToolBuilder:
                 self._validate(manifest)
                 manifest = dict(manifest)
                 config = dict(manifest.get("config", {}))
+                if manifest.get("operation") == "python_module" and config.get("code"):
+                    self._write_module(manifest)
                 config.pop("code", None)
                 config["module_path"] = f"mytools/{module_path.name}"
                 config.setdefault("line_count", len(module_path.read_text(encoding="utf-8").splitlines()))
                 manifest["config"] = config
-                self.tools.setdefault(manifest["name"], manifest)
+                existing = self.tools.get(manifest["name"], {})
+                merged = {**existing, **manifest}
+                merged["config"] = {**existing.get("config", {}), **manifest.get("config", {})}
+                self.tools[manifest["name"]] = merged
                 discovered = True
             except (OSError, SyntaxError, ValueError, MemoryError) as exc:
                 print(f"[TOOLS] Skipping invalid plugin {module_path.name}: {exc}")
         if discovered:
             self._save()
 
-    def build(self, name: str, description: str, operation: str, parameters: dict | None = None, config: dict | None = None) -> dict:
+    def build(self, name: str, description: str, operation: str, parameters: dict | None = None, config: dict | None = None, governance: dict | None = None) -> dict:
         tool_name = self._normalise_name(name)
         if operation not in self.APPROVED_OPERATIONS:
             raise ValueError(f"Unsupported tool template: {operation}")
@@ -83,13 +90,19 @@ class ToolBuilder:
             "operation": operation,
             "parameters": parameters or {},
             "config": config or {},
+            "governance": normalize_governance(governance),
         }
+        validate_limits(manifest["governance"])
         self._validate(manifest)
-        smoke_test = self.test(manifest)
+        module_path = self._write_module(manifest)
+        smoke_manifest = dict(manifest)
+        smoke_config = dict(manifest["config"])
+        smoke_config.pop("code", None)
+        smoke_manifest["config"] = smoke_config
+        smoke_test = self.test(smoke_manifest)
         if not smoke_test["ok"]:
             raise ValueError(f"Tool smoke test failed: {smoke_test['error']}")
         self.tools[tool_name] = manifest
-        module_path = self._write_module(manifest)
         self._save()
         return {"registered": True, "tool": manifest, "module": str(module_path), "test": smoke_test}
 
@@ -120,7 +133,16 @@ class ToolBuilder:
                         raise ValueError(f"Generated module is missing: {module_path}")
                     compile(module_path.read_text(encoding="utf-8"), str(module_path), "exec")
                     line_count = int(manifest.get("config", {}).get("line_count", 0))
-                return {"ok": True, "name": manifest["name"], "line_count": line_count}
+                module_path = self.tools_dir / f"{manifest['name']}.py"
+                if not module_path.exists():
+                    raise ValueError(f"Generated module is missing: {module_path}")
+                with tempfile.TemporaryFile(mode="w+") as input_file:
+                    input_file.write(json.dumps({}))
+                    input_file.seek(0)
+                    result = subprocess.run([sys.executable, str(module_path)], stdin=input_file, capture_output=True, text=True, timeout=10)
+                if result.returncode != 0:
+                    raise ValueError(result.stderr.strip() or "Generated tool exited with a non-zero status")
+                return {"ok": True, "name": manifest["name"], "line_count": line_count, "smoke_test": True}
             return {"ok": True, "name": manifest["name"]}
         except Exception as exc:
             return {"ok": False, "name": manifest.get("name"), "error": str(exc)}
@@ -129,6 +151,8 @@ class ToolBuilder:
         manifest = self.tools.get(name)
         if not manifest:
             raise ValueError(f"Custom tool is not registered: {name}")
+        if not is_active(manifest):
+            raise PermissionError(f"Custom tool is not approved, security-reviewed, or has expired: {name}")
         arguments = arguments or {}
         operation = manifest["operation"]
         if operation == "http_json_get":
@@ -152,7 +176,7 @@ class ToolBuilder:
     def declarations(self) -> list[dict]:
         declarations = []
         for manifest in self.tools.values():
-            if not manifest.get("enabled", True):
+            if not is_active(manifest):
                 continue
             declarations.append({
                 "name": manifest["name"],
@@ -194,10 +218,10 @@ class ToolBuilder:
                 f"TOOL_MANIFEST = {module_manifest!r}\n\n"
                 "def describe():\n"
                 "    return TOOL_MANIFEST.copy()\n\n"
+                + manifest["config"]["code"].rstrip() + "\n\n"
                 "if __name__ == '__main__':\n"
                 "    import json\n"
                 "    arguments = json.loads(input())\n"
-                + textwrap.indent(manifest["config"]["code"], "    ") + "\n"
                 + "    if 'run' in locals():\n"
                 + "        output = run(arguments)\n"
                 + "        if output is not None:\n"

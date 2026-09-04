@@ -31,6 +31,7 @@ import SystemMonitorWindow from './components/SystemMonitorWindow';
 import WeatherWindow from './components/WeatherWindow';
 import YouTubeWindow from './components/YouTubeWindow';
 import ContactsWindow from './components/ContactsWindow';
+import OpenClawWindow from './components/OpenClawWindow';
 
 const socket = io('http://localhost:8000');
 window.socket = socket;
@@ -65,6 +66,8 @@ function App() {
     const [notificationCount, setNotificationCount] = useState(0);
     const [weatherCard, setWeatherCard] = useState(null);
     const [googleServiceCard, setGoogleServiceCard] = useState(null);
+    const [tasks, setTasks] = useState([]);
+    const [providerRouting, setProviderRouting] = useState({ text_reasoning: 'Gemini', coding: 'OpenClaw', documents: 'OpenClaw' });
     const [inputValue, setInputValue] = useState('');
     const [cadData, setCadData] = useState(null);
     const [cadThoughts, setCadThoughts] = useState(''); // Streaming AI thoughts
@@ -87,6 +90,7 @@ function App() {
         games: false,
         messages: false,
         memory: false,
+        openclaw: false,
         processes: false,
         proactive: false,
         reminders: false,
@@ -147,6 +151,7 @@ function App() {
         games: { x: 420, y: 430 },
         messages: { x: 440, y: 450 },
         memory: { x: 460, y: 430 },
+        openclaw: { x: 480, y: 410 },
         processes: { x: 460, y: 470 },
         proactive: { x: 480, y: 450 },
         reminders: { x: 480, y: 490 },
@@ -175,6 +180,7 @@ function App() {
         games: { w: 500, h: 450 },
         messages: { w: 450, h: 500 },
         memory: { w: 420, h: 360 },
+        openclaw: { w: 420, h: 360 },
         processes: { w: 550, h: 400 },
         proactive: { w: 440, h: 420 },
         reminders: { w: 420, h: 400 },
@@ -191,7 +197,7 @@ function App() {
     const [zIndexOrder, setZIndexOrder] = useState([
         'chat', 'tools', 'video', 'cad', 'browser', 'kasa', 'printer',
         'code', 'control', 'desktop', 'files', 'flights', 'games', 'messages',
-        'memory', 'processes', 'proactive', 'reminders', 'routines', 'search', 'system', 'weather', 'youtube', 'contacts'
+        'memory', 'openclaw', 'processes', 'proactive', 'reminders', 'routines', 'search', 'system', 'weather', 'youtube', 'contacts'
     ]);
 
     // Hand Control State
@@ -370,6 +376,7 @@ function App() {
             setStatus('Connected');
             setSocketConnected(true);
             socket.emit('get_settings');
+            socket.emit('get_task_cards');
         });
         socket.on('disconnect', () => {
             setStatus('Disconnected');
@@ -392,8 +399,12 @@ function App() {
             if (notification?.service) {
                 setGoogleServiceCard(notification);
             }
+            if (notification?.category === 'tasks' && notification.tasks) {
+                setTasks(notification.tasks);
+            }
             addMessage(notification?.title || 'Friday', notification?.message || 'New notification');
         });
+        socket.on('task_cards', setTasks);
         socket.on('action_plan', (plan) => {
             setActionPlan(plan);
             if (plan.steps?.every((step) => ['done', 'error', 'cancelled'].includes(step.status))) {
@@ -432,6 +443,7 @@ function App() {
                 console.log("[Settings] Camera flip set to:", settings.camera_flipped);
                 setIsCameraFlipped(settings.camera_flipped);
             }
+            if (settings?.provider_routing) setProviderRouting(prev => ({ ...prev, ...settings.provider_routing }));
         });
 
         socket.on('system_monitor_data', (data) => {
@@ -704,6 +716,7 @@ function App() {
             socket.off('disconnect');
             socket.off('status');
             socket.off('unified_notification');
+            socket.off('task_cards');
             socket.off('audio_data');
             socket.off('cad_data');
             socket.off('cad_thought');
@@ -1469,6 +1482,7 @@ function App() {
         { id: 'games', component: GameWindow },
         { id: 'messages', component: MessageWindow },
         { id: 'memory', component: MemoryWindow },
+        { id: 'openclaw', component: OpenClawWindow },
         { id: 'processes', component: ProcessWindow },
         { id: 'proactive', component: ProactiveWindow },
         { id: 'reminders', component: ReminderWindow },
@@ -1573,6 +1587,7 @@ function App() {
                     <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">RAM {Math.round(systemStats.ram_percent || 0)}%</div>
                     <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">{systemStats.cpu_temp_c ? `TEMP ${Math.round(systemStats.cpu_temp_c)}°C` : 'TEMP --'}</div>
                     <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">UP {systemStats.uptime || '0h 0m'}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">TEXT {providerRouting.text_reasoning}</div>
                 </div>
 
                 {/* Top Visualizer (User Mic) */}
@@ -1834,6 +1849,7 @@ function App() {
                     weatherCard={weatherCard}
                     googleServiceCard={googleServiceCard}
                     actionPlan={actionPlan}
+                    tasks={tasks}
                 />
 
                 {/* Footer Controls / Tools Module */}

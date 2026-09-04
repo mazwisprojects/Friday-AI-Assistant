@@ -13,6 +13,7 @@ const ChatModule = ({
     weatherCard,
     googleServiceCard,
     actionPlan,
+    tasks = [],
     onMouseDown
 }) => {
     const messagesEndRef = useRef(null);
@@ -98,6 +99,23 @@ const ChatModule = ({
                                 <span>{String(index + 1).padStart(2, '0')}</span>
                                 <span>{step.label}</span>
                                 <b>{step.status === 'active' ? 'RUN' : step.status === 'done' ? 'OK' : step.status === 'error' ? 'ERR' : step.status === 'cancelled' ? 'STOP' : '--'}</b>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {tasks.length > 0 && (
+                <div className="task-card-strip">
+                    <div className="task-card-heading"><span>OPEN TASKS</span><span>{tasks.length} ACTIVE</span></div>
+                    <div className="task-card-list">
+                        {tasks.slice(0, 4).map((task) => (
+                            <div key={task.id} className={`task-card task-priority-${task.priority || 'normal'}`}>
+                                <div className="task-card-copy">
+                                    <strong>{task.title}</strong>
+                                    <span>{[task.project, task.due, task.recurrence].filter(Boolean).join(' / ') || 'No deadline'}</span>
+                                </div>
+                                <button type="button" title="Complete task" onClick={() => window.socket.emit('task_action', { action: 'complete', task_id: task.id })}>DONE</button>
                             </div>
                         ))}
                     </div>

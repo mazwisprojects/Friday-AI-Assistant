@@ -9,6 +9,7 @@ from pathlib import Path
 # Import centralized config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_api_key
+from claude_provider import get_text_provider
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -32,7 +33,7 @@ def _get_model(model_name: str):
         def generate_content(self, contents):
             return _c.models.generate_content(model=model_name, contents=contents)
 
-    return _W()
+    return get_text_provider(lambda: _W(), model="claude-3-5-sonnet-latest")
 
 
 def _strip_fences(text: str) -> str:
