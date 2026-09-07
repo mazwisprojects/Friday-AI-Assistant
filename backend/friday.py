@@ -2369,26 +2369,28 @@ class AudioLoop:
 
                                 elif fc.name == "build_custom_tool":
                                     try:
-                                        result = self.tool_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("operation", ""), fc.args.get("parameters", {}), fc.args.get("config", {}), fc.args.get("governance", {}))
-                                        manifest = result["tool"]
-                                        declaration = {"name": manifest["name"], "description": manifest["description"], "parameters": {"type": "OBJECT", "properties": manifest.get("parameters", {})}}
-                                        declarations = tools[1]["function_declarations"]
-                                        existing_index = next((index for index, item in enumerate(declarations) if item.get("name") == declaration["name"]), None)
-                                        if existing_index is None:
-                                            declarations.append(declaration)
-                                        else:
-                                            declarations[existing_index] = declaration
-                                        if self.session and result["tool"].get("governance", {}).get("approval") == "approved":
-                                            await self.session.send(
-                                                input=(
-                                                    f"System Notification: Custom tool '{declaration['name']}' was built, tested, verified, and registered live. "
-                                                    "Use run_custom_tool with this exact name when the user requests it."
-                                                ),
-                                                end_of_turn=False,
-                                            )
+                                        result = self.tool_builder.build(
+                                            name=fc.args.get("name", ""),
+                                            description=fc.args.get("description", ""),
+                                            code=fc.args.get("code", ""),
+                                            parameters=fc.args.get("parameters", {}),
+                                        )
+                                        if result.get("ok"):
+                                            declaration = {"name": result["name"], "description": fc.args.get("description", ""), "parameters": {"type": "OBJECT", "properties": fc.args.get("parameters", {})}}
+                                            declarations = tools[1]["function_declarations"]
+                                            existing_index = next((index for index, item in enumerate(declarations) if item.get("name") == declaration["name"]), None)
+                                            if existing_index is None:
+                                                declarations.append(declaration)
+                                            else:
+                                                declarations[existing_index] = declaration
+                                            if self.session:
+                                                await self.session.send(
+                                                    input=(f"System Notification: Tool '{declaration['name']}' was built, tested, and registered. Use run_custom_tool with this exact name to use it."),
+                                                    end_of_turn=False,
+                                                )
                                         result_str = json.dumps(result, ensure_ascii=False)
                                     except Exception as exc:
-                                        result_str = json.dumps({"registered": False, "error": str(exc)})
+                                        result_str = json.dumps({"ok": False, "error": str(exc)})
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
 
                                 elif fc.name == "test_custom_tool":

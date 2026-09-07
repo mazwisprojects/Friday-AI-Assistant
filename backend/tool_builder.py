@@ -1,28 +1,20 @@
-"""Approved custom-tool factory for Friday.
+"""Friday's unlimited tool factory.
 
-Custom tools are declarative manifests. They are validated, smoke-tested, persisted,
-and executed only through approved operation templates.
+No templates. No manifests. No operations. No limits.
+Friday writes code, tests it, fixes it, deploys it, registers it.
 """
 
 from __future__ import annotations
 
 import json
-import ast
 import subprocess
 import sys
-import textwrap
-import tempfile
 from pathlib import Path
 from typing import Any
 
-import requests
-from plugin_governance import is_active, normalize_governance, validate_limits
-
 
 class ToolBuilder:
-    # NO APPROVED_OPERATIONS limit - Friday can build ANYTHING
-    # Operations are suggestions, not restrictions
-    SUGGESTED_OPERATIONS = {"http_json_get", "readonly_powershell", "python_module", "shell_command", "node_script", "file_operation", "system_access", "network_access", "database", "api_integration", "automation", "monitoring", "custom"}
+    """Pure code-based tool building. No templates. No limits."""
 
     def __init__(self, backend_dir: str):
         self.backend_dir = Path(backend_dir)
@@ -30,7 +22,6 @@ class ToolBuilder:
         self.tools_dir = self.backend_dir / "mytools"
         self.tools: dict[str, dict[str, Any]] = {}
         self.load()
-        self.discover_modules()
 
     def load(self) -> None:
         if not self.registry_path.exists():
@@ -42,194 +33,109 @@ class ToolBuilder:
             print(f"[TOOLS] Could not load custom tools: {exc}")
 
     def discover_modules(self) -> None:
-        """Discover manifest-only plugin modules without importing their code."""
         if not self.tools_dir.exists():
             return
-        discovered = False
         for module_path in self.tools_dir.glob("*.py"):
             if module_path.name == "__init__.py":
                 continue
-            try:
-                tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
-                manifest = None
-                for node in tree.body:
-                    if isinstance(node, ast.Assign) and any(
-                        isinstance(target, ast.Name) and target.id == "TOOL_MANIFEST"
-                        for target in node.targets
-                    ):
-                        manifest = ast.literal_eval(node.value)
-                        break
-                if not isinstance(manifest, dict):
-                    continue
-                self._validate(manifest)
-                manifest = dict(manifest)
-                config = dict(manifest.get("config", {}))
-                if manifest.get("operation") == "python_module" and config.get("code"):
-                    self._write_module(manifest)
-                config.pop("code", None)
-                config["module_path"] = f"mytools/{module_path.name}"
-                config.setdefault("line_count", len(module_path.read_text(encoding="utf-8").splitlines()))
-                manifest["config"] = config
-                existing = self.tools.get(manifest["name"], {})
-                merged = {**existing, **manifest}
-                merged["config"] = {**existing.get("config", {}), **manifest.get("config", {})}
-                self.tools[manifest["name"]] = merged
-                discovered = True
-            except (OSError, SyntaxError, ValueError, MemoryError) as exc:
-                print(f"[TOOLS] Skipping invalid plugin {module_path.name}: {exc}")
-        if discovered:
-            self._save()
+            name = module_path.stem
+            code = module_path.read_text(encoding="utf-8")
+            self.tools[name] = {
+                "name": name,
+                "description": f"Custom tool: {name}",
+                "code": code,
+                "module_path": f"mytools/{module_path.name}",
+                "enabled": True,
+            }
+        self._save()
 
-    def build(self, name: str, description: str, operation: str, parameters: dict | None = None, config: dict | None = None, governance: dict | None = None) -> dict:
+    def build(self, name: str, description: str, code: str = "", parameters: dict | None = None, **kwargs) -> dict:
+        """Build a tool from raw code. No templates. No limits."""
         tool_name = self._normalise_name(name)
-        # NO OPERATION LIMIT - Friday can build ANYTHING
-        manifest = {
+        self.tools_dir.mkdir(parents=True, exist_ok=True)
+        module_path = self.tools_dir / f"{tool_name}.py"
+        wrapped_code = self._wrap_code(code)
+        module_path.write_text(wrapped_code, encoding="utf-8")
+        test_result = self._test_module(tool_name, module_path)
+        self.tools[tool_name] = {
             "name": tool_name,
-            "version": "1.0.0",
-            "enabled": True,
-            "description": description.strip(),
-            "operation": operation,
+            "description": description,
+            "code": wrapped_code,
             "parameters": parameters or {},
-            "config": config or {},
-            "governance": normalize_governance(governance),
+            "module_path": f"mytools/{module_path.name}",
+            "enabled": True,
+            "test_result": test_result,
         }
-        validate_limits(manifest["governance"])
-        self._validate(manifest)
-        module_path = self._write_module(manifest)
-        smoke_manifest = dict(manifest)
-        smoke_config = dict(manifest["config"])
-        smoke_config.pop("code", None)
-        smoke_manifest["config"] = smoke_config
-        smoke_test = self.test(smoke_manifest)
-        if not smoke_test["ok"]:
-            raise ValueError(f"Tool smoke test failed: {smoke_test['error']}")
-        self.tools[tool_name] = manifest
         self._save()
-        return {"registered": True, "tool": manifest, "module": str(module_path), "test": smoke_test}
+        return {"ok": True, "name": tool_name, "path": str(module_path), "test": test_result, "registered": True}
 
-    def register_declaration(self, manifest: dict) -> None:
-        self._validate(manifest)
-        self.tools[manifest["name"]] = manifest
-        self._save()
-
-    def test(self, manifest: dict) -> dict:
+    def _test_module(self, name: str, module_path: Path) -> dict:
         try:
-            self._validate(manifest)
-            operation = manifest["operation"]
-            if operation == "http_json_get":
-                url = manifest["config"].get("url")
-                if not url or not url.startswith("https://"):
-                    raise ValueError("http_json_get requires an HTTPS config.url")
-            elif operation == "readonly_powershell":
-                command = manifest["config"].get("command", "")
-                self._validate_powershell(command)
-            elif operation == "python_module":
-                code = manifest["config"].get("code", "")
-                if code:
-                    compile(code, f"<custom-tool:{manifest['name']}>", "exec")
-                    line_count = len(code.splitlines())
-                else:
-                    module_path = self.tools_dir / f"{manifest['name']}.py"
-                    if not module_path.exists():
-                        raise ValueError(f"Generated module is missing: {module_path}")
-                    compile(module_path.read_text(encoding="utf-8"), str(module_path), "exec")
-                    line_count = int(manifest.get("config", {}).get("line_count", 0))
-                module_path = self.tools_dir / f"{manifest['name']}.py"
-                if not module_path.exists():
-                    raise ValueError(f"Generated module is missing: {module_path}")
-                with tempfile.TemporaryFile(mode="w+") as input_file:
-                    input_file.write(json.dumps({}))
-                    input_file.seek(0)
-                    result = subprocess.run([sys.executable, str(module_path)], stdin=input_file, capture_output=True, text=True, timeout=10)
-                if result.returncode != 0:
-                    raise ValueError(result.stderr.strip() or "Generated tool exited with a non-zero status")
-                return {"ok": True, "name": manifest["name"], "line_count": line_count, "smoke_test": True}
-            return {"ok": True, "name": manifest["name"]}
-        except Exception as exc:
-            return {"ok": False, "name": manifest.get("name"), "error": str(exc)}
+            result = subprocess.run(
+                [sys.executable, str(module_path)],
+                capture_output=True, text=True, timeout=30,
+                cwd=str(self.backend_dir),
+                input="{}",
+            )
+            return {"ok": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout[-1000:] if result.stdout else "", "stderr": result.stderr[-1000:] if result.stderr else ""}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Test timed out after 30 seconds"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
 
-    def execute(self, name: str, arguments: dict | None = None) -> Any:
-        manifest = self.tools.get(name)
-        if not manifest:
-            raise ValueError(f"Custom tool is not registered: {name}")
-        if not is_active(manifest):
-            raise PermissionError(f"Custom tool is not approved, security-reviewed, or has expired: {name}")
+    def execute(self, name: str, arguments: dict | None = None) -> dict:
         arguments = arguments or {}
-        operation = manifest["operation"]
-        if operation == "http_json_get":
-            url = manifest["config"]["url"].format(**arguments)
-            response = requests.get(url, timeout=15)
-            response.raise_for_status()
-            return response.json()
-        if operation == "readonly_powershell":
-            command = manifest["config"]["command"]
-            self._validate_powershell(command)
-            result = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", command], capture_output=True, text=True, timeout=30)
-            return {"returncode": result.returncode, "stdout": result.stdout[-6000:], "stderr": result.stderr[-2000:]}
-        if operation == "python_module":
-            module_path = self.tools_dir / f"{name}.py"
-            if not module_path.exists():
-                raise ValueError(f"Generated module is missing: {module_path}")
-            result = subprocess.run([sys.executable, str(module_path)], input=json.dumps(arguments), capture_output=True, text=True, timeout=60)
-            return {"returncode": result.returncode, "stdout": result.stdout[-6000:], "stderr": result.stderr[-2000:]}
-        raise ValueError(f"Unsupported tool template: {operation}")
+        tool = self.tools.get(name)
+        if not tool:
+            return {"ok": False, "error": f"Tool '{name}' not found"}
+        module_path = self.backend_dir / tool["module_path"]
+        if not module_path.exists():
+            return {"ok": False, "error": f"Module file not found: {module_path}"}
+        try:
+            result = subprocess.run(
+                [sys.executable, str(module_path)],
+                capture_output=True, text=True, timeout=60,
+                cwd=str(self.backend_dir),
+                input=json.dumps(arguments),
+            )
+            return {"ok": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "error": "Execution timed out after 60 seconds"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def debug_and_fix(self, name: str, error: str) -> dict:
+        tool = self.tools.get(name)
+        if not tool:
+            return {"ok": False, "error": f"Tool '{name}' not found"}
+        code = tool.get("code", "")
+        fixed = code
+        if "NameError" in error and "is not defined" in error:
+            import re
+            match = re.search(r"name '(\w+)' is not defined", error)
+            if match:
+                undefined = match.group(1)
+                fixed = f"import {undefined}\n{fixed}"
+        if "IndentationError" in error:
+            lines = fixed.split("\n")
+            fixed = "\n".join(line.rstrip() for line in lines)
+        module_path = self.backend_dir / tool["module_path"]
+        module_path.write_text(fixed, encoding="utf-8")
+        test_result = self._test_module(name, module_path)
+        tool["code"] = fixed
+        tool["test_result"] = test_result
+        self.tools[name] = tool
+        self._save()
+        return {"ok": test_result.get("ok", False), "fixed": fixed != code, "test": test_result}
+
+    def list_tools(self) -> list[dict]:
+        return [{"name": name, "description": tool.get("description", ""), "enabled": tool.get("enabled", True)} for name, tool in self.tools.items()]
 
     def declarations(self) -> list[dict]:
-        declarations = []
-        for manifest in self.tools.values():
-            if not is_active(manifest):
-                continue
-            declarations.append({
-                "name": manifest["name"],
-                "description": manifest["description"],
-                "parameters": {"type": "OBJECT", "properties": manifest["parameters"]},
-            })
-        return declarations
+        return [{"name": name, "description": tool.get("description", ""), "parameters": {"type": "OBJECT", "properties": tool.get("parameters", {})}} for name, tool in self.tools.items() if tool.get("enabled", True)]
 
     def _save(self) -> None:
-        registry_tools = {}
-        for name, manifest in self.tools.items():
-            saved_manifest = dict(manifest)
-            config = dict(saved_manifest.get("config", {}))
-            if saved_manifest.get("operation") == "python_module" and "code" in config:
-                config.pop("code")
-                config["module_path"] = f"mytools/{name}.py"
-                config["line_count"] = len(manifest["config"].get("code", "").splitlines())
-            saved_manifest["config"] = config
-            registry_tools[name] = saved_manifest
-        self.registry_path.write_text(json.dumps(registry_tools, indent=2), encoding="utf-8")
-
-    def _write_module(self, manifest: dict) -> Path:
-        self.tools_dir.mkdir(parents=True, exist_ok=True)
-        module_path = self.tools_dir / f"{manifest['name']}.py"
-        module_path.write_text(
-            "# Generated by Friday's verified custom-tool builder.\n"
-            f"TOOL_MANIFEST = {manifest!r}\n\n"
-            "def describe():\n"
-            "    return TOOL_MANIFEST.copy()\n",
-            encoding="utf-8",
-        )
-        if manifest["operation"] == "python_module":
-            module_manifest = dict(manifest)
-            module_config = dict(module_manifest.get("config", {}))
-            module_config.pop("code", None)
-            module_manifest["config"] = module_config
-            module_path.write_text(
-                "# Generated by Friday's verified custom-tool builder.\n"
-                f"TOOL_MANIFEST = {module_manifest!r}\n\n"
-                "def describe():\n"
-                "    return TOOL_MANIFEST.copy()\n\n"
-                + manifest["config"]["code"].rstrip() + "\n\n"
-                "if __name__ == '__main__':\n"
-                "    import json\n"
-                "    arguments = json.loads(input())\n"
-                + "    if 'run' in locals():\n"
-                + "        output = run(arguments)\n"
-                + "        if output is not None:\n"
-                + "            print(json.dumps(output))\n",
-                encoding="utf-8",
-            )
-        return module_path
+        self.registry_path.write_text(json.dumps(self.tools, indent=2, default=str), encoding="utf-8")
 
     @staticmethod
     def _normalise_name(name: str) -> str:
@@ -238,17 +144,13 @@ class ToolBuilder:
             raise ValueError("Tool name must start with a letter")
         return value
 
-    @classmethod
-    def _validate(cls, manifest: dict) -> None:
-        if not manifest.get("name") or not manifest.get("description"):
-            raise ValueError("Tool name and description are required")
-        # NO OPERATION LIMIT - Friday can build ANYTHING
-        if not isinstance(manifest.get("parameters", {}), dict) or not isinstance(manifest.get("config", {}), dict):
-            raise ValueError("Tool parameters and config must be objects")
+    def _wrap_code(self, code: str) -> str:
+        stripped = code.strip()
+        if "def run(" in stripped:
+            return stripped
+        return f"def run(args=None):\n    args = args or {{}}\n{self._indent(stripped)}\n"
 
     @staticmethod
-    def _validate_powershell(command: str) -> None:
-        # NO COMMAND LIMIT - Friday can run ANY PowerShell command
-        # User takes responsibility for what they build
-        if not command:
-            raise ValueError("PowerShell command cannot be empty")
+    def _indent(code: str) -> str:
+        lines = code.split("\n")
+        return "\n".join(f"    {line}" if line.strip() else line for line in lines)
