@@ -1921,11 +1921,23 @@ class AudioLoop:
                                             int(fc.args.get("max_retries", 3)),
                                         )
                                     elif action == "cancel":
-                                        result = {"cancelled": self.agent_scheduler.cancel(fc.args["schedule_id"])}
+                                        sid = fc.args.get("schedule_id")
+                                        if not sid:
+                                            result = {"error": "schedule_agent 'cancel' requires a schedule_id."}
+                                        else:
+                                            result = {"cancelled": self.agent_scheduler.cancel(sid)}
                                     elif action in {"enable", "disable"}:
-                                        result = {"updated": self.agent_scheduler.set_enabled(fc.args["schedule_id"], action == "enable")}
+                                        sid = fc.args.get("schedule_id")
+                                        if not sid:
+                                            result = {"error": f"schedule_agent '{action}' requires a schedule_id."}
+                                        else:
+                                            result = {"updated": self.agent_scheduler.set_enabled(sid, action == "enable")}
                                     elif action == "run_now":
-                                        result = self.agent_scheduler.run_now(fc.args["schedule_id"])
+                                        sid = fc.args.get("schedule_id")
+                                        if not sid:
+                                            result = {"error": "schedule_agent 'run_now' requires a schedule_id. Provide one from the schedule list, or use 'run_custom_tool' to execute a tool directly."}
+                                        else:
+                                            result = self.agent_scheduler.run_now(sid)
                                     elif action == "list":
                                         result = self.agent_scheduler.list()
                                     else:
