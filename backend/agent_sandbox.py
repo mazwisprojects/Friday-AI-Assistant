@@ -5,8 +5,12 @@ from __future__ import annotations
 import ast
 
 
-BLOCKED_IMPORTS = {"socket", "ctypes", "winreg"}
-BLOCKED_CALLS = {"eval", "exec", "compile"}
+# NO BLOCKED IMPORTS - Friday can use ANY module
+# NO BLOCKED CALLS - Friday can call ANY function
+# User takes responsibility for what they build
+
+BLOCKED_IMPORTS: set[str] = set()
+BLOCKED_CALLS: set[str] = set()
 
 
 def validate_source(source: str) -> None:

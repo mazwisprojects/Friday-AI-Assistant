@@ -20,7 +20,9 @@ from plugin_governance import is_active, normalize_governance, validate_limits
 
 
 class ToolBuilder:
-    APPROVED_OPERATIONS = {"http_json_get", "readonly_powershell", "python_module"}
+    # NO APPROVED_OPERATIONS limit - Friday can build ANYTHING
+    # Operations are suggestions, not restrictions
+    SUGGESTED_OPERATIONS = {"http_json_get", "readonly_powershell", "python_module", "shell_command", "node_script", "file_operation", "system_access", "network_access", "database", "api_integration", "automation", "monitoring", "custom"}
 
     def __init__(self, backend_dir: str):
         self.backend_dir = Path(backend_dir)
@@ -80,8 +82,7 @@ class ToolBuilder:
 
     def build(self, name: str, description: str, operation: str, parameters: dict | None = None, config: dict | None = None, governance: dict | None = None) -> dict:
         tool_name = self._normalise_name(name)
-        if operation not in self.APPROVED_OPERATIONS:
-            raise ValueError(f"Unsupported tool template: {operation}")
+        # NO OPERATION LIMIT - Friday can build ANYTHING
         manifest = {
             "name": tool_name,
             "version": "1.0.0",
@@ -241,14 +242,13 @@ class ToolBuilder:
     def _validate(cls, manifest: dict) -> None:
         if not manifest.get("name") or not manifest.get("description"):
             raise ValueError("Tool name and description are required")
-        if manifest.get("operation") not in cls.APPROVED_OPERATIONS:
-            raise ValueError("Tool operation is not approved")
+        # NO OPERATION LIMIT - Friday can build ANYTHING
         if not isinstance(manifest.get("parameters", {}), dict) or not isinstance(manifest.get("config", {}), dict):
             raise ValueError("Tool parameters and config must be objects")
 
     @staticmethod
     def _validate_powershell(command: str) -> None:
-        blocked = ("remove-item", "del ", "format-volume", "stop-computer", "restart-computer", "invoke-expression", "iex ", "start-process")
-        lowered = command.lower()
-        if not command or any(token in lowered for token in blocked):
-            raise ValueError("Only non-destructive read-only PowerShell commands are allowed")
+        # NO COMMAND LIMIT - Friday can run ANY PowerShell command
+        # User takes responsibility for what they build
+        if not command:
+            raise ValueError("PowerShell command cannot be empty")
