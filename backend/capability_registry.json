@@ -163,7 +163,7 @@
     "read_file",
     "resolve_security_finding",
     "run_custom_tool",
-        "run_script",
+    "run_script",
     "write_action",
     "build_hardware_tool",
     "build_enterprise_tool",
@@ -184,6 +184,14 @@
     "undo_last_action",
     "web_search",
     "write_file",
-    "youtube_video"
+    "youtube_video",
+    "build_health_tool",
+    "build_finance_tool",
+    "build_scientific_tool",
+    "build_multimedia_tool",
+    "build_web3_tool",
+    "build_security_tool",
+    "build_creative_tool",
+    "build_temporal_tool"
   ]
 }

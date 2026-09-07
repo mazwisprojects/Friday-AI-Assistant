@@ -85,5 +85,14 @@
     "priority": "normal",
     "status": "approved",
     "status_updated_at": 1788775901.8555524
+  },
+  {
+    "name": "code_helper",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788778533.1944737
   }
 ]

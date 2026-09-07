@@ -148,5 +148,20 @@
     "rollback_plan": "restore_previous_snapshot",
     "deployed_agent": "workflow_build_project",
     "approved_at": 1788775901.8551884
+  },
+  {
+    "id": "eb247cf5-f4b9-4c00-99db-41f6f344c4b7",
+    "fingerprint": "code_helper:3",
+    "type": "capability",
+    "kind": "workflow",
+    "name": "code_helper",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "priority": "normal",
+    "status": "approved",
+    "security_status": "passed",
+    "created_at": 1788778527.4429724,
+    "rollback_plan": "restore_previous_snapshot",
+    "deployed_agent": "workflow_code_helper",
+    "approved_at": 1788778533.193819
   }
 ]

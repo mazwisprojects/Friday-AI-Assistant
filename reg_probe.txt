@@ -1,0 +1,7 @@
+registered (0): []
+skipped (26): ['example_agent', 'windows_update_checker', 'agent_builder_agent', 'calendar_briefing_agent', 'code_review_agent', 'daily_planning_agent', 'email_triage_agent', 'flight_watch_agent', 'memory_cleanup_agent', 'news_agent', 'printer_monitor_agent', 'project_health_agent', 'smart_home_agent', 'tool_builder_agent', 'dependency_audit_agent', 'workflow_printer_monitor_agent', 'workflow_calendar_briefing_agent', 'workflow_worker', 'workflow_noop_agent', 'workflow_slow_agent', 'workflow_failing_agent', 'workflow_cancellable_agent', 'workflow_quick_agent', 'workflow_self_maintenance', 'agent_supervisor', 'routine_manager']
+schedules enabled (7): ['daily_planning_agent', 'dependency_audit_agent', 'flight_watch_agent', 'memory_cleanup_agent', 'news_agent', 'project_health_agent', 'smart_home_agent']
+schedules disabled (3): ['calendar_briefing_agent', 'email_triage_agent', 'printer_monitor_agent']
+enabled schedules whose agent is NOT registered: ['daily_planning_agent', 'dependency_audit_agent', 'flight_watch_agent', 'memory_cleanup_agent', 'news_agent', 'project_health_agent', 'smart_home_agent']
+REGISTRATION_GAP
+PROBE_0
