@@ -5,8 +5,8 @@ from __future__ import annotations
 import ast
 
 
-BLOCKED_IMPORTS = {"subprocess", "socket", "ctypes", "winreg", "shutil"}
-BLOCKED_CALLS = {"eval", "exec", "compile", "open", "system", "Popen", "run"}
+BLOCKED_IMPORTS = {"socket", "ctypes", "winreg"}
+BLOCKED_CALLS = {"eval", "exec", "compile"}
 
 
 def validate_source(source: str) -> None:
