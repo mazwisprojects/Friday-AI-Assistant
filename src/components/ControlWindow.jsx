@@ -17,9 +17,14 @@ export default function ControlWindow({ position, onClose, onDrag }) {
       setIsRecording(data.recording);
     });
     
+    socket.on('control_action_cleared', () => {
+      setActions([]);
+    });
+    
     return () => {
       socket.off('control_action');
       socket.off('recording_status');
+      socket.off('control_action_cleared');
     };
   }, []);
 

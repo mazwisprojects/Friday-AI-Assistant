@@ -535,6 +535,7 @@ schedule_agent_tool = {"name": "schedule_agent", "description": "Schedules and c
 execution_history_tool = {"name": "execution_history", "description": "Lists recent Friday tool and agent executions with status, provider, result, and errors.", "parameters": {"type": "OBJECT", "properties": {"limit": {"type": "INTEGER"}}}}
 autonomy_status_tool = {"name": "autonomy_status", "description": "Reports Friday's governed self-improvement pipeline, pending proposals, tests, security findings, and failure patterns.", "parameters": {"type": "OBJECT", "properties": {}}}
 approve_autonomy_proposal_tool = {"name": "approve_autonomy_proposal", "description": "Approves a reviewed autonomy proposal for deployment after its security gate has passed.", "parameters": {"type": "OBJECT", "properties": {"proposal_id": {"type": "STRING"}}, "required": ["proposal_id"]}}
+resolve_security_finding_tool = {"name": "resolve_security_finding", "description": "Records a human review decision for a security finding (risky import or call) flagged by the autonomy pipeline. Accepting a finding removes it from the approval queue so the security gate can complete. Use the finding's path (e.g. agents/project_health_agent.py) and value (e.g. subprocess).", "parameters": {"type": "OBJECT", "properties": {"finding_path": {"type": "STRING", "description": "File path of the flagged finding, e.g. agents/project_health_agent.py"}, "finding_value": {"type": "STRING", "description": "Risky module or call name, e.g. subprocess"}}, "required": ["finding_path", "finding_value"]}}
 
 google_contacts_read_tool = {
     "name": "google_contacts_read",
@@ -813,6 +814,7 @@ tools_list = [{"function_declarations": [
     execution_history_tool,
     autonomy_status_tool,
     approve_autonomy_proposal_tool,
+    resolve_security_finding_tool,
     google_contacts_read_tool,
     browser_control_tool,
     code_helper_tool,

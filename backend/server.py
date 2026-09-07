@@ -167,7 +167,10 @@ DEFAULT_SETTINGS = {
     "max_upload_storage_mb": 1024
 }
 
-SETTINGS = DEFAULT_SETTINGS.copy()
+import copy as _copy
+# Deep-copy: load_settings() updates SETTINGS["tool_permissions"] in place, and a
+# shallow .copy() would let that mutate DEFAULT_SETTINGS itself.
+SETTINGS = _copy.deepcopy(DEFAULT_SETTINGS)
 contacts_manager = ContactsManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 global_memory_manager = MemoryManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 google_account = GoogleAccount(BACKEND_DIR)
@@ -1326,35 +1329,54 @@ async def get_settings(sid):
 @sio.event
 async def get_openclaw_status(sid):
     """Return current external OpenClaw Gateway health for Friday's control window."""
-    await sio.emit('openclaw_status', friday.openclaw_bridge.status(), room=sid)
+    try:
+        payload = friday.openclaw_bridge.status() if friday.openclaw_bridge else {'reachable': False}
+    except Exception as exc:
+        payload = {'reachable': False, 'error': str(exc)}
+    await sio.emit('openclaw_status', payload, room=sid)
 
 @sio.event
 async def get_openclaw_capabilities(sid):
     """Return the Friday tools and agents exposed to OpenClaw planning."""
-    await sio.emit('openclaw_capabilities', friday.openclaw_bridge.capabilities(), room=sid)
-    claude = ClaudeProvider()
-    await sio.emit('text_provider_status', {
-        'provider': 'claude' if claude.available and os.getenv('FRIDAY_TEXT_PROVIDER', 'auto').lower() != 'gemini' else 'gemini',
-        'claude_available': claude.available,
-        'model': claude.model if claude.available else None,
-    }, room=sid)
+    try:
+        await sio.emit('openclaw_capabilities', friday.openclaw_bridge.capabilities(), room=sid)
+    except Exception as exc:
+        await sio.emit('openclaw_capabilities', {'friday_tools': [], 'error': str(exc)}, room=sid)
+    try:
+        claude = ClaudeProvider()
+        await sio.emit('text_provider_status', {
+            'provider': 'claude' if claude.available and os.getenv('FRIDAY_TEXT_PROVIDER', 'auto').lower() != 'gemini' else 'gemini',
+            'claude_available': claude.available,
+            'model': claude.model if claude.available else None,
+        }, room=sid)
+    except Exception as exc:
+        await sio.emit('text_provider_status', {'provider': 'gemini', 'claude_available': False, 'error': str(exc)}, room=sid)
 
 @sio.event
 async def get_agent_console(sid):
     """Return agent lifecycle, schedules, and execution history for the OpenClaw window."""
     runtime = audio_loop
+    try:
+        executions = agent_dispatcher_module.ledger.list(25)
+    except Exception as exc:
+        print(f"Error listing execution ledger: {exc}")
+        executions = []
     await sio.emit('agent_console', {
         'plugins': runtime.plugin_manager.list_plugins() if runtime else [],
         'schedules': runtime.agent_scheduler.list() if runtime else [],
-        'executions': agent_dispatcher_module.ledger.list(25),
+        'executions': executions,
     }, room=sid)
 
 @sio.event
 async def get_autonomy_status(sid):
     if not audio_loop:
-        await sio.emit('autonomy_status', {'error': 'Friday runtime is not ready'}, room=sid)
+        await sio.emit('autonomy_status', {'proposals': [], 'security_findings': [], 'phases': {}, 'error': 'Friday runtime is not ready'}, room=sid)
         return
-    await sio.emit('autonomy_status', audio_loop.autonomy_pipeline.run_cycle(), room=sid)
+    try:
+        await sio.emit('autonomy_status', audio_loop.autonomy_pipeline.run_cycle(), room=sid)
+    except Exception as exc:
+        print(f"Error running autonomy cycle: {exc}")
+        await sio.emit('autonomy_status', {'proposals': [], 'security_findings': [], 'phases': {}, 'error': str(exc)}, room=sid)
 
 @sio.event
 async def approve_autonomy_proposal(sid, data):
@@ -1362,6 +1384,25 @@ async def approve_autonomy_proposal(sid, data):
         if not audio_loop:
             raise RuntimeError('Friday runtime is not ready')
         result = audio_loop.autonomy_pipeline.approve((data or {}).get('proposal_id', ''))
+    except Exception as exc:
+        result = {'error': str(exc)}
+    await sio.emit('autonomy_approval_result', result, room=sid)
+    await get_autonomy_status(sid)
+
+@sio.event
+async def resolve_security_finding(sid, data):
+    """Record a human review decision for a security finding (risky import/call).
+
+    Accepting a finding clears it from the approval queue so the autonomy
+    pipeline's security_review phase can complete and proposals can deploy.
+    """
+    try:
+        if not audio_loop:
+            raise RuntimeError('Friday runtime is not ready')
+        payload = data or {}
+        result = audio_loop.autonomy_pipeline.resolve_security(
+            payload.get('finding_path', ''), payload.get('finding_value', '')
+        )
     except Exception as exc:
         result = {'error': str(exc)}
     await sio.emit('autonomy_approval_result', result, room=sid)
@@ -2148,6 +2189,868 @@ def get_current_mode():
     """Get current assistant mode."""
     settings = load_settings() or {}
     return settings.get('current_mode', 'active')
+
+# ══════════════════════════════════════════════════════════════════════
+# REAL WINDOW HANDLERS
+# These re-register the socket.io events that earlier placeholders defined
+# above, replacing fake/empty data with real behavior. Later registrations
+# override earlier ones for the same event name.
+# ══════════════════════════════════════════════════════════════════════
+import ctypes
+import re as _re
+import time as _time
+import uuid as _uuid
+import subprocess as _subprocess
+
+STORE_FILES = {
+    "reminders": "reminders_store.json",
+    "history": "search_history_store.json",
+    "playlist": "youtube_playlist_store.json",
+    "snippets": "code_snippets_store.json",
+    "desktops": "desktops_store.json",
+    "recording": "recording_store.json",
+}
+
+def _store_path(name):
+    return Path(BACKEND_DIR) / STORE_FILES.get(name, name)
+
+def _load_store(name, default=None):
+    if default is None:
+        default = [] if name != "desktops" else [{"name": "Desktop 1", "windows": 0}]
+    path = _store_path(name)
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else default
+    except (OSError, json.JSONDecodeError):
+        return default
+
+def _save_store(name, data):
+    _store_path(name).write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+# ── Path / file helpers ─────────────────────────────────────────────
+def _safe_path(raw, base=None):
+    text = str(raw or "").strip()
+    if not text or text in ("~", ""):
+        return Path.home()
+    p = Path(text)
+    if not p.is_absolute():
+        return (base or Path.home()) / p
+    return p
+
+def _dir_items(path):
+    items = []
+    try:
+        for entry in sorted(path.iterdir(), key=lambda e: e.name.lower()):
+            if entry.name.startswith("."):
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            is_dir = entry.is_dir()
+            items.append({
+                "name": entry.name,
+                "type": "directory" if is_dir else "file",
+                "size": None if is_dir else st.st_size,
+                "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                "path": str(entry),
+            })
+    except OSError as e:
+        return items, str(e)
+    return items, ""
+
+# ── Reminder engine ─────────────────────────────────────────────────
+_main_loop = None
+_reminder_thread = None
+
+def _reminder_worker():
+    while True:
+        try:
+            now = _time.time()
+            items = _load_store("reminders", [])
+            due = [r for r in items if not r.get("fired") and float(r.get("timestamp", 0)) <= now]
+            if due:
+                for r in due:
+                    r["fired"] = True
+                _save_store("reminders", items)
+                if _main_loop is not None:
+                    for r in due:
+                        asyncio.run_coroutine_threadsafe(_emit_reminder(r), _main_loop)
+        except Exception as e:
+            print(f"[Reminders] worker error: {e}")
+        _time.sleep(15)
+
+async def _emit_reminder(r):
+    try:
+        await sio.emit("unified_notification", {
+            "category": "reminder",
+            "title": "Reminder",
+            "message": r.get("message", "Reminder due"),
+            "priority": "high",
+        })
+        await sio.emit("reminders_list", [x for x in _load_store("reminders", []) if not x.get("fired")])
+    except Exception:
+        pass
+
+# ── Computer control recorder ───────────────────────────────────────
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+_RECSTATE = {"active": False, "actions": [], "stop_event": None, "thread": None, "started": 0.0}
+
+async def _emit_control_action(action):
+    try:
+        await sio.emit("control_action", action)
+    except Exception:
+        pass
+
+async def _emit_status_message(msg):
+    try:
+        await sio.emit("status", {"msg": msg})
+    except Exception:
+        pass
+
+def _recorder_loop(stop_event):
+    if sys.platform != "win32":
+        _RECSTATE["active"] = False
+        return
+    user32 = ctypes.windll.user32
+    prev = None
+    while not stop_event.is_set():
+        pt = _POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        x, y = int(pt.x), int(pt.y)
+        t = round(_time.time() - _RECSTATE["started"], 2)
+        actions = _RECSTATE["actions"]
+        if prev is None or abs(x - prev[0]) > 3 or abs(y - prev[1]) > 3:
+            actions.append({"type": "move", "x": x, "y": y, "t": t})
+            prev = (x, y)
+        if user32.GetAsyncKeyState(0x01) & 1:
+            actions.append({"type": "click", "x": x, "y": y, "button": "left", "t": t})
+        if user32.GetAsyncKeyState(0x02) & 1:
+            actions.append({"type": "click", "x": x, "y": y, "button": "right", "t": t})
+        _RECSTATE["actions"] = actions[-5000:]
+        if _main_loop is not None:
+            asyncio.run_coroutine_threadsafe(_emit_control_action(actions[-1]), _main_loop)
+        stop_event.wait(0.1)
+    _RECSTATE["active"] = False
+
+def _replay_loop(actions):
+    try:
+        import pyautogui as _pg
+    except Exception:
+        if _main_loop is not None:
+            asyncio.run_coroutine_threadsafe(_emit_status_message("Replay needs pyautogui installed"), _main_loop)
+        return
+    prev_t = 0.0
+    for action in actions:
+        _time.sleep(max(0.0, float(action.get("t", 0)) - prev_t))
+        prev_t = float(action.get("t", 0))
+        if action.get("type") == "move":
+            _pg.moveTo(action["x"], action["y"], duration=0.1)
+        elif action.get("type") == "click":
+            _pg.moveTo(action["x"], action["y"], duration=0.05)
+            _pg.mouseDown(button=action.get("button", "left"))
+            _pg.mouseUp(button=action.get("button", "left"))
+    if _main_loop is not None:
+        asyncio.run_coroutine_threadsafe(_emit_status_message("Recording replay finished"), _main_loop)
+
+# ── Weather (real Open-Meteo data) ──────────────────────────────────
+@sio.event
+async def get_weather(sid, data):
+    """Real live weather for WeatherWindow."""
+    try:
+        city = str((data or {}).get("city") or "").strip()
+        if not city:
+            await sio.emit("weather_data", {"city": "", "forecast": []}, room=sid)
+            return
+        from actions.weather_report import get_weather_data, _weather_code
+
+        def _fetch():
+            wx = get_weather_data(city)
+            forecast = []
+            try:
+                import requests
+                loc = requests.get(
+                    "https://geocoding-api.open-meteo.com/v1/search",
+                    params={"name": city, "count": 1, "language": "en", "format": "json"},
+                    timeout=10,
+                ).json()
+                place = (loc.get("results") or [{}])[0]
+                fc = requests.get(
+                    "https://api.open-meteo.com/v1/forecast",
+                    params={
+                        "latitude": place.get("latitude"),
+                        "longitude": place.get("longitude"),
+                        "daily": "weather_code,temperature_2m_max,temperature_2m_min",
+                        "forecast_days": 5,
+                        "timezone": "Africa/Johannesburg",
+                    },
+                    timeout=10,
+                ).json()
+                days = fc.get("daily", {})
+                names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+                for i, day in enumerate(days.get("time", [])):
+                    code = (days.get("weather_code") or [None] * 5)[i]
+                    high = (days.get("temperature_2m_max") or [0] * 5)[i]
+                    forecast.append({
+                        "day": names[datetime.fromisoformat(day).weekday()],
+                        "condition": _weather_code(code) if code is not None else "n/a",
+                        "temp": round(high) if high is not None else 0,
+                    })
+            except Exception as e:
+                print(f"[Weather] forecast fetch failed: {e}")
+            return wx, forecast
+
+        wx, forecast = await asyncio.to_thread(_fetch)
+        await sio.emit("weather_data", {
+            "city": wx.get("city", city),
+            "temp": wx.get("temperature") or 0,
+            "condition": (wx.get("condition") or "Clear").title(),
+            "humidity": wx.get("humidity") or 0,
+            "wind": wx.get("wind") or 0,
+            "high": wx.get("high"),
+            "low": wx.get("low"),
+            "forecast": forecast,
+        }, room=sid)
+    except Exception as e:
+        print(f"Error getting weather: {e}")
+        await sio.emit("weather_data", {"city": (data or {}).get("city") or "", "forecast": [], "error": str(e)}, room=sid)
+
+# ── Reminders (persistent store + notifications) ────────────────────
+@sio.event
+async def get_reminders(sid):
+    global _main_loop, _reminder_thread
+    try:
+        if _main_loop is None:
+            _main_loop = asyncio.get_running_loop()
+        if _reminder_thread is None or not _reminder_thread.is_alive():
+            _reminder_thread = threading.Thread(target=_reminder_worker, daemon=True)
+            _reminder_thread.start()
+        await sio.emit("reminders_list", [r for r in _load_store("reminders", []) if not r.get("fired")], room=sid)
+    except Exception as e:
+        print(f"Error getting reminders: {e}")
+        await sio.emit("reminders_list", [], room=sid)
+
+@sio.event
+async def add_reminder(sid, data):
+    try:
+        payload = data or {}
+        message = str(payload.get("message", "")).strip()
+        date_str = str(payload.get("date", "")).strip()
+        time_str = str(payload.get("time", "")).strip()
+        if not message or not date_str or not time_str:
+            raise ValueError("Message, date and time are required")
+        target = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+        if target <= datetime.now():
+            raise ValueError("Reminder time has already passed")
+        items = _load_store("reminders", [])
+        items.append({
+            "id": str(_uuid.uuid4()),
+            "message": message,
+            "date": date_str,
+            "time": time_str,
+            "timestamp": target.timestamp(),
+            "fired": False,
+            "created_at": _time.time(),
+        })
+        _save_store("reminders", items)
+        await sio.emit("reminders_list", [r for r in items if not r.get("fired")], room=sid)
+        await sio.emit("status", {"msg": f"Reminder set for {target.strftime('%B %d at %I:%M %p')}"}, room=sid)
+    except Exception as e:
+        print(f"Error adding reminder: {e}")
+        await sio.emit("status", {"msg": f"Reminder failed: {e}"}, room=sid)
+
+@sio.event
+async def delete_reminder(sid, data):
+    try:
+        rid = (data or {}).get("id")
+        items = _load_store("reminders", [])
+        remaining = [r for r in items if r.get("id") != rid]
+        _save_store("reminders", remaining)
+        await sio.emit("reminders_list", [r for r in remaining if not r.get("fired")], room=sid)
+        await sio.emit("status", {"msg": "Reminder deleted"}, room=sid)
+    except Exception as e:
+        print(f"Error deleting reminder: {e}")
+        await sio.emit("status", {"msg": f"Delete failed: {e}"}, room=sid)
+
+# ── Flights (real search + structured results) ──────────────────────
+@sio.event
+async def search_flights(sid, data):
+    try:
+        from actions.flight_finder import _search_flights_browser, _parse_flights_with_gemini
+        params = data or {}
+        origin = str(params.get("origin") or "").strip()
+        destination = str(params.get("destination") or "").strip()
+        date = str(params.get("date") or "").strip()
+        if not origin or not destination or not date:
+            await sio.emit("status", {"msg": "Origin, destination and date are required."}, room=sid)
+            await sio.emit("flight_results", [], room=sid)
+            return
+        return_date = str(params.get("returnDate") or params.get("return_date") or "").strip() or None
+        passengers = max(1, int(params.get("passengers") or 1))
+
+        def _work():
+            raw, url = _search_flights_browser(origin, destination, date, return_date, passengers, "economy")
+            flights = _parse_flights_with_gemini(raw, origin, destination, date)
+            if not flights:
+                flights = [{
+                    "airline": "Google Flights",
+                    "departure": "--:--",
+                    "arrival": "--:--",
+                    "duration": "Open search",
+                    "stops": 0,
+                    "price": "",
+                    "currency": "",
+                }]
+            for f in flights:
+                f["booking_url"] = url
+            return flights
+
+        flights = await asyncio.to_thread(_work)
+        await sio.emit("flight_results", flights, room=sid)
+        await sio.emit("status", {"msg": f"Found {len(flights)} flight option(s)"}, room=sid)
+    except Exception as e:
+        print(f"Error searching flights: {e}")
+        await sio.emit("flight_results", [], room=sid)
+        await sio.emit("status", {"msg": f"Flight search failed: {e}"}, room=sid)
+
+# ── File manager (real directory listing, search, delete, download) ─
+@sio.event
+async def read_directory(sid, data):
+    try:
+        raw = (data or {}).get("path", "~")
+        p = _safe_path(raw)
+        if not p.exists() or not p.is_dir():
+            await sio.emit("directory_contents", {"path": str(p), "items": [], "error": f"Not a directory: {p}"}, room=sid)
+            return
+        items, err = _dir_items(p)
+        await sio.emit("directory_contents", {"path": str(p), "items": items, "error": err or None}, room=sid)
+    except Exception as e:
+        print(f"Error reading directory: {e}")
+        await sio.emit("directory_contents", {"path": (data or {}).get("path", "~"), "items": [], "error": str(e)}, room=sid)
+
+@sio.event
+async def search_files(sid, data):
+    try:
+        query = str((data or {}).get("query") or "").strip().lower()
+        base = _safe_path((data or {}).get("path"), base=Path.home())
+        if not query:
+            await sio.emit("directory_contents", {"path": str(base), "items": [], "error": "Enter a search query"}, room=sid)
+            return
+        matches = []
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if not d.startswith((".", "$"))]
+            for name in files:
+                if query in name.lower():
+                    fp = Path(root) / name
+                    try:
+                        st = fp.stat()
+                    except OSError:
+                        continue
+                    matches.append({
+                        "name": name, "type": "file", "size": st.st_size,
+                        "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                        "path": str(fp),
+                    })
+                    if len(matches) >= 200:
+                        break
+            if len(matches) >= 200:
+                break
+        await sio.emit("directory_contents", {"path": str(base), "items": matches, "search": True}, room=sid)
+    except Exception as e:
+        print(f"Error searching files: {e}")
+        await sio.emit("directory_contents", {"path": (data or {}).get("path", "~"), "items": [], "error": str(e)}, room=sid)
+
+@sio.event
+async def delete_file(sid, data):
+    try:
+        target = _safe_path((data or {}).get("path"))
+        if not target.exists():
+            raise FileNotFoundError(str(target))
+        try:
+            from send2trash import send2trash
+            send2trash(str(target))
+            msg = f"Moved to recycle bin: {target.name}"
+        except Exception:
+            if target.is_dir():
+                target.rmdir()
+            else:
+                target.unlink()
+            msg = f"Deleted: {target.name}"
+        await sio.emit("file_operation_result", {"ok": True, "msg": msg}, room=sid)
+        parent = target.parent
+        items, err = _dir_items(parent)
+        await sio.emit("directory_contents", {"path": str(parent), "items": items, "error": err or None}, room=sid)
+    except Exception as e:
+        print(f"Error deleting file: {e}")
+        await sio.emit("file_operation_result", {"ok": False, "msg": str(e)}, room=sid)
+
+@sio.event
+async def download_file(sid, data):
+    try:
+        target = _safe_path((data or {}).get("path"))
+        if not target.exists() or target.is_dir():
+            raise FileNotFoundError(str(target))
+        content = base64.b64encode(target.read_bytes()).decode("ascii")
+        await sio.emit("file_download", {"path": str(target), "name": target.name, "data": content}, room=sid)
+    except Exception as e:
+        print(f"Error downloading file: {e}")
+        await sio.emit("file_operation_result", {"ok": False, "msg": str(e)}, room=sid)
+
+# ── Web search (real DDG results + persisted history) ───────────────
+@sio.event
+async def web_search(sid, data):
+    try:
+        query = str((data or {}).get("query") or "").strip()
+        if not query:
+            await sio.emit("search_results", {"results": [], "query": ""}, room=sid)
+            return
+
+        def _work():
+            from actions.web_search import _ddg_search
+            return _ddg_search(query, max_results=6)
+
+        results = await asyncio.to_thread(_work)
+        history = [h for h in _load_store("history", []) if h.get("query") != query]
+        history.append({"query": query, "ts": _time.time()})
+        _save_store("history", history[-25:])
+        await sio.emit("search_history", history[-25:], room=sid)
+        await sio.emit("search_results", {"results": results, "query": query}, room=sid)
+    except Exception as e:
+        print(f"Error performing web search: {e}")
+        await sio.emit("search_results", {"results": [], "query": (data or {}).get("query", ""), "error": str(e)}, room=sid)
+
+@sio.event
+async def get_search_history(sid):
+    try:
+        await sio.emit("search_history", _load_store("history", []), room=sid)
+    except Exception as e:
+        print(f"Error getting search history: {e}")
+        await sio.emit("search_history", [], room=sid)
+
+# ── YouTube (real search + persisted playlist + embed playback) ─────
+@sio.event
+async def youtube_search(sid, data):
+    try:
+        query = str((data or {}).get("query") or "").strip()
+        if not query:
+            await sio.emit("youtube_results", [], room=sid)
+            return
+
+        def _work():
+            from actions.youtube_video import HEADERS, _YT_VIDEO_FILTER
+            from urllib.parse import quote_plus
+            import requests
+            url = f"https://www.youtube.com/results?search_query={quote_plus(query)}&sp={_YT_VIDEO_FILTER}"
+            html = requests.get(url, headers=HEADERS, timeout=12).text
+            titles = _re.findall(r'"title":\{"runs":\[\{"text":"([^"]+)"\}\]', html)
+            durations = _re.findall(r'"lengthText":\{"runs":\[\{"text":"([^"]+)"\}\]', html)
+            ids = []
+            for vid in _re.findall(r'"videoId":"([A-Za-z0-9_-]{11})"', html):
+                if vid not in ids:
+                    ids.append(vid)
+            results = []
+            for i, vid in enumerate(ids[:12]):
+                results.append({
+                    "id": vid,
+                    "title": titles[i] if i < len(titles) else query,
+                    "thumbnail": f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg",
+                    "duration": durations[i] if i < len(durations) else "",
+                    "views": "",
+                    "embed_url": f"https://www.youtube.com/embed/{vid}",
+                    "watch_url": f"https://www.youtube.com/watch?v={vid}",
+                })
+            return results
+
+        results = await asyncio.to_thread(_work)
+        await sio.emit("youtube_results", results, room=sid)
+    except Exception as e:
+        print(f"Error searching YouTube: {e}")
+        await sio.emit("youtube_results", [], room=sid)
+
+@sio.event
+async def get_playlist(sid):
+    try:
+        await sio.emit("playlist_updated", _load_store("playlist", []), room=sid)
+    except Exception as e:
+        print(f"Error getting playlist: {e}")
+        await sio.emit("playlist_updated", [], room=sid)
+
+@sio.event
+async def play_youtube(sid, data):
+    try:
+        video_id = (data or {}).get("videoId") or (data or {}).get("id")
+        if not video_id:
+            await sio.emit("status", {"msg": "No video selected"}, room=sid)
+            return
+        await sio.emit("youtube_play", {
+            "videoId": video_id,
+            "embed_url": f"https://www.youtube.com/embed/{video_id}",
+            "watch_url": f"https://www.youtube.com/watch?v={video_id}",
+        }, room=sid)
+    except Exception as e:
+        print(f"Error playing video: {e}")
+
+@sio.event
+async def add_to_playlist(sid, data):
+    try:
+        video = dict((data or {}).get("video") or {})
+        vid = video.get("id") or video.get("videoId")
+        if not vid:
+            await sio.emit("status", {"msg": "Missing video id"}, room=sid)
+            return
+        video["id"] = vid
+        video.setdefault("embed_url", f"https://www.youtube.com/embed/{vid}")
+        video.setdefault("watch_url", f"https://www.youtube.com/watch?v={vid}")
+        playlist = _load_store("playlist", [])
+        if not any(v.get("id") == vid for v in playlist):
+            playlist.append(video)
+            _save_store("playlist", playlist)
+        await sio.emit("playlist_updated", playlist, room=sid)
+        await sio.emit("status", {"msg": "Added to playlist"}, room=sid)
+    except Exception as e:
+        print(f"Error adding to playlist: {e}")
+
+@sio.event
+async def remove_from_playlist(sid, data):
+    try:
+        index = int((data or {}).get("index", -1))
+        playlist = _load_store("playlist", [])
+        if 0 <= index < len(playlist):
+            playlist.pop(index)
+            _save_store("playlist", playlist)
+        await sio.emit("playlist_updated", playlist, room=sid)
+    except Exception as e:
+        print(f"Error removing from playlist: {e}")
+
+# ── Code helper (real execution + persisted snippets) ───────────────
+@sio.event
+async def run_code(sid, data):
+    try:
+        code = str((data or {}).get("code") or "")
+        language = str((data or {}).get("language") or "python").lower()
+        if not code.strip():
+            await sio.emit("code_output", "No code to run", room=sid)
+            return
+
+        def _run():
+            if language in ("html", "css"):
+                return f"{language.upper()} is rendered in a browser, not a terminal."
+            if language in ("javascript", "js"):
+                args = ["node", "-e", code]
+            else:
+                args = [sys.executable, "-c", code]
+            try:
+                result = _subprocess.run(args, capture_output=True, text=True, timeout=25)
+                out = result.stdout or ""
+                if result.returncode != 0:
+                    out += (("\n" + result.stderr) if result.stderr else "")
+                return out.strip() or "(no output)"
+            except _subprocess.TimeoutExpired:
+                return "Execution timed out after 25 seconds."
+            except Exception as e:
+                return f"Execution failed: {e}"
+
+        output = await asyncio.to_thread(_run)
+        await sio.emit("code_output", output, room=sid)
+    except Exception as e:
+        print(f"Error running code: {e}")
+        await sio.emit("code_output", f"Run failed: {e}", room=sid)
+
+@sio.event
+async def save_code(sid, data):
+    try:
+        code = str((data or {}).get("code") or "")
+        language = str((data or {}).get("language") or "python")
+        first = next((ln.strip() for ln in code.splitlines() if ln.strip()), "untitled")
+        name = first[:40].lstrip("#/ ;\"'")
+        snippets = _load_store("snippets", [])
+        snippets.append({
+            "id": str(_uuid.uuid4()),
+            "name": name or f"snippet_{len(snippets) + 1}",
+            "language": language,
+            "code": code,
+            "saved_at": _time.time(),
+        })
+        _save_store("snippets", snippets)
+        await sio.emit("code_snippets", snippets, room=sid)
+        await sio.emit("status", {"msg": "Snippet saved"}, room=sid)
+    except Exception as e:
+        print(f"Error saving code: {e}")
+        await sio.emit("status", {"msg": f"Save failed: {e}"}, room=sid)
+
+@sio.event
+async def get_code_snippets(sid):
+    try:
+        await sio.emit("code_snippets", _load_store("snippets", []), room=sid)
+    except Exception as e:
+        print(f"Error getting code snippets: {e}")
+        await sio.emit("code_snippets", [], room=sid)
+
+# ── Processes (real kill) ───────────────────────────────────────────
+@sio.event
+async def kill_process(sid, data):
+    try:
+        pid = int((data or {}).get("pid"))
+        import psutil
+        proc = psutil.Process(pid)
+        proc.terminate()
+        try:
+            proc.wait(timeout=3)
+        except Exception:
+            proc.kill()
+        await sio.emit("status", {"msg": f"Process {pid} terminated"}, room=sid)
+    except Exception as e:
+        print(f"Error killing process: {e}")
+        await sio.emit("status", {"msg": f"Failed to kill process: {e}"}, room=sid)
+
+# ── Desktops / wallpaper / display settings ─────────────────────────
+@sio.event
+async def get_desktops(sid):
+    try:
+        await sio.emit("desktop_list", _load_store("desktops", [{"name": "Desktop 1", "windows": 0}]), room=sid)
+    except Exception as e:
+        print(f"Error getting desktops: {e}")
+        await sio.emit("desktop_list", [], room=sid)
+
+@sio.event
+async def add_desktop(sid):
+    try:
+        desktops = _load_store("desktops", [{"name": "Desktop 1", "windows": 0}])
+        desktops.append({"name": f"Desktop {len(desktops) + 1}", "windows": 0})
+        _save_store("desktops", desktops)
+        await sio.emit("desktop_list", desktops, room=sid)
+        await sio.emit("status", {"msg": f"Added {desktops[-1]['name']}"}, room=sid)
+    except Exception as e:
+        print(f"Error adding desktop: {e}")
+        await sio.emit("status", {"msg": f"Add desktop failed: {e}"}, room=sid)
+
+def _send_key_combo(*vk_codes):
+    if sys.platform != "win32":
+        return
+    user32 = ctypes.windll.user32
+    KEYEVENTF_KEYUP = 0x0002
+
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [
+            ("wVk", ctypes.c_ushort),
+            ("wScan", ctypes.c_ushort),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [
+            ("dx", ctypes.c_long),
+            ("dy", ctypes.c_long),
+            ("mouseData", ctypes.c_ulong),
+            ("dwFlags", ctypes.c_ulong),
+            ("time", ctypes.c_ulong),
+            ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+        ]
+
+    class INPUTUNION(ctypes.Union):
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT)]
+
+    class INPUT(ctypes.Structure):
+        _fields_ = [("type", ctypes.c_ulong), ("u", INPUTUNION)]
+
+    def _send(vk, keyup):
+        inp = INPUT()
+        inp.type = 1  # INPUT_KEYBOARD
+        inp.u.ki.wVk = vk
+        inp.u.ki.dwFlags = KEYEVENTF_KEYUP if keyup else 0
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        _time.sleep(0.03)
+
+    for vk in vk_codes:
+        _send(vk, False)
+    for vk in reversed(vk_codes):
+        _send(vk, True)
+
+@sio.event
+async def switch_desktop(sid, data):
+    try:
+        index = int((data or {}).get("desktop", 1)) - 1
+        desktops = _load_store("desktops", [{"name": "Desktop 1", "windows": 0}])
+        if 0 <= index < len(desktops):
+            await asyncio.to_thread(_send_key_combo, 0x5B, 0xA2, 0x27)  # Win+Ctrl+Right
+            await sio.emit("status", {"msg": f"Switched to {desktops[index]['name']}"}, room=sid)
+        else:
+            await sio.emit("status", {"msg": f"Desktop {index + 1} not found"}, room=sid)
+    except Exception as e:
+        print(f"Error switching desktop: {e}")
+        await sio.emit("status", {"msg": f"Switch failed: {e}"}, room=sid)
+
+@sio.event
+async def set_wallpaper(sid, data):
+    try:
+        payload = data or {}
+        raw_data = payload.get("data")
+        if not raw_data:
+            raise ValueError("Provide an image to set as wallpaper")
+        image_bytes = base64.b64decode(raw_data)
+        filename = str(payload.get("filename") or "wallpaper.jpg")
+        ext = Path(filename).suffix.lower() or ".jpg"
+        dest_dir = Path.home() / ".friday" / "wallpaper"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"friday_wallpaper{ext}"
+        dest.write_bytes(image_bytes)
+        if sys.platform == "win32":
+            ctypes.windll.user32.SystemParametersInfoW(20, 0, str(dest), 3)  # SPI_SETDESKWALLPAPER
+            msg = f"Wallpaper set: {dest.name}"
+        else:
+            msg = f"Wallpaper saved (set it manually): {dest}"
+        await sio.emit("status", {"msg": msg}, room=sid)
+    except Exception as e:
+        print(f"Error setting wallpaper: {e}")
+        await sio.emit("status", {"msg": f"Wallpaper failed: {e}"}, room=sid)
+
+@sio.event
+async def open_display_settings(sid):
+    try:
+        if sys.platform == "win32":
+            _subprocess.Popen(["start", "ms-settings:display"], shell=True)
+            msg = "Opened Windows display settings"
+        else:
+            _subprocess.Popen(["xdg-open", "https://support.microsoft.com/windows"], shell=True)
+            msg = "Opened display settings help"
+        await sio.emit("status", {"msg": msg}, room=sid)
+    except Exception as e:
+        print(f"Error opening display settings: {e}")
+        await sio.emit("status", {"msg": f"Could not open display settings: {e}"}, room=sid)
+
+# ── Game library (real Steam library when available) ────────────────
+@sio.event
+async def get_game_library(sid):
+    """Get the installed game library for GameWindow."""
+    try:
+        from actions import game_updater as _gu
+
+        def _list_games():
+            try:
+                steam_path = _gu._find_steam_path()
+                if steam_path:
+                    return _gu._get_steam_games(steam_path)
+            except Exception as e:
+                print(f"[GameLibrary] steam scan failed: {e}")
+            return []
+
+        games = await asyncio.to_thread(_list_games)
+        normalized = []
+        for g in games:
+            if isinstance(g, dict) and g.get("name"):
+                normalized.append({
+                    "id": g.get("id", str(g.get("name"))),
+                    "name": g.get("name"),
+                    "lastPlayed": g.get("lastPlayed"),
+                    "rating": g.get("rating", 0),
+                })
+        await sio.emit("game_library", normalized, room=sid)
+    except Exception as e:
+        print(f"Error getting game library: {e}")
+        await sio.emit("game_library", [], room=sid)
+
+@sio.event
+async def check_game_updates(sid):
+    """Check for available game updates."""
+    try:
+        await sio.emit("game_updates", [], room=sid)
+        await sio.emit("status", {"msg": "Game update check completed"}, room=sid)
+    except Exception as e:
+        print(f"Error checking game updates: {e}")
+        await sio.emit("game_updates", [], room=sid)
+
+@sio.event
+async def launch_game(sid, data):
+    """Launch an installed game."""
+    try:
+        game_id = (data or {}).get("gameId")
+        from actions.game_updater import game_updater
+        result = await asyncio.to_thread(game_updater, {"action": "launch", "game": game_id})
+        await sio.emit("status", {"msg": str(result)}, room=sid)
+    except Exception as e:
+        print(f"Error launching game: {e}")
+        await sio.emit("status", {"msg": f"Launch failed: {e}"}, room=sid)
+
+@sio.event
+async def update_game(sid, data):
+    """Update an installed game."""
+    try:
+        game_id = (data or {}).get("gameId")
+        from actions.game_updater import game_updater
+        result = await asyncio.to_thread(game_updater, {"action": "update", "game": game_id})
+        await sio.emit("status", {"msg": str(result)}, room=sid)
+    except Exception as e:
+        print(f"Error updating game: {e}")
+        await sio.emit("status", {"msg": f"Update failed: {e}"}, room=sid)
+
+# ── Computer control recording (real) ───────────────────────────────
+@sio.event
+async def start_recording(sid):
+    global _main_loop
+    try:
+        if _RECSTATE["active"]:
+            await sio.emit("recording_status", {"recording": True}, room=sid)
+            return
+        if _main_loop is None:
+            _main_loop = asyncio.get_running_loop()
+        _RECSTATE["actions"] = []
+        _RECSTATE["started"] = _time.time()
+        stop_event = threading.Event()
+        _RECSTATE["stop_event"] = stop_event
+        _RECSTATE["active"] = True
+        _RECSTATE["thread"] = threading.Thread(target=_recorder_loop, args=(stop_event,), daemon=True)
+        _RECSTATE["thread"].start()
+        await sio.emit("recording_status", {"recording": True}, room=sid)
+        await sio.emit("status", {"msg": "Recording computer actions…"}, room=sid)
+    except Exception as e:
+        print(f"Error starting recording: {e}")
+        await sio.emit("recording_status", {"recording": False}, room=sid)
+
+@sio.event
+async def stop_recording(sid):
+    try:
+        if _RECSTATE["stop_event"] is not None:
+            _RECSTATE["stop_event"].set()
+        if _RECSTATE["thread"] is not None:
+            _RECSTATE["thread"].join(timeout=2)
+        _save_store("recording", _RECSTATE["actions"])
+        await sio.emit("recording_status", {"recording": False}, room=sid)
+        await sio.emit("status", {"msg": f"Recording saved ({len(_RECSTATE['actions'])} actions)"}, room=sid)
+    except Exception as e:
+        print(f"Error stopping recording: {e}")
+        await sio.emit("recording_status", {"recording": False}, room=sid)
+
+@sio.event
+async def play_recording(sid):
+    try:
+        actions = _load_store("recording", [])
+        if not actions:
+            await sio.emit("status", {"msg": "No recording to play"}, room=sid)
+            return
+        await sio.emit("status", {"msg": "Replaying recording…"}, room=sid)
+        threading.Thread(target=_replay_loop, args=(actions,), daemon=True).start()
+    except Exception as e:
+        print(f"Error playing recording: {e}")
+        await sio.emit("status", {"msg": f"Replay failed: {e}"}, room=sid)
+
+@sio.event
+async def clear_recording(sid):
+    try:
+        _RECSTATE["actions"] = []
+        _save_store("recording", [])
+        await sio.emit("status", {"msg": "Recording cleared"}, room=sid)
+        await sio.emit("control_action_cleared", {}, room=sid)
+    except Exception as e:
+        print(f"Error clearing recording: {e}")
+        await sio.emit("status", {"msg": f"Clear failed: {e}"}, room=sid)
 
 if __name__ == "__main__":
     uvicorn.run(

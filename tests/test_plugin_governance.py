@@ -48,3 +48,33 @@ def test_unapproved_tool_cannot_execute(tmp_path):
         pass
     else:
         raise AssertionError("unapproved tool executed")
+
+
+def test_startup_registration_restores_core_and_governed_agents(tmp_path):
+    tools = ToolBuilder(str(tmp_path))
+    agents = AgentBuilder(str(tmp_path))
+    dispatcher = AgentDispatcher()
+    manager = PluginManager(str(tmp_path), tools, agents, dispatcher)
+    code = "def run(goal, repo_path, log, cancel_event):\n    return {'ok': True}\n"
+
+    # A governed agent plugin, approved through the normal review flow.
+    agents.build("governed_worker", "Governed worker", code)
+    manager.propose("agent", "governed_worker")
+    manager.review("agent", "governed_worker", True)
+
+    # A core built-in agent module without any plugin manifest.
+    (tmp_path / "agents" / "core_helper_agent.py").write_text(code, encoding="utf-8")
+
+    result = manager.register_startup_agents()
+
+    assert "governed_worker" in dispatcher.registered_agents()
+    assert "core_helper_agent" in dispatcher.registered_agents()
+    assert "governed_worker" in result["registered"]
+    assert "core_helper_agent" in result["registered"]
+
+    # A disabled governed plugin must not come back on the next startup.
+    manager.set_enabled("agent", "governed_worker", False)
+    fresh = AgentDispatcher()
+    PluginManager(str(tmp_path), tools, agents, fresh).register_startup_agents()
+    assert "governed_worker" not in fresh.registered_agents()
+    assert "core_helper_agent" in fresh.registered_agents()

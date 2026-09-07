@@ -27,6 +27,11 @@ export default function FlightWindow({ position, onClose, onDrag }) {
     }
   };
 
+  const handleBook = (flight) => {
+    const url = flight.booking_url || flight.link || '';
+    if (url) window.open(url, '_blank', 'noopener,noreferrer');
+  };
+
   const formatTime = (time) => {
     return time || '--:--';
   };
@@ -122,7 +127,7 @@ export default function FlightWindow({ position, onClose, onDrag }) {
                   </div>
                 </div>
                 <div className="flight-footer">
-                  <button className="book-btn">
+                  <button className="book-btn" onClick={() => handleBook(flight)}>
                     <ExternalLink size={14} />
                     Book
                   </button>

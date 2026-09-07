@@ -7,10 +7,13 @@ import os
 import shutil
 import socket
 import subprocess
+import time
 from typing import Any
 
 from google import genai
 from tools import tools_list
+
+HEALTH_CACHE_SECONDS = 30
 
 
 class OpenClawBridge:
@@ -22,21 +25,30 @@ class OpenClawBridge:
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
         self.model = os.getenv("FRIDAY_ORCHESTRATOR_MODEL", "gemini-2.5-flash")
         self.tool_executor = None
+        self._health_checked_at = 0.0
+        self._health_reachable = False
 
     def set_tool_executor(self, executor) -> None:
         """Attach Friday's guarded core-tool executor after AudioLoop starts."""
         self.tool_executor = executor
 
-    def status(self) -> dict:
-        reachable = False
+    def is_reachable(self, force: bool = False) -> bool:
+        """Persistent, cached health-check so a known-down gateway is never re-probed on every plan."""
+        now = time.monotonic()
+        if not force and now - self._health_checked_at < HEALTH_CACHE_SECONDS:
+            return self._health_reachable
+        self._health_checked_at = now
         try:
             with socket.create_connection(("127.0.0.1", int(os.getenv("OPENCLAW_GATEWAY_PORT", "18789"))), timeout=1):
-                reachable = True
+                self._health_reachable = True
         except OSError:
-            pass
+            self._health_reachable = False
+        return self._health_reachable
+
+    def status(self) -> dict:
         return {
             "available": bool(self.api_key),
-            "reachable": reachable,
+            "reachable": self.is_reachable(),
             "provider": "gemini",
             "model": self.model,
             "plugins": len(self.plugin_manager.list_plugins()),
@@ -85,8 +97,9 @@ class OpenClawBridge:
             "{\"goal\":\"...\",\"steps\":[{\"tool\":\"registered_tool_name\",\"arguments\":{},\"reason\":\"...\"}],\"needs_user_input\":false}.\n\n"
             f"Available capabilities:\n{context}\n\nUser goal: {goal}"
         )
-        raw = self._run_openclaw(prompt)
+        raw = self._run_openclaw(prompt) if self.is_reachable() else None
         if raw is None:
+            self.mark_unreachable()
             if not self.api_key:
                 raise RuntimeError("Neither OpenClaw nor GEMINI_API_KEY is configured")
             response = genai.Client(api_key=self.api_key).models.generate_content(model=self.model, contents=prompt)
@@ -155,6 +168,10 @@ class OpenClawBridge:
                 print(f"[OPENCLAW] attempt {attempt}/2 unavailable: {exc}")
         print("[OPENCLAW] bounded retries exhausted; using Gemini fallback")
         return None
+
+    def mark_unreachable(self) -> None:
+        """Force the health cache stale after a real failure so the next plan() re-probes."""
+        self._health_checked_at = 0.0
 
     def delegate(self, agent_type: str, goal: str, repo_path: str = ".") -> dict:
         if agent_type not in {entry.get("agent_type") for entry in self.dispatcher.list_agents()}:

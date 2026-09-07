@@ -27,7 +27,25 @@ export default function DesktopWindow({ position, onClose, onDrag }) {
   };
 
   const handleSetWallpaper = () => {
-    window.socket.emit('set_wallpaper');
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const dataUrl = String(reader.result || '');
+        const encoded = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+        window.socket.emit('set_wallpaper', { filename: file.name, data: encoded });
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  };
+
+  const handleOpenDisplaySettings = () => {
+    window.socket.emit('open_display_settings');
   };
 
   return (
@@ -57,8 +75,8 @@ export default function DesktopWindow({ position, onClose, onDrag }) {
             >
               <Grid size={24} />
               <span>Desktop {index + 1}</span>
-              {desktop.windowCount > 0 && (
-                <span className="window-count">{desktop.windowCount}</span>
+              {desktop.windows > 0 && (
+                <span className="window-count">{desktop.windows}</span>
               )}
             </div>
           ))}
@@ -73,7 +91,7 @@ export default function DesktopWindow({ position, onClose, onDrag }) {
             <Image size={16} />
             Set Wallpaper
           </button>
-          <button>
+          <button onClick={handleOpenDisplaySettings}>
             <Settings size={16} />
             Display Settings
           </button>

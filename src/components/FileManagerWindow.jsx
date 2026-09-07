@@ -27,6 +27,12 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
           ? `${result}\n\nWallpaper ready: ask Friday to set this image as your wallpaper.`
           : result);
     });
+
+    socket.on('file_download', handleFileDownload);
+    socket.on('file_operation_result', (data) => {
+      setProcessingResult(data.msg || '');
+      if (data.ok) window.socket.emit('read_directory', { path: currentPath || '~' });
+    });
     
     // Load home directory
     socket.emit('read_directory', { path: '~' });
@@ -34,6 +40,8 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
     return () => {
       socket.off('directory_contents');
       socket.off('file_processing_result');
+      socket.off('file_download');
+      socket.off('file_operation_result');
     };
   }, []);
 
@@ -51,6 +59,27 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
       window.socket.emit('search_files', { query: searchQuery, path: currentPath });
     }
   };
+
+  const handleFileDownload = (data) => {
+    try {
+      const bytes = Uint8Array.from(atob(data.data), (c) => c.charCodeAt(0));
+      const blob = new Blob([bytes]);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = data.name || 'download';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error('Download failed', e);
+    }
+  };
+
+  const handleDownload = (item) => window.socket.emit('download_file', { path: item.path });
+
+  const handleDelete = (item) => window.socket.emit('delete_file', { path: item.path });
 
   const handleFileSelect = (event) => {
     const file = event.target.files?.[0] || null;
@@ -200,11 +229,11 @@ export default function FileManagerWindow({ position, onClose, onDrag }) {
                 </div>
                 <div className="file-actions">
                   {item.type !== 'directory' && (
-                    <button className="action-btn">
+                    <button className="action-btn" onClick={() => handleDownload(item)} title={`Download ${item.name}`}>
                       <Download size={14} />
                     </button>
                   )}
-                  <button className="action-btn">
+                  <button className="action-btn" onClick={() => handleDelete(item)} title={`Delete ${item.name}`}>
                     <Trash2 size={14} />
                   </button>
                 </div>

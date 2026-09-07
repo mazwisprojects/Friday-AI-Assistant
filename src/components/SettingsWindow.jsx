@@ -117,7 +117,9 @@ const SettingsWindow = ({
     }, [socket]);
 
     const togglePermission = (toolId) => {
-        socket.emit('update_settings', { tool_permissions: { [toolId]: false } });
+        const next = !(permissions[toolId] === true);
+        setPermissions(prev => ({ ...prev, [toolId]: next }));
+        socket.emit('update_settings', { tool_permissions: { [toolId]: next } });
     };
 
     const toggleFaceAuth = () => {
@@ -377,10 +379,10 @@ const SettingsWindow = ({
                                 <span className="text-cyan-100/80">{tool.label}</span>
                                 <button
                                     onClick={() => togglePermission(tool.id)}
-                                    aria-label={`${tool.label} runs automatically`}
-                                    className="hud-toggle hud-toggle-on"
+                                    aria-label={`${tool.label} ${permissions[tool.id] === true ? 'runs automatically' : 'requires confirmation'}`}
+                                    className={`hud-toggle ${permissions[tool.id] === true ? 'hud-toggle-on' : ''}`}
                                 >
-                                    <span>AUTO</span>
+                                    <span>{permissions[tool.id] === true ? 'AUTO' : 'CONFIRM'}</span>
                                     <i />
                                 </button>
                             </div>

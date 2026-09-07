@@ -4,20 +4,77 @@
     "kind": "workflow",
     "reason": "Capability used 5 times; consider a governed reusable workflow.",
     "usage_count": 5,
-    "status": "pending_review"
+    "status": "approved",
+    "status_updated_at": 1788770705.1161132
   },
   {
     "name": "calendar_briefing_agent",
     "kind": "workflow",
     "reason": "Capability used 3 times; consider a governed reusable workflow.",
     "usage_count": 3,
-    "status": "pending_review"
+    "status": "approved",
+    "status_updated_at": 1788770705.1161165
   },
   {
     "name": "worker",
     "kind": "workflow",
     "reason": "Capability used 4 times; consider a governed reusable workflow.",
     "usage_count": 4,
-    "status": "pending_review"
+    "status": "approved",
+    "status_updated_at": 1788770705.116118
+  },
+  {
+    "name": "noop_agent",
+    "kind": "workflow",
+    "reason": "Capability used 4 times; consider a governed reusable workflow.",
+    "usage_count": 4,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788770705.1161187
+  },
+  {
+    "name": "slow_agent",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788770705.1161196
+  },
+  {
+    "name": "failing_agent",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788770705.1161203
+  },
+  {
+    "name": "cancellable_agent",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788770705.1161208
+  },
+  {
+    "name": "quick_agent",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788770705.1161215
+  },
+  {
+    "name": "self_maintenance",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788770705.116122
   }
 ]

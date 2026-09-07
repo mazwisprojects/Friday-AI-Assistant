@@ -744,6 +744,13 @@ button {
   background: rgba(3, 10, 15, 0.96);
 }
 
+/* OpenClaw Orchestrator: keep on screen by capping height/width so its
+   config-heavy content scrolls inside the window instead of overflowing. */
+.openclaw-window {
+  height: min(86vh, 760px);
+  max-width: calc(100vw - 24px);
+}
+
 .contact-form {
   display: grid;
   gap: 8px;

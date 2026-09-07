@@ -180,7 +180,7 @@ function App() {
         games: { w: 500, h: 450 },
         messages: { w: 450, h: 500 },
         memory: { w: 420, h: 360 },
-        openclaw: { w: 420, h: 360 },
+        openclaw: { w: 420, h: Math.min(Math.round(window.innerHeight * 0.86), 760) },
         processes: { w: 550, h: 400 },
         proactive: { w: 440, h: 420 },
         reminders: { w: 420, h: 400 },

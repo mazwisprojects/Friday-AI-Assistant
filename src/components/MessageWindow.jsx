@@ -6,6 +6,7 @@ export default function MessageWindow({ position, onClose, onDrag }) {
   const [messages, setMessages] = useState([]);
   const [newMessage, setNewMessage] = useState('');
   const [contacts, setContacts] = useState([]);
+  const [selectedContact, setSelectedContact] = useState(null);
 
   useEffect(() => {
     const socket = window.socket;
@@ -14,23 +15,25 @@ export default function MessageWindow({ position, onClose, onDrag }) {
       setMessages(data);
     });
     
-    socket.on('contact_list', (data) => {
-      setContacts(data);
+    socket.on('contacts_list', (data) => {
+      const arr = Array.isArray(data) ? data : (data && data.contacts) || [];
+      setContacts(arr);
     });
     
     socket.emit('get_contacts', { platform });
     
     return () => {
       socket.off('message_history');
-      socket.off('contact_list');
+      socket.off('contacts_list');
     };
   }, [platform]);
 
   const handleSend = () => {
     if (newMessage.trim()) {
-      window.socket.emit('send_message', { 
-        platform, 
-        message: newMessage 
+      window.socket.emit('send_message', {
+        platform,
+        message: newMessage,
+        receiver: selectedContact?.channels?.[platform] || ''
       });
       setMessages([...messages, { 
         from: 'me', 
@@ -63,7 +66,7 @@ export default function MessageWindow({ position, onClose, onDrag }) {
         <div className="message-toolbar">
           <select 
             value={platform} 
-            onChange={(e) => setPlatform(e.target.value)}
+            onChange={(e) => { setPlatform(e.target.value); setSelectedContact(null); }}
           >
             <option value="whatsapp">WhatsApp</option>
             <option value="telegram">Telegram</option>
@@ -78,9 +81,18 @@ export default function MessageWindow({ position, onClose, onDrag }) {
             <span>Contacts</span>
           </div>
           {contacts.map((contact, index) => (
-            <div key={index} className="contact-item">
+            <div 
+              key={index} 
+              className={`contact-item ${selectedContact && selectedContact.name === contact.name ? 'selected' : ''}`}
+              onClick={() => setSelectedContact(contact)}
+              role="button"
+              title={`Send via ${platform}`}
+            >
               <User size={16} />
               <span>{contact.name}</span>
+              {contact.channels && contact.channels[platform] && (
+                <span className="contact-handle">{contact.channels[platform]}</span>
+              )}
               {contact.online && <span className="online-dot" />}
             </div>
           ))}

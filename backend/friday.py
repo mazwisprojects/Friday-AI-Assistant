@@ -119,9 +119,22 @@ def get_text_model(model: str = FACT_GEMINI_MODEL):
 custom_tool_builder = ToolBuilder(os.path.dirname(os.path.abspath(__file__)))
 agent_builder = AgentBuilder(os.path.dirname(os.path.abspath(__file__)))
 plugin_manager = PluginManager(os.path.dirname(os.path.abspath(__file__)), custom_tool_builder, agent_builder, agent_dispatcher_module.dispatcher)
+# Restore the dispatcher's agent registry from disk: governed plugins that are
+# approved+enabled, plus core built-in agents. Scheduled workflows keep working
+# across restarts instead of dying with 'Unknown agent type'.
+startup_registration = plugin_manager.register_startup_agents()
+print(
+    f"[FRIDAY] Startup agents registered: {len(startup_registration['registered'])} "
+    f"({', '.join(startup_registration['registered'])}); skipped: {startup_registration['skipped'] or 'none'}"
+)
 openclaw_bridge = OpenClawBridge(plugin_manager, agent_dispatcher_module.dispatcher)
 task_manager = TaskManager(ROOT_DIR)
 agent_scheduler = AgentScheduler(ROOT_DIR, agent_dispatcher_module.dispatcher)
+# Scheduled agents can fire before any AudioLoop starts; give the dispatcher a
+# best-effort context immediately so they never run with context=None.
+agent_dispatcher_module.dispatcher.set_context(AgentContext(
+    task_manager=task_manager, plugin_manager=plugin_manager, openclaw_bridge=openclaw_bridge,
+))
 tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
 
 # --- CONFIG UPDATE: Enabled Transcription ---
@@ -257,7 +270,8 @@ class AudioLoop:
         # Video buffering state
         self._latest_image_payload = None
         # Live vision state (continuous webcam streaming to the Live session)
-        self.live_video_enabled = True  # Enable live video by default
+        # Opt-in by default: the client enables it explicitly via set_live_video.
+        self.live_video_enabled = False
         self._last_video_sent_time = 0.0
         self._last_sent_image_data = None
         # VAD State
@@ -284,7 +298,7 @@ class AudioLoop:
             current_dir, agent_dispatcher_module.ledger, self.plugin_manager
         )
         self.autonomy_pipeline = AutonomyPipeline(
-            current_dir, self.capability_learning, self.plugin_manager, agent_dispatcher_module.ledger
+            current_dir, self.capability_learning, self.plugin_manager, agent_dispatcher_module.ledger, self.agent_scheduler
         )
         self.autonomy_supervisor = AutonomySupervisor(
             self.task_manager,
@@ -1207,7 +1221,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "schedule_agent", "manage_tasks", "run_routine"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent", "schedule_agent", "manage_tasks", "run_routine"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -1941,6 +1955,17 @@ class AudioLoop:
                                         id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}
                                     ))
 
+                                elif fc.name == "resolve_security_finding":
+                                    try:
+                                        result = self.autonomy_pipeline.resolve_security(
+                                            fc.args.get("finding_path", ""), fc.args.get("finding_value", "")
+                                        )
+                                    except Exception as exc:
+                                        result = {"error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(
+                                        id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}
+                                    ))
+
                                 elif fc.name == "manage_tasks":
                                     action = fc.args.get("action", "list").lower()
                                     try:
@@ -2576,6 +2601,12 @@ class AudioLoop:
                 for notification in report.notifications:
                     await self.notifications.notify(
                         notification["category"], notification["title"], notification["message"], notification.get("priority", "normal")
+                    )
+                if report.approvals_needed:
+                    pending = len(report.approvals_needed)
+                    await self.notifications.notify(
+                        "autonomy_approval", "Approvals waiting",
+                        f"{pending} capability or security item(s) await your review in the OpenClaw window.", "high",
                     )
                 if report.observations:
                     print(f"[FRIDAY DEBUG] [AUTONOMY] {'; '.join(report.observations)}")

@@ -17,12 +17,17 @@ export default function YouTubeWindow({ position, onClose, onDrag }) {
     socket.on('playlist_updated', (data) => {
       setPlaylist(data);
     });
+
+    socket.on('youtube_play', (data) => {
+      setCurrentVideo({ id: data.videoId, title: 'Playing…', embed_url: data.embed_url, watch_url: data.watch_url });
+    });
     
     socket.emit('get_playlist');
     
     return () => {
       socket.off('youtube_results');
       socket.off('playlist_updated');
+      socket.off('youtube_play');
     };
   }, []);
 
@@ -33,8 +38,14 @@ export default function YouTubeWindow({ position, onClose, onDrag }) {
   };
 
   const handlePlay = (video) => {
-    setCurrentVideo(video);
-    window.socket.emit('play_youtube', { videoId: video.id });
+    const playable = {
+      ...video,
+      id: video.id || video.videoId,
+      embed_url: video.embed_url || (video.id ? `https://www.youtube.com/embed/${video.id}` : ''),
+      watch_url: video.watch_url || (video.id ? `https://www.youtube.com/watch?v=${video.id}` : ''),
+    };
+    setCurrentVideo(playable);
+    window.socket.emit('play_youtube', { videoId: playable.id });
   };
 
   const handleAddToPlaylist = (video) => {
@@ -78,10 +89,13 @@ export default function YouTubeWindow({ position, onClose, onDrag }) {
 
         {currentVideo && (
           <div className="video-player">
-            <div className="video-placeholder">
-              <Play size={32} />
-              <span>{currentVideo.title}</span>
-            </div>
+            <iframe
+              src={currentVideo.embed_url}
+              title={currentVideo.title || 'YouTube player'}
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowFullScreen
+              className="w-full aspect-video border border-cyan-900/50 bg-black"
+            />
           </div>
         )}
 

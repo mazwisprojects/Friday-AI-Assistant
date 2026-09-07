@@ -63,7 +63,7 @@ class AgentScheduler:
             ("printer_monitor", "interval", "printer_monitor_agent", "Check printer completion and print status.", 0, 0, 120),
             ("smart_home_nightly", "daily", "smart_home_agent", "Run the nightly smart-home check-in.", 21, 0, None),
             ("memory_cleanup", "weekly", "memory_cleanup_agent", "Run weekly memory cleanup and compaction review.", 20, 0, 6),
-            ("dependency_audit", "weekly", "project_health_agent", "Run weekly dependency and deprecation audit.", 10, 0, 5),
+            ("dependency_audit", "weekly", "dependency_audit_agent", "Audit outdated Python and Node dependencies and deprecated API usage.", 10, 0, 5),
         ]
         created = []
         for key, schedule_type, agent_type, goal, hour, minute, extra in defaults:
@@ -73,7 +73,20 @@ class AgentScheduler:
                 created.append(self.schedule_daily(key, agent_type, goal, hour, minute))
             else:
                 created.append(self.schedule_weekly(key, agent_type, goal, extra, hour, minute))
+        self._migrate_legacy_agent_type("dependency_audit", "project_health_agent", "dependency_audit_agent")
         return created
+
+    def _migrate_legacy_agent_type(self, key: str, old_agent_type: str, new_agent_type: str) -> None:
+        """Repoint an already-persisted default schedule that was created under a stale agent_type."""
+        with self._lock:
+            schedules = self._load()
+            changed = False
+            for schedule in schedules:
+                if schedule.get("key") == key and schedule.get("agent_type") == old_agent_type:
+                    schedule["agent_type"] = new_agent_type
+                    changed = True
+            if changed:
+                self._save(schedules)
 
     def list(self) -> list[dict]:
         with self._lock:

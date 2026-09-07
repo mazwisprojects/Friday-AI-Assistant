@@ -28,7 +28,17 @@ class ExecutionLedger:
     def _save(self, entries: list[dict]) -> None:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(entries[-self.limit:], indent=2, ensure_ascii=False, default=str), encoding="utf-8")
-        temporary.replace(self.path)
+        # Windows: a freshly written file can be held open for a moment by
+        # antivirus/indexing, making the atomic rename fail with
+        # PermissionError. Retry briefly so history entries are never lost.
+        for attempt in range(4):
+            try:
+                temporary.replace(self.path)
+                return
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
 
     def start(self, kind: str, name: str, goal: str = "", provider: str = "friday", arguments: dict | None = None) -> str:
         entry_id = str(uuid.uuid4())

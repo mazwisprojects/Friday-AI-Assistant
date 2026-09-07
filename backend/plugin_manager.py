@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import threading
@@ -19,6 +20,47 @@ class PluginManager:
         self._lock = threading.RLock()
         self.versions_dir = self.backend_dir / ".friday-plugin-versions"
         self.proposals_path = self.backend_dir / "capability_proposals.json"
+
+    def register_startup_agents(self) -> dict:
+        """Re-register agents into the dispatcher after a restart.
+
+        Without this the dispatcher only knows agents approved in the current
+        process, so every persisted schedule dies with 'Unknown agent type'
+        after a restart and the supervisor auto-disables it. Governed plugins
+        register only when approved and active; core built-in agents
+        (backend/agents/*.py without a plugin manifest) register directly,
+        like the built-in repo_repair agent.
+        """
+        registered: list[str] = []
+        skipped: list[str] = []
+        for name, manifest in self.agent_builder.agents.items():
+            try:
+                if not is_active(manifest):
+                    skipped.append(name)
+                    continue
+                self.dispatcher.register_agent(name, self.agent_builder.load_callable(name))
+                registered.append(name)
+            except Exception as error:
+                skipped.append(f"{name}: {error}")
+        for path in sorted(self.backend_dir.glob("agents/*.py")):
+            module_name = path.stem
+            if module_name.startswith("__") or module_name in registered or module_name in self.agent_builder.agents:
+                continue
+            try:
+                spec = importlib.util.spec_from_file_location(f"friday_core_agent_{module_name}", path)
+                if not spec or not spec.loader:
+                    raise ImportError(f"Could not load {path.name}")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                run = getattr(module, "run", None)
+                if not callable(run):
+                    skipped.append(module_name)
+                    continue
+                self.dispatcher.register_agent(module_name, run)
+                registered.append(module_name)
+            except Exception as error:
+                skipped.append(f"{module_name}: {error}")
+        return {"registered": registered, "skipped": skipped}
 
     def list_plugins(self) -> list[dict]:
         with self._lock:
