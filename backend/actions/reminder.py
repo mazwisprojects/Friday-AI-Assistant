@@ -54,7 +54,7 @@ notified = False
 
 try:
     from plyer import notification
-    notification.notify(title="FRIDAY Reminder", message=message, timeout=15)
+    notification.notify(title="FRIDAY Reminder", message=message[:250], timeout=15)
     notified = True
 except Exception:
     pass
@@ -90,7 +90,7 @@ notified = False
 
 try:
     from plyer import notification
-    notification.notify(title="FRIDAY Reminder", message=message, timeout=15)
+    notification.notify(title="FRIDAY Reminder", message=message[:250], timeout=15)
     notified = True
 except Exception:
     pass
@@ -113,7 +113,7 @@ notified = False
 
 try:
     from plyer import notification
-    notification.notify(title="FRIDAY Reminder", message=message, timeout=15)
+    notification.notify(title="FRIDAY Reminder", message=message[:250], timeout=15)
     notified = True
 except Exception:
     pass

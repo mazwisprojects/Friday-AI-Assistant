@@ -37,6 +37,14 @@ class NotificationManager:
     def _desktop_notify(title: str, message: str) -> None:
         try:
             from plyer import notification
-            notification.notify(title=f"FRIDAY | {title}", message=message, timeout=10)
+            # Windows NOTIFYICONDATAW caps the title at 63 and the body at 256
+            # characters. Longer strings raise ValueError inside plyer's own
+            # notification thread, where no except can catch them, so clip
+            # before calling.
+            notification.notify(
+                title=f"FRIDAY | {title}"[:63],
+                message=str(message)[:250],
+                timeout=10,
+            )
         except Exception as exc:
             print(f"[NOTIFY] Desktop notification unavailable: {exc}")

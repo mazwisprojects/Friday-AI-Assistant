@@ -76,5 +76,14 @@
     "priority": "normal",
     "status": "approved",
     "status_updated_at": 1788770705.116122
+  },
+  {
+    "name": "build_project",
+    "kind": "workflow",
+    "reason": "Capability used 3 times; consider a governed reusable workflow.",
+    "usage_count": 3,
+    "priority": "normal",
+    "status": "approved",
+    "status_updated_at": 1788775901.8555524
   }
 ]

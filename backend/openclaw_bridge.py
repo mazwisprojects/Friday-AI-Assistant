@@ -23,7 +23,7 @@ class OpenClawBridge:
         self.plugin_manager = plugin_manager
         self.dispatcher = dispatcher
         self.api_key = api_key or os.getenv("GEMINI_API_KEY", "")
-        self.model = os.getenv("FRIDAY_ORCHESTRATOR_MODEL", "gemini-2.5-flash")
+        self.model = os.getenv("FRIDAY_ORCHESTRATOR_MODEL", "gemini-3.6-flash")
         self.tool_executor = None
         self._health_checked_at = 0.0
         self._health_reachable = False
