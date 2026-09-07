@@ -296,6 +296,7 @@ class AudioLoop:
         self.openclaw_bridge = openclaw_bridge
         self.task_manager = task_manager
         self.agent_scheduler = agent_scheduler
+        self.capability_engine = capability_engine
         self.capability_learning = CapabilityLearning(
             current_dir, agent_dispatcher_module.ledger, self.plugin_manager
         )
@@ -1223,7 +1224,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "self_modify"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -2429,6 +2430,8 @@ class AudioLoop:
                                     except Exception as exc:
                                         result = {"ok": False, "error": str(exc)}
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}))
+
+                                elif fc.name == "build_agent":
                                     try:
                                         result = self.agent_builder.build(fc.args.get("name", ""), fc.args.get("description", ""), fc.args.get("code", ""), fc.args.get("parameters", {}), fc.args.get("governance", {}))
                                         agent_name = result["agent"]["name"]
@@ -2438,6 +2441,44 @@ class AudioLoop:
                                     except Exception as exc:
                                         result_str = json.dumps({"registered": False, "error": str(exc)})
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+
+                                elif fc.name == "self_modify":
+                                    action = fc.args.get("action", "")
+                                    try:
+                                        from actions import self_modify as _sm
+                                        if action == "read_source":
+                                            result = _sm.read_source(fc.args.get("name", ""))
+                                        elif action == "edit_source":
+                                            result = _sm.edit_source(fc.args.get("name", ""), fc.args.get("old_text", ""), fc.args.get("new_text", ""))
+                                        elif action == "replace_function":
+                                            result = _sm.replace_function(fc.args.get("name", ""), fc.args.get("func_name", ""), fc.args.get("new_body", ""))
+                                        elif action == "patch_config":
+                                            raw = fc.args.get("value", "")
+                                            try:
+                                                parsed_value = json.loads(raw)
+                                            except Exception:
+                                                parsed_value = raw
+                                            result = _sm.patch_config(fc.args.get("name", ""), fc.args.get("key", ""), parsed_value)
+                                        elif action == "update_memory":
+                                            raw = fc.args.get("new_value", "")
+                                            try:
+                                                parsed_value = json.loads(raw)
+                                            except Exception:
+                                                parsed_value = raw
+                                            result = _sm.update_memory(fc.args.get("query", ""), parsed_value)
+                                        elif action == "add_import":
+                                            result = _sm.add_import(fc.args.get("name", ""), fc.args.get("import_statement", ""))
+                                        else:
+                                            result = {"ok": False, "error": f"Unknown self_modify action: {action}"}
+                                        # Source/config edits take effect immediately: hot-reload the capability engine.
+                                        if isinstance(result, dict) and result.get("ok") and action in {"edit_source", "replace_function", "add_import"}:
+                                            try:
+                                                result["refresh"] = self.capability_engine.refresh_tools()
+                                            except Exception as refresh_exc:
+                                                result["refresh_error"] = str(refresh_exc)
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
 
                                 elif fc.name == "test_agent":
                                     result_str = json.dumps(self.agent_builder.test(fc.args.get("name", "")), ensure_ascii=False)

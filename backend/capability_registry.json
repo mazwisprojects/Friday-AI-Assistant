@@ -175,6 +175,7 @@
     "schedule_agent",
     "search_memory",
     "self_maintenance",
+    "self_modify",
     "send_message",
     "set_reminder",
     "switch_project",

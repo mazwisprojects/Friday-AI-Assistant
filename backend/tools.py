@@ -550,6 +550,7 @@ execution_history_tool = {"name": "execution_history", "description": "Lists rec
 autonomy_status_tool = {"name": "autonomy_status", "description": "Reports Friday's governed self-improvement pipeline, pending proposals, tests, security findings, and failure patterns.", "parameters": {"type": "OBJECT", "properties": {}}}
 approve_autonomy_proposal_tool = {"name": "approve_autonomy_proposal", "description": "Approves a reviewed autonomy proposal for deployment after its security gate has passed.", "parameters": {"type": "OBJECT", "properties": {"proposal_id": {"type": "STRING"}}, "required": ["proposal_id"]}}
 resolve_security_finding_tool = {"name": "resolve_security_finding", "description": "Records a human review decision for a security finding (risky import or call) flagged by the autonomy pipeline. Accepting a finding removes it from the approval queue so the security gate can complete. Use the finding's path (e.g. agents/project_health_agent.py) and value (e.g. subprocess).", "parameters": {"type": "OBJECT", "properties": {"finding_path": {"type": "STRING", "description": "File path of the flagged finding, e.g. agents/project_health_agent.py"}, "finding_value": {"type": "STRING", "description": "Risky module or call name, e.g. subprocess"}}, "required": ["finding_path", "finding_value"]}}
+self_modify_tool = {"name": "self_modify", "description": "FRIDAY's self-modification layer. Actions: read_source (read any module's code), edit_source (replace text in any module), replace_function (replace a function body), patch_config (update any JSON config value), update_memory (update memory entries), add_import (add imports to any module). Use this to debug, refactor, fix, and upgrade any part of Friday's own codebase on the fly.", "parameters": {"type": "OBJECT", "properties": {"action": {"type": "STRING", "description": "read_source, edit_source, replace_function, patch_config, update_memory, or add_import"}, "name": {"type": "STRING", "description": "Module or config name"}, "old_text": {"type": "STRING", "description": "Text to replace (edit_source)"}, "new_text": {"type": "STRING", "description": "Replacement text (edit_source)"}, "func_name": {"type": "STRING", "description": "Function name (replace_function)"}, "new_body": {"type": "STRING", "description": "New function body (replace_function)"}, "key": {"type": "STRING", "description": "Config key using dot notation (patch_config)"}, "value": {"type": "STRING", "description": "New value (patch_config)"}, "query": {"type": "STRING", "description": "Search term (update_memory)"}, "new_value": {"type": "STRING", "description": "Replacement (update_memory)"}, "import_statement": {"type": "STRING", "description": "Import line (add_import)"}}, "required": ["action"]}}
 
 google_contacts_read_tool = {
     "name": "google_contacts_read",
@@ -829,6 +830,7 @@ tools_list = [{"function_declarations": [
     autonomy_status_tool,
     approve_autonomy_proposal_tool,
     resolve_security_finding_tool,
+    self_modify_tool,
     google_contacts_read_tool,
     browser_control_tool,
     code_helper_tool,
