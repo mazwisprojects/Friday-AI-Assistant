@@ -2369,14 +2369,10 @@ class AudioLoop:
 
                                 elif fc.name == "build_custom_tool":
                                     try:
-                                        code = fc.args.get("code", "")
-                                        if not code:
-                                            config = fc.args.get("config", {}) or {}
-                                            code = config.get("command", "") or config.get("code", "")
                                         result = self.tool_builder.build(
                                             name=fc.args.get("name", ""),
                                             description=fc.args.get("description", ""),
-                                            code=code,
+                                            code=fc.args.get("code", ""),
                                             parameters=fc.args.get("parameters", {}),
                                         )
                                         if result.get("ok"):
