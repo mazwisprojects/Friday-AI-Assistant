@@ -1,0 +1,18 @@
+# Gradle / Kotlin / build artifacts
+.gradle/
+.kotlin/
+build/
+.artifacts/
+out/
+*.log
+
+# IntelliJ / Android Studio
+.idea/
+*.iml
+
+# Machine-specific (SDK path, device ids)
+local.properties
+
+# JVM heap dumps
+*.hprof
+java_pid*.hprof
