@@ -541,6 +541,47 @@ class AudioLoop:
         except Exception as e:
             print(f"[FRIDAY DEBUG] [MEMORY] Fact extraction failed: {e}")
 
+    async def initiative_loop(self):
+        """Self-directed work loop: periodically reviews goals and approvals, and acts without being asked.
+
+        Governance lives in actions/initiative.py: enabled flag, quiet hours (23:00-08:00),
+        daily action budget, per-goal nudge intervals, and a user-idle guard so he never
+        interrupts an active conversation.
+        """
+        print("[FRIDAY] Initiative loop started.")
+        while True:
+            try:
+                from actions import initiative as initiative_engine
+                from actions import goal_engine as goal_engine
+                cfg = initiative_engine.read_settings()
+                interval = max(5, int(cfg.get("interval_minutes", 20)))
+                await asyncio.sleep(interval * 60)
+                if not cfg.get("enabled", True) or not self.session:
+                    continue
+                now = time.time()
+                user_idle = time.monotonic() - getattr(self, "_last_user_speech", 0.0)
+                pending = len(getattr(self, "_pending_confirmations", {}) or {})
+                try:
+                    active_goals = goal_engine.tick().get("active_goals", [])
+                except Exception:
+                    active_goals = []
+                plan = initiative_engine.evaluate(active_goals, pending, cfg, user_idle, now)
+                if not plan.get("act"):
+                    continue
+                for ini in plan["initiatives"]:
+                    try:
+                        initiative_engine.record_action(ini["kind"], ini.get("goal_id"))
+                        await self.session.send(input=ini["prompt"], end_of_turn=True)
+                        await self.notifications.notify("initiative", "Friday took initiative", ini["notify_text"])
+                        print(f"[FRIDAY] [INITIATIVE] {ini['kind']}: {ini['notify_text']}")
+                    except Exception as exc:
+                        print(f"[FRIDAY] Initiative action failed: {exc}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[FRIDAY] Initiative loop error: {exc}")
+                await asyncio.sleep(120)
+
     async def compact_memory(self):
         """Periodically summarize older conversations into derived startup context."""
         while True:
@@ -1224,7 +1265,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "semantic_search", "manage_snapshots", "critic_loop", "manage_goals", "self_modify"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "semantic_search", "manage_snapshots", "critic_loop", "manage_goals", "initiative_control", "self_modify"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -2564,6 +2605,24 @@ class AudioLoop:
                                         result = {"ok": False, "error": str(exc)}
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
 
+                                elif fc.name == "initiative_control":
+                                    try:
+                                        from actions import initiative as _init
+                                        _act = fc.args.get("action", "status")
+                                        if _act == "status":
+                                            result = _init.stats()
+                                        elif _act == "enable":
+                                            result = _init.write_settings({"enabled": True})
+                                        elif _act == "disable":
+                                            result = _init.write_settings({"enabled": False})
+                                        elif _act == "configure":
+                                            result = _init.write_settings(fc.args.get("config", {}))
+                                        else:
+                                            result = {"ok": False, "error": "Unknown initiative_control action"}
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
                                 elif fc.name == "manage_plugins":
                                     action = fc.args.get("action", "list").lower()
                                     try:
@@ -2850,6 +2909,7 @@ class AudioLoop:
                     tg.create_task(self.autonomy_loop())
                     tg.create_task(self.proactive_loop())
                     tg.create_task(self.compact_memory())
+                    tg.create_task(self.initiative_loop())
                     tg.create_task(self._send_live_video())
 
                     # Handle Startup vs Reconnect Logic

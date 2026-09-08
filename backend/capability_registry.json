@@ -145,6 +145,7 @@
     "manage_snapshots",
     "critic_loop",
     "manage_goals",
+    "initiative_control",
     "build_creative_tool",
     "build_custom_tool",
     "build_enterprise_tool",

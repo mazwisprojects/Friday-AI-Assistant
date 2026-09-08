@@ -78,6 +78,16 @@ kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
 
 DEFAULT_SETTINGS = {
+    "initiative": {
+        "enabled": True,
+        "interval_minutes": 20,
+        "quiet_start": 23,
+        "quiet_end": 8,
+        "max_daily_actions": 6,
+        "goal_nudge_hours": 4,
+        "approval_reminder_hours": 2,
+        "user_idle_minutes": 3,
+    },
     "provider_routing": {
         "voice_vision": "Gemini Live",
         "text_reasoning": "Gemini",
@@ -1501,6 +1511,13 @@ async def update_settings(sid, data):
         SETTINGS["system_alerts_enabled"] = bool(data["system_alerts_enabled"])
         if audio_loop:
             audio_loop.system_monitor.configure(alerts_enabled=SETTINGS["system_alerts_enabled"])
+
+    if "initiative" in data and isinstance(data["initiative"], dict):
+        try:
+            from actions import initiative as _initiative_mod
+            SETTINGS["initiative"] = _initiative_mod.write_settings(data["initiative"]).get("config", SETTINGS.get("initiative", {}))
+        except Exception as exc:
+            print(f"[SERVER] Initiative settings update failed: {exc}")
 
     if "quiet_mode" in data:
         SETTINGS["quiet_mode"] = bool(data["quiet_mode"])
