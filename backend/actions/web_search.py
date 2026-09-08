@@ -19,14 +19,14 @@ API_CONFIG_PATH = BASE_DIR / "config" / "api_keys.json"
 
 
 def _gemini_search(query: str) -> str:
-    from google import genai
+    import model_router
 
-    client   = genai.Client(api_key=get_api_key())
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=query,
+    response = model_router.generate_response(
+        query, tier="flash",
         config={"tools": [{"google_search": {}}]},
     )
+    if not response.ok:
+        raise RuntimeError("All Gemini models failed for search: %s" % response.attempts)
 
     text = ""
     for part in response.candidates[0].content.parts:
@@ -122,12 +122,15 @@ def _gemini_headlines(n: int = 5) -> tuple[list[str], str]:
     import re
     from google import genai
 
-    client = genai.Client(api_key=get_api_key())
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
-        contents=f"Current world news: {n} headlines. Numbered list, titles only.",
+    import model_router
+
+    response = model_router.generate_response(
+        f"Current world news: {n} headlines. Numbered list, titles only.",
+        tier="flash",
         config={"tools": [{"google_search": {}}]},
     )
+    if not response.ok:
+        raise RuntimeError("All Gemini models failed for news: %s" % response.attempts)
 
     raw = ""
     for part in response.candidates[0].content.parts:

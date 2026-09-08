@@ -167,10 +167,15 @@ def _summarize_with_gemini(transcript: str, video_url: str) -> str:
     from google.genai import types
 
     _client = _genai.Client(api_key=get_api_key())
+    try:
+        import model_router
+        _live_model = model_router.pick("flash", preferred="gemini-3.6-flash")
+    except Exception:
+        _live_model = "gemini-3.6-flash"
     max_chars = 80000
     truncated = transcript[:max_chars] + ("..." if len(transcript) > max_chars else "")
     response  = _client.models.generate_content(
-        model="gemini-3.6-flash",
+        model=_live_model,
         contents=f"Please summarize this YouTube video transcript:\n\n{truncated}",
         config=types.GenerateContentConfig(
             system_instruction=(

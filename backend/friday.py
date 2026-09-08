@@ -110,10 +110,24 @@ client = genai.Client(http_options={"api_version": "v1beta"}, api_key=os.getenv(
 
 
 def get_text_model(model: str = FACT_GEMINI_MODEL):
-    """Return Claude for text reasoning when configured, with Gemini fallback."""
+    """Return Claude for text reasoning when configured, with fallback-chain Gemini."""
     class GeminiTextModel:
         def generate_content(self, contents):
-            return client.models.generate_content(model=model, contents=contents)
+            try:
+                return client.models.generate_content(model=model, contents=contents)
+            except Exception as exc:
+                try:
+                    import model_router
+                    model_router.record_failure(model, str(exc))
+                    alt = model_router.pick("flash", preferred=model)
+                    if alt and alt != model:
+                        result = client.models.generate_content(model=alt, contents=contents)
+                        model_router.record_success(alt)
+                        print(f"[FRIDAY] [MODEL FALLBACK] {model} -> {alt}")
+                        return result
+                except Exception:
+                    pass
+                raise
 
     return get_text_provider(lambda: GeminiTextModel(), model=model)
 
@@ -581,6 +595,71 @@ class AudioLoop:
             except Exception as exc:
                 print(f"[FRIDAY] Initiative loop error: {exc}")
                 await asyncio.sleep(120)
+
+    async def maintenance_loop(self):
+        """Operating hours: periodic off-machine backups + a nightly ops cycle (tool audit,
+        model health check, ops digest). Wakes every 10 minutes, acts only when due."""
+        print("[FRIDAY] Maintenance loop started.")
+        last_nightly = ""
+        while True:
+            try:
+                await asyncio.sleep(600)
+                from actions import sync_engine
+                res = sync_engine.auto_backup()
+                if res.get("backed_up"):
+                    await self.notifications.notify("ops", "State backed up off-machine", res.get("archive", ""))
+                hour = time.localtime().tm_hour
+                today = time.strftime("%Y-%m-%d")
+                if 3 <= hour < 5 and last_nightly != today:
+                    last_nightly = today
+                    await self._run_nightly_ops()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(f"[FRIDAY] Maintenance loop error: {exc}")
+                await asyncio.sleep(300)
+
+    async def _run_nightly_ops(self):
+        """The nightly workload: audit every custom tool, check model health, back up, digest."""
+        started = time.time()
+        try:
+            from actions import ops_journal, sync_engine
+            import model_router
+            tools_ok, tools_failed = [], []
+            try:
+                reg_path = Path(os.path.dirname(os.path.abspath(__file__))) / "custom_tools.json"
+                names = list(json.loads(reg_path.read_text(encoding="utf-8")).keys())
+            except Exception:
+                names = []
+            for name in names:
+                try:
+                    res = self.tool_builder.test(name)
+                    ok = bool(res.get("ok", True)) if isinstance(res, dict) else True
+                    (tools_ok if ok else tools_failed).append(name)
+                except Exception:
+                    tools_failed.append(name)
+            backup = sync_engine.backup_now("nightly")
+            model_health = model_router.status()
+            active_goals = 0
+            try:
+                from actions import goal_engine
+                active_goals = goal_engine.tick().get("count", 0)
+            except Exception:
+                pass
+            report = {"tools_ok": tools_ok, "tools_failed": tools_failed, "backup": backup,
+                      "models": model_health, "active_goals": active_goals,
+                      "duration_s": round(time.time() - started, 1)}
+            result = ops_journal.log_nightly(report)
+            await self.notifications.notify("ops", "Nightly ops complete", result.get("headline", "done"))
+            print(f"[FRIDAY] [MAINT] {result.get('headline')}")
+        except Exception as exc:
+            print(f"[FRIDAY] Nightly ops failed: {exc}")
+            try:
+                from actions import ops_journal
+                ops_journal.log_entry("nightly_ops", "failed", str(exc),
+                                      duration_s=round(time.time() - started, 1))
+            except Exception:
+                pass
 
     async def compact_memory(self):
         """Periodically summarize older conversations into derived startup context."""
@@ -1265,7 +1344,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "semantic_search", "manage_snapshots", "critic_loop", "manage_goals", "initiative_control", "self_modify"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "semantic_search", "manage_snapshots", "critic_loop", "manage_goals", "initiative_control", "model_router", "manage_sync", "ops_journal", "self_modify"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -2623,6 +2702,40 @@ class AudioLoop:
                                         result = {"ok": False, "error": str(exc)}
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
 
+                                elif fc.name == "model_router":
+                                    try:
+                                        import model_router as _mr
+                                        _act = fc.args.get("action", "status")
+                                        if _act == "status":
+                                            result = _mr.status()
+                                        elif _act == "test":
+                                            result = _mr.test_models(fc.args.get("tier", "flash"))
+                                        elif _act == "configure":
+                                            result = _mr.configure(fc.args.get("tier", "flash"), fc.args.get("models", []))
+                                        elif _act == "pick":
+                                            result = {"ok": True, "model": _mr.pick(fc.args.get("tier", "flash"), fc.args.get("preferred"))}
+                                        else:
+                                            result = {"ok": False, "error": "Unknown model_router action"}
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "manage_sync":
+                                    try:
+                                        from actions import sync_engine as _se
+                                        result = _se.manage_sync(fc.args)
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "ops_journal":
+                                    try:
+                                        from actions import ops_journal as _oj
+                                        result = _oj.ops_tool(fc.args)
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
                                 elif fc.name == "manage_plugins":
                                     action = fc.args.get("action", "list").lower()
                                     try:
@@ -2910,6 +3023,7 @@ class AudioLoop:
                     tg.create_task(self.proactive_loop())
                     tg.create_task(self.compact_memory())
                     tg.create_task(self.initiative_loop())
+                    tg.create_task(self.maintenance_loop())
                     tg.create_task(self._send_live_video())
 
                     # Handle Startup vs Reconnect Logic
@@ -2964,6 +3078,11 @@ class AudioLoop:
 
                     # Reset retry delay on successful connection
                     retry_delay = 1
+                    try:
+                        import model_router
+                        model_router.record_success(MODEL)
+                    except Exception:
+                        pass
                     
                     # Wait until stop event, or until the session task group exits (which happens on error)
                     # Actually, the TaskGroup context manager will exit if any tasks fail/cancel.
@@ -2991,7 +3110,19 @@ class AudioLoop:
                         traceback.print_exception(type(nested_error), nested_error, nested_error.__traceback__)
                 else:
                     traceback.print_exception(type(e), e, e.__traceback__)
-                
+
+                # Model fallback: if the live model 404'd/died, rotate to the next healthy candidate
+                try:
+                    import model_router
+                    model_router.record_failure(MODEL, str(e))
+                    if model_router.is_model_error(str(e)):
+                        _new_model = model_router.rotate(MODEL, "live")
+                        if _new_model and _new_model != MODEL:
+                            globals()["MODEL"] = _new_model
+                            print(f"[FRIDAY] [MODEL FALLBACK] Live model switched to {_new_model}")
+                except Exception as route_exc:
+                    print(f"[FRIDAY DEBUG] [MODEL ROUTER] {route_exc}")
+
                 # Notify user of connection error
                 try:
                     if hasattr(self, 'session') and self.session:
