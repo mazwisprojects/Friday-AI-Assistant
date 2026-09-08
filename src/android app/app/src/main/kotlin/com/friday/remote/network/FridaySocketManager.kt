@@ -32,7 +32,7 @@ class FridaySocketManager @Inject constructor(
     private val securityManager: SecurityManager,
     private val context: Context
 ) {
-    enum ConnectionState { CONNECTED, DISCONNECTED, CONNECTING, ERROR }
+    enum class ConnectionState { CONNECTED, DISCONNECTED, CONNECTING, ERROR }
 
     data class FridayMessage(
         val text: String,
@@ -59,10 +59,12 @@ class FridaySocketManager @Inject constructor(
 
     interface AudioSink { fun onAudioData(bytes: List<Int>) }
 
+    private data class QueuedEvent(val event: String, val data: JSONObject)
+
     private var socket: Socket? = null
     private var monitorJob: Job? = null
     private var audioSink: AudioSink? = null
-    private val _outbox = ArrayList<Pair<String, JSONObject>>()
+    private val _outbox = ArrayList<QueuedEvent>()
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
@@ -134,7 +136,7 @@ class FridaySocketManager @Inject constructor(
         if (socket?.connected() == true) {
             rawEmit(event, data)
         } else {
-            synchronized(_outbox) { _outbox.add(Pair(event, data)) }
+            synchronized(_outbox) { _outbox.add(QueuedEvent(event, data)) }
         }
     }
 
@@ -284,7 +286,7 @@ class FridaySocketManager @Inject constructor(
             _outbox.clear()
             copy
         }
-        for ((event, data) in pending) rawEmit(event, data)
+        for (queued in pending) rawEmit(queued.event, queued.data)
     }
 
     private fun requestSystemMonitor() {
