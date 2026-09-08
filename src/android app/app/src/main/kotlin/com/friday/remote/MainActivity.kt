@@ -36,7 +36,7 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var securityManager: SecurityManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate()
+        super.onCreate(savedInstanceState)
         val serviceIntent = Intent(this, FridaySocketService::class.java)
         startForegroundService(serviceIntent)
 
