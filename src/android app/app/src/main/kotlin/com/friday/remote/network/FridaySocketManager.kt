@@ -21,11 +21,19 @@ import javax.inject.Singleton
  *
  * EMIT (app -> server):  user_input {text}, get_system_monitor {},
  *   approval_response {approval_id, approved}, start_audio {}, stop_audio {},
- *   upload_file_for_awareness {filename, data, mime_type, action}
+ *   upload_file_for_awareness {filename, data, mime_type, action},
+ *   get_task_cards {}, task_action {task_id, action},
+ *   get_autonomy_status {}, approve_autonomy_proposal {proposal_id},
+ *   resolve_security_finding {finding_path, finding_value},
+ *   get_reminders {}, add_reminder {text, remind_at}, delete_reminder {id}
  * RECEIVE (server -> app): status {msg}, transcription {sender, text},
  *   tool_confirmation_request {id, tool, args}, confirmation_expired {id, tool},
  *   approval_response_ack, dashboard_system_update / system_monitor_data,
- *   audio_data {data: [bytes]}, file_processing_result, file_download
+ *   audio_data {data: [bytes]}, file_processing_result, file_download,
+ *   task_cards [...], task_action_response {task_id, action, success},
+ *   autonomy_status {phases, proposals, security_findings, ...},
+ *   autonomy_approval_result {ok}, reminders_list [...],
+ *   unified_notification {category, title, message}
  */
 @Singleton
 class FridaySocketManager @Inject constructor(
@@ -81,6 +89,15 @@ class FridaySocketManager @Inject constructor(
     private val _sessionActive = MutableStateFlow(false)
     val sessionActive: StateFlow<Boolean> = _sessionActive
 
+    private val _tasks = MutableStateFlow<List<FridayTask>>(emptyList())
+    val tasks: StateFlow<List<FridayTask>> = _tasks
+
+    private val _autonomyStatus = MutableStateFlow<AutonomyStatus?>(null)
+    val autonomyStatus: StateFlow<AutonomyStatus?> = _autonomyStatus
+
+    private val _reminders = MutableStateFlow<List<FridayReminder>>(emptyList())
+    val reminders: StateFlow<List<FridayReminder>> = _reminders
+
     fun connect() {
         if (socket?.connected() == true) return
         _connectionState.value = ConnectionState.CONNECTING
@@ -95,6 +112,8 @@ class FridaySocketManager @Inject constructor(
                 _connectionState.value = ConnectionState.CONNECTED
                 flushOutbox()
                 requestSystemMonitor()
+                requestTaskCards()
+                requestAutonomyStatus()
                 startMonitor()
             }
             socket?.on(Socket.EVENT_DISCONNECT) {
@@ -116,6 +135,14 @@ class FridaySocketManager @Inject constructor(
             socket?.on("audio_data") { args -> onAudioData(args) }
             socket?.on("file_processing_result") { args -> onFileProcessingResult(args) }
             socket?.on("file_download") { args -> onFileDownload(args) }
+
+            // Tier 1 additions for full F.R.I.D.A.Y server contract
+            socket?.on("task_cards") { args -> onTaskCards(args) }
+            socket?.on("task_action_response") { args -> onTaskActionResponse(args) }
+            socket?.on("autonomy_status") { args -> onAutonomyStatus(args) }
+            socket?.on("autonomy_approval_result") { args -> onAutonomyApprovalResult(args) }
+            socket?.on("reminders_list") { args -> onRemindersList(args) }
+            socket?.on("unified_notification") { args -> onUnifiedNotification(args) }
 
             socket?.connect()
         } catch (e: URISyntaxException) {
@@ -151,6 +178,52 @@ class FridaySocketManager @Inject constructor(
             put("approved", approved)
         })
         _pendingApproval.value = null
+    }
+
+    // Tier 1: task, autonomy, reminder emit methods
+    fun requestTaskCards() {
+        emit("get_task_cards", JSONObject())
+    }
+
+    fun performTaskAction(taskId: String, action: String) {
+        emit("task_action", JSONObject().apply {
+            put("task_id", taskId)
+            put("action", action)
+        })
+    }
+
+    fun requestAutonomyStatus() {
+        emit("get_autonomy_status", JSONObject())
+    }
+
+    fun approveAutonomyProposal(proposalId: String) {
+        emit("approve_autonomy_proposal", JSONObject().apply {
+            put("proposal_id", proposalId)
+        })
+    }
+
+    fun resolveSecurityFinding(findingPath: String, findingValue: String) {
+        emit("resolve_security_finding", JSONObject().apply {
+            put("finding_path", findingPath)
+            put("finding_value", findingValue)
+        })
+    }
+
+    fun requestReminders() {
+        emit("get_reminders", JSONObject())
+    }
+
+    fun addReminder(text: String, remindAt: String) {
+        emit("add_reminder", JSONObject().apply {
+            put("text", text)
+            put("remind_at", remindAt)
+        })
+    }
+
+    fun deleteReminder(id: String) {
+        emit("delete_reminder", JSONObject().apply {
+            put("id", id)
+        })
     }
 
     fun toggleAudioSession() {
@@ -270,8 +343,145 @@ class FridaySocketManager @Inject constructor(
         if (args.isEmpty) return
         val data = args[0] as JSONObject
         val name = data.optString("name", data.optString("filename", "file"))
-        addMessage("File received from Friday: $name", false, true)
-        // TODO: decode base64 payload to context.filesDir once the server payload shape is pinned.
+        val payload = data.optString("data", data.optString("payload", ""))
+        val mime = data.optString("mime_type", "application/octet-stream")
+        if (payload.isNotEmpty()) {
+            try {
+                val bytes = android.util.Base64.decode(payload, android.util.Base64.DEFAULT)
+                val file = java.io.File(context.filesDir, name)
+                file.writeBytes(bytes)
+                addMessage("Saved file from Friday: ${file.name} (${mime})", false, true)
+            } catch (e: Exception) {
+                addMessage("File received but failed to save: ${e.message}", false, true)
+            }
+        } else {
+            addMessage("File received from Friday: $name", false, true)
+        }
+    }
+
+    // ----- Tier 1 handler methods -----
+
+    private fun onTaskCards(args: Array<Any?>) {
+        if (args.isEmpty) return
+        try {
+            val arr = (args[0] as JSONObject).getJSONArray("task_cards")
+            val list = ArrayList<FridayTask>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(FridayTask(
+                    id = obj.optString("id", ""),
+                    title = obj.optString("title", ""),
+                    due = obj.optString("due", ""),
+                    priority = obj.optString("priority", "normal"),
+                    project = obj.optString("project", ""),
+                    status = obj.optString("status", "open")
+                ))
+            }
+            _tasks.value = list
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onTaskActionResponse(args: Array<Any?>) {
+        if (args.isEmpty) return
+        val data = args[0] as JSONObject
+        val taskId = data.optString("task_id", "")
+        val action = data.optString("action", "")
+        val success = data.optBoolean("success", false)
+        val msg = if (success) "Task \"$taskId\" $action successful." else "Task \"$taskId\" $action failed."
+        addMessage(msg, false, true)
+        requestTaskCards()
+    }
+
+    private fun onAutonomyStatus(args: Array<Any?>) {
+        if (args.isEmpty) return
+        val data = args[0] as JSONObject
+        try {
+            val phases = mutableMapOf<String, String>()
+            val phasesObj = data.optJSONObject("phases")
+            if (phasesObj != null) {
+                val keys = phasesObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    phases[key] = phasesObj.getString(key)
+                }
+            }
+            val proposals = parseProposals(data.optJSONArray("proposals"))
+            val securityFindings = parseSecurityFindings(data.optJSONArray("security_findings"))
+            val error = data.optString("error", "")
+            _autonomyStatus.value = AutonomyStatus(
+                phases = phases,
+                proposals = proposals,
+                securityFindings = securityFindings,
+                error = error
+            )
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun parseProposals(arr: org.json.JSONArray?): List<AutonomyProposal> {
+        if (arr == null) return emptyList()
+        val list = ArrayList<AutonomyProposal>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            list.add(AutonomyProposal(
+                id = obj.optString("id", ""),
+                name = obj.optString("name", ""),
+                kind = obj.optString("kind", ""),
+                reason = obj.optString("reason", ""),
+                priority = obj.optString("priority", "normal"),
+                status = obj.optString("status", "pending_review")
+            ))
+        }
+        return list
+    }
+
+    private fun parseSecurityFindings(arr: org.json.JSONArray?): List<SecurityFinding> {
+        if (arr == null) return emptyList()
+        val list = ArrayList<SecurityFinding>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.getJSONObject(i)
+            list.add(SecurityFinding(
+                path = obj.optString("path", ""),
+                value = obj.optString("value", "")
+            ))
+        }
+        return list
+    }
+
+    private fun onAutonomyApprovalResult(args: Array<Any?>) {
+        if (args.isEmpty) return
+        val data = args[0] as JSONObject
+        val ok = data.optBoolean("ok", !data.has("error"))
+        val msg = if (ok) "Approval applied." else "Approval failed: ${data.optString("error", "unknown")}"
+        addMessage(msg, false, true)
+        requestAutonomyStatus()
+    }
+
+    private fun onRemindersList(args: Array<Any?>) {
+        if (args.isEmpty) return
+        try {
+            val arr = (args[0] as JSONObject).getJSONArray("reminders")
+            val list = ArrayList<FridayReminder>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(FridayReminder(
+                    id = obj.optString("id", ""),
+                    text = obj.optString("text", ""),
+                    at = obj.optString("at", obj.optString("remind_at", ""))
+                ))
+            }
+            _reminders.value = list
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onUnifiedNotification(args: Array<Any?>) {
+        if (args.isEmpty) return
+        val data = args[0] as JSONObject
+        val category = data.optString("category", "general")
+        val title = data.optString("title", "")
+        val message = data.optString("message", "")
+        if (title.isNotEmpty() || message.isNotEmpty()) {
+            addMessage("[${category}] ${if (title.isNotEmpty()) title else message}", false, true)
+        }
     }
 
     // ----- helpers -----
