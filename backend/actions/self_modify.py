@@ -50,8 +50,14 @@ def edit_source(name: str, old_text: str, new_text: str) -> dict:
         compile(new_code, str(path), "exec")
     except SyntaxError as e:
         return {"ok": False, "error": f"Syntax error in replacement: {e}"}
+    snapshot = None
+    try:
+        from actions import time_guard
+        snapshot = time_guard.guard(str(path), "edit_source")
+    except Exception:
+        pass
     path.write_text(new_code, encoding="utf-8")
-    return {"ok": True, "name": name, "message": f"Edited {name}"}
+    return {"ok": True, "name": name, "message": f"Edited {name}", "snapshot": snapshot}
 
 
 def read_source(name: str) -> dict:
@@ -82,8 +88,14 @@ def replace_function(name: str, func_name: str, new_body: str) -> dict:
         compile(new_code, str(path), "exec")
     except SyntaxError as e:
         return {"ok": False, "error": f"Syntax error: {e}"}
+    snapshot = None
+    try:
+        from actions import time_guard
+        snapshot = time_guard.guard(str(path), "replace_function")
+    except Exception:
+        pass
     path.write_text(new_code, encoding="utf-8")
-    return {"ok": True, "name": name, "func": func_name, "message": "Function replaced"}
+    return {"ok": True, "name": name, "func": func_name, "message": "Function replaced", "snapshot": snapshot}
 
 
 def patch_config(name: str, key: str, value) -> dict:
@@ -103,8 +115,14 @@ def patch_config(name: str, key: str, value) -> dict:
         d = d[k]
     old_value = d.get(keys[-1])
     d[keys[-1]] = value
+    snapshot = None
+    try:
+        from actions import time_guard
+        snapshot = time_guard.guard(str(path), "patch_config")
+    except Exception:
+        pass
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return {"ok": True, "config": name, "key": key, "old": old_value, "new": value}
+    return {"ok": True, "config": name, "key": key, "old": old_value, "new": value, "snapshot": snapshot}
 
 
 def update_memory(query: str, new_value) -> dict:
@@ -147,6 +165,12 @@ def add_import(name: str, import_statement: str) -> dict:
         compile(new_code, str(path), "exec")
     except SyntaxError as e:
         return {"ok": False, "error": f"Syntax error: {e}"}
+    snapshot = None
+    try:
+        from actions import time_guard
+        snapshot = time_guard.guard(str(path), "add_import")
+    except Exception:
+        pass
     path.write_text(new_code, encoding="utf-8")
-    return {"ok": True, "message": f"Added import to {name}"}
+    return {"ok": True, "message": f"Added import to {name}", "snapshot": snapshot}
 

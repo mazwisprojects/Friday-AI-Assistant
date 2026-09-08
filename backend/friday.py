@@ -1224,7 +1224,7 @@ class AudioLoop:
                         print("The tool was called")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
-                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "self_modify"]:
+                            if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "semantic_search", "manage_snapshots", "critic_loop", "manage_goals", "self_modify"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
@@ -2484,6 +2484,86 @@ class AudioLoop:
                                     result_str = json.dumps(self.agent_builder.test(fc.args.get("name", "")), ensure_ascii=False)
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
 
+                                elif fc.name == "semantic_search":
+                                    try:
+                                        from actions import semantic_memory as _sem
+                                        _act = fc.args.get("action", "search")
+                                        if _act == "remember":
+                                            result = _sem.remember(fc.args.get("text", ""), fc.args.get("kind", "fact"), fc.args.get("source", "friday"))
+                                        elif _act == "search":
+                                            result = _sem.search(fc.args.get("query", ""), int(fc.args.get("top_k", 5)), fc.args.get("kind"))
+                                        elif _act == "forget":
+                                            result = _sem.forget(fc.args.get("id", ""))
+                                        elif _act == "stats":
+                                            result = _sem.stats()
+                                        else:
+                                            result = {"ok": False, "error": "Unknown semantic_search action"}
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "manage_snapshots":
+                                    try:
+                                        from actions import time_guard as _tg
+                                        _act = fc.args.get("action", "list")
+                                        if _act == "list":
+                                            result = _tg.list_snapshots()
+                                        elif _act == "restore":
+                                            result = _tg.restore(fc.args.get("snapshot_id", ""))
+                                        elif _act == "undo_last":
+                                            result = _tg.undo_last()
+                                        elif _act == "guard":
+                                            result = {"ok": True, "snapshot": _tg.guard(fc.args.get("path", ""), fc.args.get("label", "manual"))}
+                                        else:
+                                            result = {"ok": False, "error": "Unknown manage_snapshots action"}
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "critic_loop":
+                                    try:
+                                        from actions import self_critic as _sc
+                                        _act = fc.args.get("action", "run_check")
+                                        if _act == "run_check":
+                                            result = _sc.run_check(fc.args.get("name", "task"), fc.args.get("code", ""), fc.args.get("language", "python"), fc.args.get("expects", []), int(fc.args.get("timeout", 25)))
+                                        elif _act == "record":
+                                            result = _sc.record(fc.args.get("name", "task"), fc.args.get("note", ""), fc.args.get("status", "info"))
+                                        elif _act == "history":
+                                            result = _sc.history(fc.args.get("name", "task"))
+                                        elif _act == "reset":
+                                            result = _sc.reset(fc.args.get("name", "task"))
+                                        else:
+                                            result = {"ok": False, "error": "Unknown critic_loop action"}
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
+                                elif fc.name == "manage_goals":
+                                    try:
+                                        from actions import goal_engine as _ge
+                                        _act = fc.args.get("action", "list")
+                                        if _act == "create":
+                                            result = _ge.create_goal(fc.args.get("title", ""), fc.args.get("description", ""), fc.args.get("milestones", []), fc.args.get("due"))
+                                        elif _act == "list":
+                                            result = _ge.list_goals(fc.args.get("status", "active"))
+                                        elif _act == "milestone":
+                                            result = _ge.update_milestone(fc.args.get("goal_id", ""), int(fc.args.get("index", 0)), bool(fc.args.get("done", True)))
+                                        elif _act == "journal":
+                                            result = _ge.journal(fc.args.get("goal_id", ""), fc.args.get("entry", ""))
+                                        elif _act == "status":
+                                            result = _ge.set_status(fc.args.get("goal_id", ""), fc.args.get("status", "paused"))
+                                        elif _act == "tick":
+                                            result = _ge.tick(float(fc.args.get("stale_hours", 24)))
+                                        elif _act == "context":
+                                            result = {"ok": True, "context": _ge.context()}
+                                        elif _act == "stats":
+                                            result = _ge.stats()
+                                        else:
+                                            result = {"ok": False, "error": "Unknown manage_goals action"}
+                                    except Exception as exc:
+                                        result = {"ok": False, "error": str(exc)}
+                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False, default=str)}))
+
                                 elif fc.name == "manage_plugins":
                                     action = fc.args.get("action", "list").lower()
                                     try:
@@ -2776,6 +2856,13 @@ class AudioLoop:
                     if not is_reconnect:
                         # Load global long-term memory (survives server restarts, not project-scoped)
                         compact_context = self.memory_manager.get_compact_context(recent_limit=20)
+                        try:
+                            from actions import goal_engine as _goal_engine
+                            _goal_ctx = _goal_engine.context()
+                            if _goal_ctx:
+                                compact_context += "\n" + _goal_ctx
+                        except Exception:
+                            pass
                         if compact_context != "Compact long-term memory:\n":
                             print("[FRIDAY DEBUG] [STARTUP] Loading compact long-term memory and recent conversation...")
                             memory_msg = "System Notification: Load this compact long-term memory silently and use it when relevant:\n\n" + compact_context
@@ -2798,6 +2885,13 @@ class AudioLoop:
                         # fall out of context after any disconnect/reconnect cycle.
                         print(f"[FRIDAY DEBUG] [RECONNECT] Fetching compact long-term memory and recent chat history to restore context...")
                         compact_context = self.memory_manager.get_compact_context(recent_limit=10)
+                        try:
+                            from actions import goal_engine as _goal_engine
+                            _goal_ctx = _goal_engine.context()
+                            if _goal_ctx:
+                                compact_context += "\n" + _goal_ctx
+                        except Exception:
+                            pass
 
                         context_msg = "System Notification: Connection was lost and just re-established. Load this compact long-term memory silently and use it when relevant, then resume the conversation seamlessly:\n\n"
                         if compact_context != "Compact long-term memory:\n":

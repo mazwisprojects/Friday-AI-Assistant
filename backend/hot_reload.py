@@ -132,8 +132,14 @@ class CapabilityEngine:
             compile(code, str(module_path), "exec")
         except SyntaxError as e:
             return {"ok": False, "error": f"Syntax error: {e}"}
+        snapshot = None
+        try:
+            from actions import time_guard
+            snapshot = time_guard.guard(str(module_path), "write_action") if module_path.exists() else None
+        except Exception:
+            snapshot = None
         module_path.write_text(f'"""Auto-generated action module: {action_name}."""\n\n' + code.rstrip() + "\n", encoding="utf-8")
-        return {"ok": True, "module": action_name, "path": str(module_path)}
+        return {"ok": True, "module": action_name, "path": str(module_path), "snapshot": snapshot}
 
     def _log(self, action, data):
         with self._log_lock:

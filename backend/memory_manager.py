@@ -150,6 +150,13 @@ class MemoryManager:
             # Machine-readable index for later search/retrieval
             self._append_jsonl(self.index_file, entry)
 
+        # Semantic index: every logged message becomes vector-searchable (best-effort, buffered).
+        try:
+            from actions import semantic_memory as _sem
+            _sem.ingest_chat(sender, text, project)
+        except Exception:
+            pass
+
     @staticmethod
     def _normalize_confidence(value) -> float:
         try:
