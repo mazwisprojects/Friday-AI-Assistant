@@ -3070,9 +3070,16 @@ async def clear_recording(sid):
         await sio.emit("status", {"msg": f"Clear failed: {e}"}, room=sid)
 
 if __name__ == "__main__":
+    # Bind host is configurable so Friday can be reached remotely:
+    #   - Default "0.0.0.0": reachable over LAN / Tailscale (phone app connects to
+    #     http://<tailscale-ip>:8000). Safe because you are only exposing it on the
+    #     private Tailscale mesh, not the public internet.
+    #   - Set FRIDAY_HOST=127.0.0.1 to go back to loopback-only (Electron desktop).
+    import os as _os
+    _host = _os.getenv("FRIDAY_HOST", "0.0.0.0")
     uvicorn.run(
         "server:app_socketio", 
-        host="127.0.0.1", 
+        host=_host, 
         port=8000, 
         reload=False, # Reload enabled causes spawn of worker which might miss the event loop policy patch
         loop="asyncio",

@@ -125,6 +125,16 @@ graph TB
 ```
 
 The frontend connects to `http://localhost:8000` through Socket.IO. Electron starts the Python backend and loads the Vite renderer. The Electron launcher prefers the `FRIDAY_PYTHON` environment variable, then the active Conda environment, `%USERPROFILE%\.conda\envs\friday\python.exe`, and finally `python`.
+### Remote access (phone / away from home)
+
+The backend now binds `0.0.0.0` by default (set `FRIDAY_HOST=127.0.0.1` for loopback-only). To manage Friday from the Android app or web UI while away:
+
+1. Install **Tailscale** on this PC and on your phone (login with the same account).
+2. Run `tailscale ip -4` on the PC and note the `100.x.y.z` Tailscale address.
+3. The Android app -> **Settings** -> Server URL = `http://<100.x.y.z>:8000` -> **Save & Reconnect**.
+4. Optional: change `src/App.jsx`'s `io('http://localhost:8000')` to the Tailscale URL if you also want the web UI remotely (and add that origin to `allowed_origins` in `backend/server.py`).
+
+Tailscale is a private mesh - port 8000 is only reachable by your own devices, never the public internet.
 
 ## Security & Reliability
 
