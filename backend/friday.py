@@ -153,13 +153,35 @@ agent_dispatcher_module.dispatcher.set_context(AgentContext(
 ))
 tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
 
+# --- Cognitive Core wiring: persistent identity injected into every session ---
+def _cognitive_system_directive() -> str:
+    """Build the persistent-identity / cognitive directive prepended to the system prompt."""
+    try:
+        from cognition.identity import FridayIdentity
+        identity = FridayIdentity()
+        identity.load_identity()
+        self_model = identity.get_self_model()
+        traits = ", ".join(self_model.get("personality", {}).get("traits", []) or ["witty", "loyal", "proactive", "protective"])
+        return (
+            "COGNITIVE DIRECTIVES (persistent identity): "
+            f"Core personality traits: {traits}. "
+            "You maintain a continuous sense of self across sessions. "
+            "Reason step-by-step about complex problems before answering. "
+            "Anticipate needs and threats proactively rather than only reacting. "
+            "Adapt your tone to the user's emotional state: reassuring when anxious, calm when frustrated, brief and precise in emergencies. "
+            "Before risky actions, briefly state predicted outcomes and risks. "
+        )
+    except Exception:
+        return ""
+
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
     # We switch these from [] to {} to enable them with default settings
     output_audio_transcription={}, 
     input_audio_transcription={},
-    system_instruction="Your name is Friday, an advanced AI assistant. "
+    system_instruction=_cognitive_system_directive() +
+        "Your name is Friday, an advanced AI assistant. "
         "You have a witty and charming personality. "
         "Your creator is Sinegugu, and you address him as 'Sir'. "
         "Keep creator identity separate from the user's personal identity: a statement such as 'I am your creator' does not provide the user's name. Never infer the user's name from a public figure, a report, a job title, or a role statement. Only use a name when the user explicitly says 'my name is', 'call me', or 'I am called'. If stored identity facts conflict, state that the identity is uncertain and ask for confirmation rather than guessing. "
@@ -235,6 +257,15 @@ class AudioLoop:
         # Track last transcription text to calculate deltas (Gemini sends cumulative text)
         self._last_input_transcription = ""
         self._last_output_transcription = ""
+
+        # Cognitive core (AGI brain) — lazily initialized, never blocks startup
+        self.cognition = None
+        try:
+            from cognition.core import FridayCognition
+            self.cognition = FridayCognition(workspace_root=str(ROOT_DIR))
+            print("[FRIDAY] [COGNITION] Cognitive core attached to AudioLoop.")
+        except Exception as e:
+            print(f"[FRIDAY] [COGNITION] Init failed (brain disabled this session): {e}")
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -505,10 +536,60 @@ class AudioLoop:
             self.project_manager.log_chat(sender, text)
             self.memory_manager.append_message(sender, text, project=self.project_manager.current_project)
             self.spawn_background_task(self.extract_important_facts(sender, text))
+            # Wire the cognitive core into every completed turn (never blocks the audio loop)
+            self.spawn_background_task(self._cognitive_turn(sender, text))
             self.chat_buffer = {"sender": None, "text": ""}
         # Reset transcription tracking for new turn
         self._last_input_transcription = ""
         self._last_output_transcription = ""
+
+    async def _cognitive_turn(self, sender: str, text: str):
+        """Run the cognitive core over a completed chat turn.
+
+        User turns: assessed for situation/urgency/emotion; if critical or emotionally
+        intense, a directive is injected into the live session so Friday adapts tone.
+        Friday turns: fed to the learning engine and knowledge graph so the brain grows.
+        """
+        if not self.cognition or not text.strip():
+            return
+        try:
+            from cognition.core import CognitiveContext
+            from cognition.learning_engine import Interaction
+
+            if sender == "User":
+                ctx = CognitiveContext(
+                    user_input=text,
+                    user_id="sir",
+                    metadata={"source": "voice", "project": self.project_manager.current_project},
+                )
+                response = await self.cognition.process(ctx)
+                urgency = getattr(response.situation, "urgency", "normal")
+                emotion = getattr(response.emotion, "primary", "neutral")
+                intensity = float(getattr(response.emotion, "intensity", 0.0) or 0.0)
+                print(f"[FRIDAY] [COGNITION] Turn assessed: intent={getattr(response.situation, 'deep_intent', '?')} urgency={urgency} emotion={emotion}")
+                if (urgency in ("high", "critical") or intensity >= 0.7) and self.session:
+                    directive = (
+                        "System Notification: Cognitive assessment of the user's last message — "
+                        f"urgency: {urgency}; emotional state: {emotion} (intensity {intensity:.1f}). "
+                        "Adapt your tone accordingly: brief and precise if urgent, reassuring if anxious, "
+                        "calm if frustrated. Do not mention this assessment."
+                    )
+                    await self.session.send(input=directive, end_of_turn=True)
+            else:
+                # Friday's own turn: reinforce learning + record in the knowledge graph
+                await self.cognition.learn(Interaction(
+                    description=f"Friday replied: {text[:150]}",
+                    success=True,
+                    actions=[],
+                    outcome="completed",
+                ))
+                await self.cognition.add_knowledge({
+                    "text": text[:500],
+                    "type": "conversation",
+                    "sender": "friday",
+                })
+        except Exception as e:
+            print(f"[FRIDAY] [COGNITION] Turn processing failed: {e}")
 
     def notify_activity(self):
         """Resets the proactive-speech silence timer; call this whenever the user sends text input."""
@@ -582,6 +663,26 @@ class AudioLoop:
                 plan = initiative_engine.evaluate(active_goals, pending, cfg, user_idle, now)
                 if not plan.get("act"):
                     continue
+                # Cognitive proactive scan — threats/needs/opportunities feed the initiative plan
+                cognitive_actions = []
+                if self.cognition:
+                    try:
+                        cognitive_actions = await self.cognition.proactive_scan()
+                    except Exception as exc:
+                        print(f"[FRIDAY] [COGNITION] Proactive scan failed: {exc}")
+                for caction in cognitive_actions:
+                    prompt = (
+                        "System Notification: Your cognitive core flagged the following proactively. "
+                        f"Type: {caction.type}; urgency: {caction.urgency}. "
+                        f"Details: {caction.description}. Recommended action: {caction.recommended_action}. "
+                        "Act on it or inform Sir as appropriate."
+                    )
+                    try:
+                        await self.session.send(input=prompt, end_of_turn=True)
+                        await self.notifications.notify("cognition", "Friday anticipated a need", caction.description)
+                        print(f"[FRIDAY] [COGNITION] Proactive: {caction.type} — {caction.description}")
+                    except Exception as exc:
+                        print(f"[FRIDAY] [COGNITION] Proactive action failed: {exc}")
                 for ini in plan["initiatives"]:
                     try:
                         initiative_engine.record_action(ini["kind"], ini.get("goal_id"))
@@ -744,6 +845,13 @@ class AudioLoop:
         self.stop_event.set()
         self._cancel_event.set()
         self.cancel_pending_confirmations()
+        # Cognitive core: persist identity/learning state so Friday's self survives restarts
+        if self.cognition:
+            try:
+                self.cognition.identity.save_identity()
+                print("[FRIDAY] [COGNITION] Identity saved on shutdown.")
+            except Exception as e:
+                print(f"[FRIDAY] [COGNITION] Identity save failed: {e}")
 
     def spawn_background_task(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -2996,6 +3104,15 @@ class AudioLoop:
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
+
+                    # Cognitive core: initialize (loads persistent identity) per session
+                    if self.cognition:
+                        try:
+                            await self.cognition.initialize()
+                            self_model = self.cognition.identity.get_self_model()
+                            print(f"[FRIDAY] [COGNITION] Brain online. Experiences: {self_model.get('experience_count', 0)}, Skills: {self_model.get('skill_count', 0)}, Beliefs: {self_model.get('belief_count', 0)}")
+                        except Exception as e:
+                            print(f"[FRIDAY] [COGNITION] Session init failed: {e}")
 
                     if self._pending_runtime_notifications:
                         pending_events = self._pending_runtime_notifications

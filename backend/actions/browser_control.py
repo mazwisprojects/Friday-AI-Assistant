@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import logging
 import os
 import platform
 import shutil
@@ -19,6 +20,9 @@ from playwright.async_api import (
     Playwright,
     TimeoutError as PlaywrightTimeout,
 )
+
+logger = logging.getLogger(__name__)
+
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
 
 def _normalize_url(url: str) -> str:
@@ -104,12 +108,12 @@ def _real_profile_dir(browser: str) -> str:
 
     for p in candidates:
         if p.exists():
-            print(f"[Browser] ✅ Real profile found for {browser}: {p}")
+            logger.info("Real profile found for %s: %s", browser, p)
             return str(p)
 
     fallback = home / ".jarvis_profiles" / browser
     fallback.mkdir(parents=True, exist_ok=True)
-    print(f"[Browser] ⚠️  Real profile not found for {browser}, using: {fallback}")
+    logger.warning("Real profile not found for %s, using: %s", browser, fallback)
     return str(fallback)
 
 def _firefox_profile_dir() -> Optional[str]:
@@ -147,7 +151,7 @@ def _firefox_profile_dir() -> Optional[str]:
         default_path = str(base / p) if is_rel else p
 
     if default_path and Path(default_path).exists():
-        print(f"[Browser] Firefox real profile: {default_path}")
+        logger.info("Firefox real profile: %s", default_path)
         return default_path
     return None
 
@@ -164,7 +168,7 @@ def _find_opera_windows() -> Optional[str]:
     ]
     for p in candidates:
         if p.exists():
-            print(f"[Browser] Opera found at: {p}")
+            logger.info("Opera found at: %s", p)
             return str(p)
 
     try:
@@ -183,7 +187,7 @@ def _find_opera_windows() -> Optional[str]:
                     winreg.CloseKey(k)
                     exe = val.strip().strip('"').split('"')[0].split(" --")[0].strip()
                     if exe and Path(exe).exists():
-                        print(f"[Browser] Opera found via registry: {exe}")
+                        logger.info("Opera found via registry: %s", exe)
                         return exe
                 except Exception:
                     continue
@@ -276,7 +280,7 @@ def _resolve_browser(name: str) -> dict | None:
     if spec.get("special") == "opera_windows":
         exe = _find_opera_windows()
         if not exe:
-            print(f"[Browser] ⚠️  Opera executable not found on Windows.")
+            logger.warning("Opera executable not found on Windows")
         return {"engine": engine, "exe": exe, "channel": channel}
 
     for b in bins:
@@ -397,7 +401,7 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
                     subprocess.run(cmd, check=True, timeout=10)
                     return f"Opened in {name}: {url}" if url else f"Opened {name}."
                 except Exception as e:
-                    print(f"[Browser] 'open -a {app}' failed ({e}), trying binary…")
+                    logger.warning("'open -a %s' failed (%s), trying binary", app, e)
 
         spec = _resolve_browser(name)
         exe  = spec.get("exe") if spec else None
@@ -414,8 +418,8 @@ def _open_native(url: str, browser_name: Optional[str]) -> str:
                 )
                 return f"Opened in {name}: {url}" if url else f"Opened {name}."
             except Exception as e:
-                print(f"[Browser] Native launch failed for {name}: {e}")
-        print(f"[Browser] '{name}' not found — falling back to default browser.")
+                logger.warning("Native launch failed for %s: %s", name, e)
+        logger.info("'%s' not found — falling back to default browser", name)
 
     if not url:
         return "Could not find a browser to open."

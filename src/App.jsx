@@ -1,9 +1,7 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, lazy, Suspense } from 'react';
 import io from 'socket.io-client';
 
 import TopAudioBar from './components/TopAudioBar';
-import CadWindow from './components/CadWindow';
-import BrowserWindow from './components/BrowserWindow';
 import ChatModule from './components/ChatModule';
 import ToolsModule from './components/ToolsModule';
 import { CalendarDays, CloudSun, FolderOpen, Mail, MapPinned, Mic, MicOff, Search, Settings, ShoppingBag, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock, Youtube } from 'lucide-react';
@@ -11,34 +9,41 @@ import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 // MemoryPrompt removed - memory is now actively saved to project
 import ConfirmationPopup from './components/ConfirmationPopup';
 import AuthLock from './components/AuthLock';
-import KasaWindow from './components/KasaWindow';
-import PrinterWindow from './components/PrinterWindow';
-import SettingsWindow from './components/SettingsWindow';
-import CodeWindow from './components/CodeWindow';
-import ControlWindow from './components/ControlWindow';
-import DesktopWindow from './components/DesktopWindow';
-import FileManagerWindow from './components/FileManagerWindow';
-import FlightWindow from './components/FlightWindow';
-import GameWindow from './components/GameWindow';
-import MessageWindow from './components/MessageWindow';
-import MemoryWindow from './components/MemoryWindow';
-import ProcessWindow from './components/ProcessWindow';
-import ProactiveWindow from './components/ProactiveWindow';
-import ReminderWindow from './components/ReminderWindow';
-import RoutinesWindow from './components/RoutinesWindow';
-import SearchWindow from './components/SearchWindow';
-import SystemMonitorWindow from './components/SystemMonitorWindow';
-import WeatherWindow from './components/WeatherWindow';
-import YouTubeWindow from './components/YouTubeWindow';
-import ContactsWindow from './components/ContactsWindow';
-import OpenClawWindow from './components/OpenClawWindow';
+import ErrorBoundary from './components/ErrorBoundary';
+import LoadingSpinner from './components/LoadingSpinner';
+import { SocketProvider } from './contexts/SocketContext';
+import { useUIState } from './hooks/useUIState';
+import { useDeviceState } from './hooks/useDeviceState';
+import { useSystemState } from './hooks/useSystemState';
 
-const socket = io('http://localhost:8000');
-window.socket = socket;
+// Lazy load components
+const CadWindow = lazy(() => import('./components/CadWindow'));
+const BrowserWindow = lazy(() => import('./components/BrowserWindow'));
+const KasaWindow = lazy(() => import('./components/KasaWindow'));
+const PrinterWindow = lazy(() => import('./components/PrinterWindow'));
+const SettingsWindow = lazy(() => import('./components/SettingsWindow'));
+const CodeWindow = lazy(() => import('./components/CodeWindow'));
+const ControlWindow = lazy(() => import('./components/ControlWindow'));
+const DesktopWindow = lazy(() => import('./components/DesktopWindow'));
+const FileManagerWindow = lazy(() => import('./components/FileManagerWindow'));
+const FlightWindow = lazy(() => import('./components/FlightWindow'));
+const GameWindow = lazy(() => import('./components/GameWindow'));
+const MessageWindow = lazy(() => import('./components/MessageWindow'));
+const MemoryWindow = lazy(() => import('./components/MemoryWindow'));
+const ProcessWindow = lazy(() => import('./components/ProcessWindow'));
+const ProactiveWindow = lazy(() => import('./components/ProactiveWindow'));
+const ReminderWindow = lazy(() => import('./components/ReminderWindow'));
+const RoutinesWindow = lazy(() => import('./components/RoutinesWindow'));
+const SearchWindow = lazy(() => import('./components/SearchWindow'));
+const SystemMonitorWindow = lazy(() => import('./components/SystemMonitorWindow'));
+const WeatherWindow = lazy(() => import('./components/WeatherWindow'));
+const YouTubeWindow = lazy(() => import('./components/YouTubeWindow'));
+const ContactsWindow = lazy(() => import('./components/ContactsWindow'));
+const OpenClawWindow = lazy(() => import('./components/OpenClawWindow'));
+
+const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:8000');
 
 function App() {
-    const [status, setStatus] = useState('Disconnected');
-    const [socketConnected, setSocketConnected] = useState(socket.connected); // Track socket connection reactively
     // Auth State
     const [isAuthenticated, setIsAuthenticated] = useState(() => {
         // Optimistically assume authenticated if face auth is NOT enabled
@@ -58,16 +63,16 @@ function App() {
         return localStorage.getItem('face_auth_enabled') === 'true';
     });
 
+    // Custom hooks for state management
+    const systemState = useSystemState();
+    const deviceState = useDeviceState();
+    const uiState = useUIState();
 
-    const [isConnected, setIsConnected] = useState(true); // Power state DEFAULT ON
-    const [isMuted, setIsMuted] = useState(true); // Mic state DEFAULT MUTED
-    const [isVideoOn, setIsVideoOn] = useState(false); // Video state
     const [messages, setMessages] = useState([]);
     const [notificationCount, setNotificationCount] = useState(0);
     const [weatherCard, setWeatherCard] = useState(null);
     const [googleServiceCard, setGoogleServiceCard] = useState(null);
     const [tasks, setTasks] = useState([]);
-    const [providerRouting, setProviderRouting] = useState({ text_reasoning: 'Gemini', coding: 'OpenClaw', documents: 'OpenClaw' });
     const [inputValue, setInputValue] = useState('');
     const [cadData, setCadData] = useState(null);
     const [cadThoughts, setCadThoughts] = useState(''); // Streaming AI thoughts
@@ -77,31 +82,6 @@ function App() {
     const [confirmationRequest, setConfirmationRequest] = useState(null); // { id, tool, args }
     const [actionPlan, setActionPlan] = useState(null);
     const [kasaDevices, setKasaDevices] = useState([]);
-    const [showKasaWindow, setShowKasaWindow] = useState(false);
-    const [showPrinterWindow, setShowPrinterWindow] = useState(false);
-    const [showCadWindow, setShowCadWindow] = useState(false);
-    const [showBrowserWindow, setShowBrowserWindow] = useState(false);
-    const [actionWindows, setActionWindows] = useState({
-        code: false,
-        control: false,
-        desktop: false,
-        files: false,
-        flights: false,
-        games: false,
-        messages: false,
-        memory: false,
-        openclaw: false,
-        processes: false,
-        proactive: false,
-        reminders: false,
-        routines: false,
-        search: false,
-        system: false,
-        weather: false,
-        youtube: false,
-        contacts: false
-    });
-    const [showActionMenu, setShowActionMenu] = useState(false);
 
     // Printing workflow status (for top toolbar display)
     const [slicingStatus, setSlicingStatus] = useState({ active: false, percent: 0, message: '' });
@@ -115,27 +95,40 @@ function App() {
     const [micAudioData, setMicAudioData] = useState(new Array(32).fill(0));
     const [fps, setFps] = useState(0);
 
-    // Device states - microphones, speakers, webcams
-    const [micDevices, setMicDevices] = useState([]);
-    const [speakerDevices, setSpeakerDevices] = useState([]);
-    const [webcamDevices, setWebcamDevices] = useState([]);
-
-    // Selected device IDs - restored from localStorage
-    const [selectedMicId, setSelectedMicId] = useState(() => localStorage.getItem('selectedMicId') || '');
-    const [selectedSpeakerId, setSelectedSpeakerId] = useState(() => localStorage.getItem('selectedSpeakerId') || '');
-    const [selectedWebcamId, setSelectedWebcamId] = useState(() => localStorage.getItem('selectedWebcamId') || '');
-    const [showSettings, setShowSettings] = useState(false);
-    const [currentProject, setCurrentProject] = useState('default');
-    const [systemStats, setSystemStats] = useState({
-        cpu_percent: 0,
-        ram_percent: 0,
-        cpu_temp_c: null,
-        gpu_percent: null,
-        uptime: '0h 0m'
-    });
-
     // Modular Mode State
     const [isModularMode, setIsModularMode] = useState(false);
+    
+    // Destructure from custom hooks
+    const { 
+        status, setStatus, 
+        isConnected, setIsConnected, 
+        isMuted, setIsMuted, 
+        isVideoOn, setIsVideoOn,
+        socketConnected, setSocketConnected,
+        currentProject, setCurrentProject,
+        systemStats, setSystemStats,
+        providerRouting, setProviderRouting
+    } = systemState;
+
+    const {
+        micDevices, setMicDevices,
+        speakerDevices, setSpeakerDevices,
+        webcamDevices, setWebcamDevices,
+        selectedMicId, setSelectedMicId,
+        selectedSpeakerId, setSelectedSpeakerId,
+        selectedWebcamId, setSelectedWebcamId
+    } = deviceState;
+
+    const {
+        showSettings, setShowSettings,
+        showKasaWindow, setShowKasaWindow,
+        showPrinterWindow, setShowPrinterWindow,
+        showCadWindow, setShowCadWindow,
+        showBrowserWindow, setShowBrowserWindow,
+        showActionMenu, setShowActionMenu,
+        actionWindows, setActionWindows,
+        toggleActionWindow
+    } = uiState;
     const [elementPositions, setElementPositions] = useState({
         video: { x: 40, y: 80 }, // Initial positions (approximate)
         chat: { x: window.innerWidth / 2, y: window.innerHeight / 2 + 100 },
@@ -1451,12 +1444,20 @@ function App() {
         setShowPrinterWindow(!showPrinterWindow);
     };
 
+    const toggleCadWindow = () => {
+        setShowCadWindow(!showCadWindow);
+    };
+
+    const toggleBrowserWindow = () => {
+        setShowBrowserWindow(!showBrowserWindow);
+    };
+
     const openExternalApp = (url) => {
         window.open(url, '_blank', 'noopener,noreferrer');
     };
 
-    const toggleActionWindow = (id) => {
-        setActionWindows(prev => ({ ...prev, [id]: !prev[id] }));
+    const toggleActionWindowWithPosition = (id) => {
+        toggleActionWindow(id);
         if (!actionWindows[id]) {
             const size = elementSizes[id] || { w: 400, h: 300 };
             const margin = 12;
@@ -1500,7 +1501,8 @@ function App() {
 
 
     return (
-        <div className="hud-shell h-screen w-screen bg-black text-cyan-100 font-mono overflow-hidden flex flex-col relative selection:bg-cyan-900 selection:text-white">
+        <SocketProvider socket={socket}>
+            <div className="hud-shell h-screen w-screen bg-black text-cyan-100 font-mono overflow-hidden flex flex-col relative selection:bg-cyan-900 selection:text-white">
 
             {/* --- PREMIUM UI LAYER --- */}
 
@@ -1514,11 +1516,13 @@ function App() {
              */}
 
             {isLockScreenVisible && (
-                <AuthLock
-                    socket={socket}
-                    onAuthenticated={() => setIsAuthenticated(true)}
-                    onAnimationComplete={() => setIsLockScreenVisible(false)}
-                />
+                <ErrorBoundary>
+                    <AuthLock
+                        socket={socket}
+                        onAuthenticated={() => setIsAuthenticated(true)}
+                        onAnimationComplete={() => setIsLockScreenVisible(false)}
+                    />
+                </ErrorBoundary>
             )}
 
             {/* --- PREMIUM UI LAYER --- */}
@@ -1713,101 +1717,113 @@ function App() {
 
                 {/* Settings Modal - Moved outside Video so it shows independently */}
                 {showSettings && (
-                    <SettingsWindow
-                        socket={socket}
-                        micDevices={micDevices}
-                        speakerDevices={speakerDevices}
-                        webcamDevices={webcamDevices}
-                        selectedMicId={selectedMicId}
-                        setSelectedMicId={setSelectedMicId}
-                        selectedSpeakerId={selectedSpeakerId}
-                        setSelectedSpeakerId={setSelectedSpeakerId}
-                        selectedWebcamId={selectedWebcamId}
-                        setSelectedWebcamId={setSelectedWebcamId}
-                        cursorSensitivity={cursorSensitivity}
-                        setCursorSensitivity={setCursorSensitivity}
-                        isCameraFlipped={isCameraFlipped}
-                        setIsCameraFlipped={setIsCameraFlipped}
-                        handleFileUpload={handleFileUpload}
-                        onClose={() => setShowSettings(false)}
-                    />
+                    <ErrorBoundary>
+                        <Suspense fallback={<LoadingSpinner />}>
+                            <SettingsWindow
+                                socket={socket}
+                                micDevices={micDevices}
+                                speakerDevices={speakerDevices}
+                                webcamDevices={webcamDevices}
+                                selectedMicId={selectedMicId}
+                                setSelectedMicId={setSelectedMicId}
+                                selectedSpeakerId={selectedSpeakerId}
+                                setSelectedSpeakerId={setSelectedSpeakerId}
+                                selectedWebcamId={selectedWebcamId}
+                                setSelectedWebcamId={setSelectedWebcamId}
+                                cursorSensitivity={cursorSensitivity}
+                                setCursorSensitivity={setCursorSensitivity}
+                                isCameraFlipped={isCameraFlipped}
+                                setIsCameraFlipped={setIsCameraFlipped}
+                                handleFileUpload={handleFileUpload}
+                                onClose={() => setShowSettings(false)}
+                            />
+                        </Suspense>
+                    </ErrorBoundary>
                 )}
 
                 {/* CAD Window Overlay - Moved outside of Video so it can show independently */}
                 {showCadWindow && (
-                    <div
-                        id="cad"
-                        className={`absolute flex flex-col transition-all duration-200 
-                        backdrop-blur-xl bg-black/40 border border-white/10 shadow-2xl overflow-hidden rounded-2xl
-                        ${activeDragElement === 'cad' ? 'ring-2 ring-green-500 bg-green-500/10' : ''}
-                    `}
-                        style={{
-                            left: elementPositions.cad?.x || window.innerWidth / 2,
-                            top: elementPositions.cad?.y || window.innerHeight / 2,
-                            transform: 'translate(-50%, -50%)',
-                            width: `${elementSizes.cad.w}px`,
-                            height: `${elementSizes.cad.h}px`,
-                            pointerEvents: 'auto',
-                            zIndex: getZIndex('cad')
-                        }}
-                        onMouseDown={(e) => handleMouseDown(e, 'cad')}
-                    >
-                        {/* Drag Handle Header */}
-                        <div
-                            data-drag-handle
-                            className="h-8 bg-gray-900/80 border-b border-cyan-500/20 flex items-center justify-between px-3 cursor-grab active:cursor-grabbing shrink-0"
-                        >
-                            <span className="text-xs font-bold tracking-widest text-cyan-500/70">CAD PROTOTYPE</span>
-                            <button
-                                onClick={() => setShowCadWindow(false)}
-                                className="text-gray-400 hover:text-red-400 hover:bg-red-500/20 p-1 rounded transition-colors"
+                    <ErrorBoundary>
+                        <Suspense fallback={<LoadingSpinner />}>
+                            <div
+                                id="cad"
+                                className={`absolute flex flex-col transition-all duration-200 
+                                backdrop-blur-xl bg-black/40 border border-white/10 shadow-2xl overflow-hidden rounded-2xl
+                                ${activeDragElement === 'cad' ? 'ring-2 ring-green-500 bg-green-500/10' : ''}
+                            `}
+                                style={{
+                                    left: elementPositions.cad?.x || window.innerWidth / 2,
+                                    top: elementPositions.cad?.y || window.innerHeight / 2,
+                                    transform: 'translate(-50%, -50%)',
+                                    width: `${elementSizes.cad.w}px`,
+                                    height: `${elementSizes.cad.h}px`,
+                                    pointerEvents: 'auto',
+                                    zIndex: getZIndex('cad')
+                                }}
+                                onMouseDown={(e) => handleMouseDown(e, 'cad')}
                             >
-                                ✕
-                            </button>
-                        </div>
-                        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
-                        <div className="relative z-20 flex-1 min-h-0">
-                            <CadWindow
-                                data={cadData}
-                                thoughts={cadThoughts}
-                                retryInfo={cadRetryInfo}
-                                onClose={() => setShowCadWindow(false)}
-                                socket={socket}
-                            />
-                        </div>
-                    </div>
+                                {/* Drag Handle Header */}
+                                <div
+                                    data-drag-handle
+                                    className="h-8 bg-gray-900/80 border-b border-cyan-500/20 flex items-center justify-between px-3 cursor-grab active:cursor-grabbing shrink-0"
+                                >
+                                    <span className="text-xs font-bold tracking-widest text-cyan-500/70">CAD PROTOTYPE</span>
+                                    <button
+                                        onClick={() => setShowCadWindow(false)}
+                                        className="text-gray-400 hover:text-red-400 hover:bg-red-500/20 p-1 rounded transition-colors"
+                                    >
+                                        ✕
+                                    </button>
+                                </div>
+                                <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
+                                <div className="relative z-20 flex-1 min-h-0">
+                                    <CadWindow
+                                        data={cadData}
+                                        thoughts={cadThoughts}
+                                        retryInfo={cadRetryInfo}
+                                        onClose={() => setShowCadWindow(false)}
+                                        socket={socket}
+                                    />
+                                </div>
+                            </div>
+                        </Suspense>
+                    </ErrorBoundary>
                 )}
 
 
                 {/* Browser Window Overlay */}
                 {showBrowserWindow && (
-                    <div
-                        id="browser"
-                        className={`absolute flex flex-col transition-all duration-200 
-                        backdrop-blur-xl bg-black/40 border border-white/10 shadow-2xl overflow-hidden rounded-lg
-                        ${activeDragElement === 'browser' ? 'ring-2 ring-green-500 bg-green-500/10' : ''}
-                    `}
-                        style={{
-                            left: elementPositions.browser?.x || window.innerWidth / 2 - 200,
-                            top: elementPositions.browser?.y || window.innerHeight / 2,
-                            transform: 'translate(-50%, -50%)',
-                            width: `${elementSizes.browser.w}px`,
-                            height: `${elementSizes.browser.h}px`,
-                            pointerEvents: 'auto',
-                            zIndex: getZIndex('browser')
-                        }}
-                        onMouseDown={(e) => handleMouseDown(e, 'browser')}
-                    >
-                        <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
-                        <div className="relative z-20 w-full h-full">
-                            <BrowserWindow
-                                imageSrc={browserData.image}
-                                logs={browserData.logs}
-                                onClose={() => setShowBrowserWindow(false)}
-                                socket={socket}
-                            />
-                        </div>
-                    </div>
+                    <ErrorBoundary>
+                        <Suspense fallback={<LoadingSpinner />}>
+                            <div
+                                id="browser"
+                                className={`absolute flex flex-col transition-all duration-200 
+                                backdrop-blur-xl bg-black/40 border border-white/10 shadow-2xl overflow-hidden rounded-lg
+                                ${activeDragElement === 'browser' ? 'ring-2 ring-green-500 bg-green-500/10' : ''}
+                            `}
+                                style={{
+                                    left: elementPositions.browser?.x || window.innerWidth / 2 - 200,
+                                    top: elementPositions.browser?.y || window.innerHeight / 2,
+                                    transform: 'translate(-50%, -50%)',
+                                    width: `${elementSizes.browser.w}px`,
+                                    height: `${elementSizes.browser.h}px`,
+                                    pointerEvents: 'auto',
+                                    zIndex: getZIndex('browser')
+                                }}
+                                onMouseDown={(e) => handleMouseDown(e, 'browser')}
+                            >
+                                <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-10 pointer-events-none mix-blend-overlay z-10"></div>
+                                <div className="relative z-20 w-full h-full">
+                                    <BrowserWindow
+                                        imageSrc={browserData.image}
+                                        logs={browserData.logs}
+                                        onClose={() => setShowBrowserWindow(false)}
+                                        socket={socket}
+                                    />
+                                </div>
+                            </div>
+                        </Suspense>
+                    </ErrorBoundary>
                 )}
 
 
@@ -1817,7 +1833,7 @@ function App() {
                         {actionWindowDefinitions.map(({ id }) => (
                             <button
                                 key={id}
-                                onClick={() => toggleActionWindow(id)}
+                                onClick={() => toggleActionWindowWithPosition(id)}
                                 className={`rounded border px-3 py-2 text-left text-[10px] uppercase tracking-wider transition-colors ${actionWindows[id] ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200' : 'border-cyan-900/60 text-cyan-500 hover:border-cyan-500 hover:text-cyan-200'}`}
                             >
                                 {id === 'files' ? 'File Manager' : id}
@@ -1827,86 +1843,101 @@ function App() {
                 )}
 
                 {orderedActionWindowDefinitions.map(({ id, component: WindowComponent }) => actionWindows[id] && (
-                    <WindowComponent
-                        key={id}
-                        position={elementPositions[id]}
-                        onClose={() => toggleActionWindow(id)}
-                        onDrag={(event) => handleMouseDown(event, id)}
-                    />
+                    <ErrorBoundary key={id}>
+                        <Suspense fallback={<LoadingSpinner />}>
+                            <WindowComponent
+                                position={elementPositions[id]}
+                                onClose={() => toggleActionWindowWithPosition(id)}
+                                onDrag={(event) => handleMouseDown(event, id)}
+                            />
+                        </Suspense>
+                    </ErrorBoundary>
                 ))}
 
-                <ChatModule
-                    messages={messages}
-                    inputValue={inputValue}
-                    setInputValue={setInputValue}
-                    handleSend={handleSend}
-                    isModularMode={isModularMode}
-                    activeDragElement={activeDragElement}
-                    position={elementPositions.chat}
-                    width={elementSizes.chat.w}
-                    height={elementSizes.chat.h}
-                    onMouseDown={(e) => handleMouseDown(e, 'chat')}
-                    weatherCard={weatherCard}
-                    googleServiceCard={googleServiceCard}
-                    actionPlan={actionPlan}
-                    tasks={tasks}
-                />
+                <ErrorBoundary>
+                    <ChatModule
+                        messages={messages}
+                        inputValue={inputValue}
+                        setInputValue={setInputValue}
+                        handleSend={handleSend}
+                        isModularMode={isModularMode}
+                        activeDragElement={activeDragElement}
+                        position={elementPositions.chat}
+                        width={elementSizes.chat.w}
+                        height={elementSizes.chat.h}
+                        onMouseDown={(e) => handleMouseDown(e, 'chat')}
+                        weatherCard={weatherCard}
+                        googleServiceCard={googleServiceCard}
+                        actionPlan={actionPlan}
+                        tasks={tasks}
+                    />
+                </ErrorBoundary>
 
                 {/* Footer Controls / Tools Module */}
                 <div className="z-20 flex justify-center pb-10 pointer-events-none">
-                    <ToolsModule
-                        isConnected={isConnected}
-                        isMuted={isMuted}
-                        isVideoOn={isVideoOn}
-                        isHandTrackingEnabled={isHandTrackingEnabled}
-                        showSettings={showSettings}
-                        onTogglePower={togglePower}
-                        onToggleMute={toggleMute}
-                        onToggleVideo={toggleVideo}
-                        onToggleSettings={() => setShowSettings(!showSettings)}
-                        onToggleHand={() => setIsHandTrackingEnabled(!isHandTrackingEnabled)}
-                        onToggleKasa={toggleKasaWindow}
-                        showKasaWindow={showKasaWindow}
-                        onTogglePrinter={togglePrinterWindow}
-                        showPrinterWindow={showPrinterWindow}
-                        onToggleCad={() => setShowCadWindow(!showCadWindow)}
-                        showCadWindow={showCadWindow}
-                        onToggleBrowser={() => setShowBrowserWindow(!showBrowserWindow)}
-                        showBrowserWindow={showBrowserWindow}
-                        onToggleActions={() => setShowActionMenu(prev => !prev)}
-                        showActionMenu={showActionMenu}
-                        activeDragElement={activeDragElement}
-                        position={elementPositions.tools}
-                        width={elementSizes.tools.w}
-                        onMouseDown={(e) => handleMouseDown(e, 'tools')}
-                    />
+                    <ErrorBoundary>
+                        <ToolsModule
+                            isConnected={isConnected}
+                            isMuted={isMuted}
+                            isVideoOn={isVideoOn}
+                            isHandTrackingEnabled={isHandTrackingEnabled}
+                            showSettings={showSettings}
+                            onTogglePower={togglePower}
+                            onToggleMute={toggleMute}
+                            onToggleVideo={toggleVideo}
+                            onToggleSettings={() => setShowSettings(!showSettings)}
+                            onToggleHand={() => setIsHandTrackingEnabled(!isHandTrackingEnabled)}
+                            onToggleKasa={toggleKasaWindow}
+                            showKasaWindow={showKasaWindow}
+                            onTogglePrinter={togglePrinterWindow}
+                            showPrinterWindow={showPrinterWindow}
+                            onToggleCad={toggleCadWindow}
+                            showCadWindow={showCadWindow}
+                            onToggleBrowser={toggleBrowserWindow}
+                            showBrowserWindow={showBrowserWindow}
+                            onToggleActions={() => setShowActionMenu(prev => !prev)}
+                            showActionMenu={showActionMenu}
+                            activeDragElement={activeDragElement}
+                            position={elementPositions.tools}
+                            width={elementSizes.tools.w}
+                            onMouseDown={(e) => handleMouseDown(e, 'tools')}
+                        />
+                    </ErrorBoundary>
                 </div>
 
                 {/* Kasa Window */}
                 {showKasaWindow && (
-                    <KasaWindow
-                        socket={socket}
-                        position={elementPositions.kasa}
-                        activeDragElement={activeDragElement}
-                        setActiveDragElement={setActiveDragElement}
-                        devices={kasaDevices}
-                        onClose={() => setShowKasaWindow(false)}
-                        onMouseDown={(e) => handleMouseDown(e, 'kasa')}
-                        zIndex={getZIndex('kasa')}
-                    />
+                    <ErrorBoundary>
+                        <Suspense fallback={<LoadingSpinner />}>
+                            <KasaWindow
+                                socket={socket}
+                                position={elementPositions.kasa}
+                                activeDragElement={activeDragElement}
+                                setActiveDragElement={setActiveDragElement}
+                                devices={kasaDevices}
+                                onClose={() => setShowKasaWindow(false)}
+                                onMouseDown={(e) => handleMouseDown(e, 'kasa')}
+                                zIndex={getZIndex('kasa')}
+                            />
+                        </Suspense>
+                    </ErrorBoundary>
                 )}
 
                 {/* Printer Window */}
                 {showPrinterWindow && (
-                    <PrinterWindow
-                        socket={socket}
-                        onClose={() => setShowPrinterWindow(false)}
-                        position={elementPositions.printer}
-                        onMouseDown={(e) => handleMouseDown(e, 'printer')}
-                        activeDragElement={activeDragElement}
-                        setActiveDragElement={setActiveDragElement}
-                        zIndex={getZIndex('printer')}
-                    />
+                    <ErrorBoundary>
+                        <Suspense fallback={<LoadingSpinner />}>
+                            <PrinterWindow
+                                socket={socket}
+                                onClose={() => setShowPrinterWindow(false)}
+                                position={elementPositions.printer}
+                                onMouseDown={(e) => handleMouseDown(e, 'printer')}
+                                activeDragElement={activeDragElement}
+                                setActiveDragElement={setActiveDragElement}
+                                zIndex={getZIndex('printer')}
+                            />
+                        </Suspense>
+                    </ErrorBoundary>
                 )}
 
                 {/* Memory Prompt removed - memory is now actively saved to project */}
@@ -1919,6 +1950,7 @@ function App() {
                 />
             </div>
         </div>
+        </SocketProvider>
     );
 }
 

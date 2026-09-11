@@ -8,16 +8,19 @@ Supported Printer Types:
 """
 
 import asyncio
-import os
-import subprocess
 import json
+import logging
+import os
 import platform
-from typing import Dict, List, Optional, Any
+import subprocess
 from dataclasses import dataclass, asdict
 from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import aiohttp
-from zeroconf import Zeroconf, ServiceBrowser, ServiceListener
+from zeroconf import ServiceBrowser, ServiceListener, Zeroconf
+
+logger = logging.getLogger(__name__)
 
 
 class PrinterType(Enum):
@@ -454,9 +457,9 @@ class PrinterAgent:
                             print(f"[PRINTER DEBUG] Page Title: {title}")
                         if "Server" in resp.headers:
                             print(f"[PRINTER DEBUG] Server Header: {resp.headers['Server']}")
-                except:
-                    pass
-                    
+                except Exception as e:
+                    print(f"[PRINTER DEBUG] Probe request failed: {e}")
+
         except Exception as e:
             print(f"[PRINTER] Probe error for {host}:{port}: {e}")
         
@@ -491,7 +494,8 @@ class PrinterAgent:
                             if "multipart/x-mixed-replace" in ctype or "image" in ctype:
                                 print(f"[PRINTER] Found Camera: {url}")
                                 return url
-                except:
+                except Exception as e:
+                    print(f"[PRINTER] Camera probe failed for {url}: {e}")
                     continue
         return None
     

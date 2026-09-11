@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Bot, CheckCircle2, Play, RefreshCw, X } from 'lucide-react';
+import { useSocket } from '../contexts/SocketContext';
 
 const EMPTY_AUTONOMY = { proposals: [], security_findings: [], phases: {} };
 const EMPTY_CONSOLE = { plugins: [], schedules: [], executions: [] };

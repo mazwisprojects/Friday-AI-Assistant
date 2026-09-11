@@ -2,6 +2,7 @@ package com.friday.remote.network
 
 import android.content.Context
 import com.friday.remote.security.SecurityManager
+import dagger.hilt.android.qualifiers.ApplicationContext
 import io.socket.client.IO
 import io.socket.client.Socket
 import kotlinx.coroutines.CoroutineScope
@@ -10,8 +11,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sleep
+import kotlinx.coroutines.delay
+import org.json.JSONArray
 import org.json.JSONObject
+
 import java.net.URISyntaxException
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -19,13 +22,23 @@ import javax.inject.Singleton
 /**
  * Socket.IO client aligned with the real F.R.I.D.A.Y server contract (backend/server.py).
  *
+ * RECONNECTION STRATEGY:
+ * - Exponential backoff: starts at 1s, doubles each attempt, max 30s
+ * - Infinite reconnection attempts (reconnectionAttempts = Int.MAX_VALUE)
+ * - Dual transport: WebSocket primary, HTTP polling fallback for restrictive mobile networks
+ * - On reconnect: re-requests all data (system monitor, tasks, autonomy, reminders, kasa, printers, Google, weather)
+ * - Offline-first outbox: events sent while disconnected are queued and replayed on reconnect
+ *
  * EMIT (app -> server):  user_input {text}, get_system_monitor {},
  *   approval_response {approval_id, approved}, start_audio {}, stop_audio {},
  *   upload_file_for_awareness {filename, data, mime_type, action},
  *   get_task_cards {}, task_action {task_id, action},
  *   get_autonomy_status {}, approve_autonomy_proposal {proposal_id},
  *   resolve_security_finding {finding_path, finding_value},
- *   get_reminders {}, add_reminder {text, remind_at}, delete_reminder {id}
+ *   get_reminders {}, add_reminder {text, remind_at}, delete_reminder {id},
+ *   get_kasa_devices {}, get_printers {}, get_google_account_status {},
+ *   get_weather {}, connect_google_account {}, disconnect_google_account {},
+ *   discover_kasa {}, control_light {device_id, action, brightness}
  * RECEIVE (server -> app): status {msg}, transcription {sender, text},
  *   tool_confirmation_request {id, tool, args}, confirmation_expired {id, tool},
  *   approval_response_ack, dashboard_system_update / system_monitor_data,
@@ -33,12 +46,16 @@ import javax.inject.Singleton
  *   task_cards [...], task_action_response {task_id, action, success},
  *   autonomy_status {phases, proposals, security_findings, ...},
  *   autonomy_approval_result {ok}, reminders_list [...],
- *   unified_notification {category, title, message}
+ *   unified_notification {category, title, message},
+ *   weather_data {location, temperature, ...}, kasa_devices [...],
+ *   printer_list [...], google_account_status {connected, ...},
+ *   system_alert {id, title, message, severity, timestamp},
+ *   cad_data {id, name, ...}, cad_status {status, progress, ...}
  */
 @Singleton
 class FridaySocketManager @Inject constructor(
     private val securityManager: SecurityManager,
-    private val context: Context
+    @ApplicationContext private val context: Context
 ) {
     enum class ConnectionState { CONNECTED, DISCONNECTED, CONNECTING, ERROR }
 
@@ -65,7 +82,137 @@ class FridaySocketManager @Inject constructor(
 
     data class ApprovalRequest(val id: String, val title: String, val message: String)
 
+    data class FridayTask(
+        val id: String,
+        val title: String,
+        val due: String,
+        val priority: String,
+        val project: String,
+        val status: String
+    )
+
+    data class AutonomyStatus(
+        val phases: Map<String, String>,
+        val proposals: List<AutonomyProposal>,
+        val securityFindings: List<SecurityFinding>,
+        val error: String
+    )
+
+    data class AutonomyProposal(
+        val id: String,
+        val name: String,
+        val kind: String,
+        val reason: String,
+        val priority: String,
+        val status: String
+    )
+
+    data class SecurityFinding(
+        val path: String,
+        val value: String
+    )
+
+    data class FridayReminder(
+        val id: String,
+        val text: String,
+        val at: String
+    )
+
+    data class ActionPlan(
+        val id: String,
+        val steps: List<ActionStep>
+    )
+
+    data class ActionStep(
+        val description: String,
+        val status: String
+    )
+
+    data class FridaySettings(
+        val faceAuthEnabled: Boolean = false,
+        val systemAlertsEnabled: Boolean = true,
+        val quietMode: Boolean = false,
+        val urgentOnly: Boolean = false,
+        val emergenciesOnly: Boolean = false,
+        val currentMode: String = "active",
+        val voiceVisionProvider: String = "Gemini Live",
+        val textReasoningProvider: String = "Gemini",
+        val codingProvider: String = "OpenClaw",
+        val toolPermissions: Map<String, Boolean> = emptyMap()
+    )
+
+    data class WeatherData(
+        val location: String,
+        val temperature: Int,
+        val feelsLike: Int,
+        val condition: String,
+        val humidity: Int,
+        val windSpeed: Int,
+        val cloudiness: Int,
+        val high: Int,
+        val low: Int,
+        val unit: String = "C"
+    )
+
+    data class GoogleServices(
+        val connected: Boolean,
+        val gmailEnabled: Boolean,
+        val calendarEnabled: Boolean,
+        val contactsEnabled: Boolean,
+        val driveEnabled: Boolean
+    )
+
+    data class KasaDevice(
+        val id: String,
+        val name: String,
+        val type: String,
+        val isOn: Boolean,
+        val brightness: Int
+    )
+
+    data class Printer(
+        val id: String,
+        val name: String,
+        val type: String,
+        val status: String,
+        val nozzleTemp: Int,
+        val targetNozzleTemp: Int,
+        val bedTemp: Int,
+        val targetBedTemp: Int,
+        val currentJob: PrintJob?
+    )
+
+    data class PrintJob(
+        val name: String,
+        val progress: Int,
+        val timeRemaining: String
+    )
+
+    data class SystemAlert(
+        val id: String,
+        val title: String,
+        val message: String,
+        val severity: String,
+        val timestamp: Long
+    )
+
+    data class CADData(
+        val id: String,
+        val name: String,
+        val description: String,
+        val format: String,
+        val vertices: Int,
+        val faces: Int
+    )
+
+    data class CADStatus(
+        val status: String,
+        val progress: Int,
+        val currentStep: String
+    )
+
     interface AudioSink { fun onAudioData(bytes: List<Int>) }
+
 
     private data class QueuedEvent(val event: String, val data: JSONObject)
 
@@ -98,30 +245,122 @@ class FridaySocketManager @Inject constructor(
     private val _reminders = MutableStateFlow<List<FridayReminder>>(emptyList())
     val reminders: StateFlow<List<FridayReminder>> = _reminders
 
+    private val _actionPlan = MutableStateFlow<ActionPlan?>(null)
+    val actionPlan: StateFlow<ActionPlan?> = _actionPlan
+
+    private val _settings = MutableStateFlow<FridaySettings?>(null)
+    val settings: StateFlow<FridaySettings?> = _settings
+
+    private val _weatherData = MutableStateFlow<WeatherData?>(null)
+    val weatherData: StateFlow<WeatherData?> = _weatherData
+
+    private val _googleServices = MutableStateFlow<GoogleServices?>(null)
+    val googleServices: StateFlow<GoogleServices?> = _googleServices
+
+    private val _kasaDevices = MutableStateFlow<List<KasaDevice>>(emptyList())
+    val kasaDevices: StateFlow<List<KasaDevice>> = _kasaDevices
+
+    private val _printers = MutableStateFlow<List<Printer>>(emptyList())
+    val printers: StateFlow<List<Printer>> = _printers
+
+    private val _systemAlerts = MutableStateFlow<List<SystemAlert>>(emptyList())
+    val systemAlerts: StateFlow<List<SystemAlert>> = _systemAlerts
+
+    private val _cadData = MutableStateFlow<CADData?>(null)
+    val cadData: StateFlow<CADData?> = _cadData
+
+    private val _cadStatus = MutableStateFlow<CADStatus?>(null)
+    val cadStatus: StateFlow<CADStatus?> = _cadStatus
+
     fun connect() {
-        if (socket?.connected() == true) return
+        android.util.Log.i("FridaySocket", "=== CONNECT() CALLED ===")
+        
+        if (socket?.connected() == true) {
+            android.util.Log.w("FridaySocket", "Already connected, skipping")
+            return
+        }
+        
         _connectionState.value = ConnectionState.CONNECTING
+        
         try {
+            val serverUrl = securityManager.getServerUrl()
+            android.util.Log.i("FridaySocket", "========================================")
+            android.util.Log.i("FridaySocket", "SERVER URL: $serverUrl")
+            android.util.Log.i("FridaySocket", "TLS: ${securityManager.isTlsEnabled()}")
+            android.util.Log.i("FridaySocket", "TOKEN: ${if (securityManager.getToken().isNotEmpty()) "[SET]" else "[EMPTY]"}")
+            android.util.Log.i("FridaySocket", "========================================")
+            
             val opts = IO.Options().apply {
                 forceNew = true
                 reconnection = true
+                reconnectionDelay = 1000
+                reconnectionDelayMax = 30000
+                reconnectionAttempts = Int.MAX_VALUE
+                timeout = 20000
+                transports = arrayOf("websocket", "polling")
             }
-            socket = IO.socket(securityManager.getServerUrl(), opts)
+            
+            android.util.Log.d("FridaySocket", "Creating IO.socket...")
+            socket = IO.socket(serverUrl, opts)
+            android.util.Log.d("FridaySocket", "Socket created: ${socket != null}")
 
             socket?.on(Socket.EVENT_CONNECT) {
+                android.util.Log.i("FridaySocket", "🎉 EVENT_CONNECT - Connected!")
                 _connectionState.value = ConnectionState.CONNECTED
                 flushOutbox()
                 requestSystemMonitor()
                 requestTaskCards()
                 requestAutonomyStatus()
+                requestReminders()
+                requestKasaDevices()
+                requestPrinters()
+                requestGoogleAccountStatus()
                 startMonitor()
             }
-            socket?.on(Socket.EVENT_DISCONNECT) {
+            
+            socket?.on(Socket.EVENT_DISCONNECT) { args ->
+                android.util.Log.w("FridaySocket", "⚠️ EVENT_DISCONNECT: ${args?.contentToString()}")
                 _connectionState.value = ConnectionState.DISCONNECTED
                 monitorJob?.cancel()
             }
-            socket?.on(Socket.EVENT_CONNECT_ERROR) {
+            
+            socket?.on(Socket.EVENT_CONNECT_ERROR) { args ->
+                android.util.Log.e("FridaySocket", "❌ EVENT_CONNECT_ERROR")
+                android.util.Log.e("FridaySocket", "Args: ${args?.contentToString()}")
+                android.util.Log.e("FridaySocket", "Error type: ${args?.firstOrNull()?.javaClass?.simpleName}")
+                if (args?.firstOrNull() is Exception) {
+                    val ex = args?.firstOrNull() as Exception
+                    android.util.Log.e("FridaySocket", "Message: ${ex.message}")
+                    android.util.Log.e("FridaySocket", "Cause: ${ex.cause?.message}")
+                }
                 _connectionState.value = ConnectionState.ERROR
+            }
+            
+            socket?.on("reconnect_attempt") { args ->
+                android.util.Log.d("FridaySocket", "🔄 Reconnect attempt #${args?.firstOrNull()}")
+                _connectionState.value = ConnectionState.CONNECTING
+            }
+            
+            socket?.on("reconnect") { args ->
+                android.util.Log.i("FridaySocket", "🎉 RECONNECT after ${args?.firstOrNull()} attempts")
+                _connectionState.value = ConnectionState.CONNECTED
+                flushOutbox()
+                requestSystemMonitor()
+                requestTaskCards()
+                requestAutonomyStatus()
+                requestReminders()
+                requestKasaDevices()
+                requestPrinters()
+                requestGoogleAccountStatus()
+                startMonitor()
+            }
+            
+            socket?.on("reconnect_error") { args ->
+                android.util.Log.e("FridaySocket", "❌ Reconnect error: ${args?.contentToString()}")
+            }
+            
+            socket?.on("reconnect_failed") {
+                android.util.Log.e("FridaySocket", "❌ RECONNECT FAILED")
             }
 
             // --- F.R.I.D.A.Y server contract ---
@@ -135,27 +374,80 @@ class FridaySocketManager @Inject constructor(
             socket?.on("audio_data") { args -> onAudioData(args) }
             socket?.on("file_processing_result") { args -> onFileProcessingResult(args) }
             socket?.on("file_download") { args -> onFileDownload(args) }
-
-            // Tier 1 additions for full F.R.I.D.A.Y server contract
             socket?.on("task_cards") { args -> onTaskCards(args) }
             socket?.on("task_action_response") { args -> onTaskActionResponse(args) }
             socket?.on("autonomy_status") { args -> onAutonomyStatus(args) }
             socket?.on("autonomy_approval_result") { args -> onAutonomyApprovalResult(args) }
             socket?.on("reminders_list") { args -> onRemindersList(args) }
             socket?.on("unified_notification") { args -> onUnifiedNotification(args) }
+            socket?.on("action_plan") { args -> onActionPlan(args) }
+            socket?.on("settings") { args -> onSettings(args) }
+            socket?.on("weather_data") { args -> onWeatherData(args) }
+            socket?.on("google_account_status") { args -> onGoogleAccountStatus(args) }
+            socket?.on("kasa_devices") { args -> onKasaDevices(args) }
+            socket?.on("printer_list") { args -> onPrinters(args) }
+            socket?.on("system_alert") { args -> onSystemAlert(args) }
+            socket?.on("cad_data") { args -> onCADData(args) }
+            socket?.on("cad_status") { args -> onCADStatus(args) }
 
             socket?.connect()
+            android.util.Log.i("FridaySocket", "🚀 socket.connect() called (async)")
+            
         } catch (e: URISyntaxException) {
+            android.util.Log.e("FridaySocket", "❌ URISyntaxException - Invalid URL!")
+            android.util.Log.e("FridaySocket", "URL: ${securityManager.getServerUrl()}")
+            android.util.Log.e("FridaySocket", "Message: ${e.message}")
+            e.printStackTrace()
+            _connectionState.value = ConnectionState.ERROR
+        } catch (e: IllegalArgumentException) {
+            android.util.Log.e("FridaySocket", "❌ IllegalArgumentException!")
+            android.util.Log.e("FridaySocket", "Message: ${e.message}")
+            e.printStackTrace()
             _connectionState.value = ConnectionState.ERROR
         } catch (e: Exception) {
+            android.util.Log.e("FridaySocket", "❌ EXCEPTION in connect()!")
+            android.util.Log.e("FridaySocket", "Type: ${e.javaClass.simpleName}")
+            android.util.Log.e("FridaySocket", "Message: ${e.message}")
+            android.util.Log.e("FridaySocket", "Cause: ${e.cause?.message}")
+            e.printStackTrace()
             _connectionState.value = ConnectionState.ERROR
         }
+        android.util.Log.i("FridaySocket", "=== connect() finished ===")
     }
 
     fun disconnect() {
         monitorJob?.cancel()
         socket?.disconnect()
         _connectionState.value = ConnectionState.DISCONNECTED
+    }
+
+    /**
+     * Disconnect and reconnect — used when server URL changes in Settings.
+     * This creates a fresh Socket.IO connection to the new server.
+     */
+    fun reconnect() {
+        disconnect()
+        // Small delay to allow socket cleanup before reconnecting
+        CoroutineScope(Dispatchers.IO).launch {
+            delay(500)
+            connect()
+        }
+    }
+
+    /**
+     * Request fresh data from server after reconnection.
+     * Call this when the app comes back to foreground to ensure all data is current.
+     */
+    fun refreshAll() {
+        if (_connectionState.value != ConnectionState.CONNECTED) return
+        requestSystemMonitor()
+        requestTaskCards()
+        requestAutonomyStatus()
+        requestReminders()
+        requestKasaDevices()
+        requestPrinters()
+        requestGoogleAccountStatus()
+        requestWeather()
     }
 
     /** Offline-first: queue while disconnected, replay on reconnect. */
@@ -226,6 +518,16 @@ class FridaySocketManager @Inject constructor(
         })
     }
 
+    fun uploadFile(fileName: String, fileData: ByteArray, mimeType: String, action: String = "process") {
+        val base64Data = android.util.Base64.encodeToString(fileData, android.util.Base64.NO_WRAP)
+        emit("upload_file_for_awareness", JSONObject().apply {
+            put("filename", fileName)
+            put("data", base64Data)
+            put("mime_type", mimeType)
+            put("action", action)
+        })
+    }
+
     fun toggleAudioSession() {
         if (_sessionActive.value) stopAudioSession() else startAudioSession()
     }
@@ -244,17 +546,85 @@ class FridaySocketManager @Inject constructor(
 
     fun setAudioSink(sink: AudioSink) { audioSink = sink }
 
+    fun requestSettings() {
+        emit("get_settings", JSONObject())
+    }
+
+    fun updateSettings(settings: Map<String, Any>) {
+        emit("update_settings", JSONObject(settings))
+    }
+
+    // Weather and Google Services
+    fun requestWeather() {
+        emit("get_weather", JSONObject())
+    }
+
+    fun requestKasaDevices() {
+        emit("get_kasa_devices", JSONObject())
+    }
+
+    fun requestPrinters() {
+        emit("get_printers", JSONObject())
+    }
+
+    fun requestGoogleAccountStatus() {
+        emit("get_google_account_status", JSONObject())
+    }
+
+    fun connectGoogleAccount() {
+        emit("connect_google_account", JSONObject())
+    }
+
+    fun disconnectGoogleAccount() {
+        emit("disconnect_google_account", JSONObject())
+    }
+
+    // Kasa and Printers
+    fun discoverKasaDevices() {
+        emit("discover_kasa", JSONObject())
+    }
+
+    fun controlKasaDevice(deviceId: String, action: String, value: Int = 0) {
+        emit("control_light", JSONObject().apply {
+            put("device_id", deviceId)
+            put("action", action)
+            if (value > 0) put("brightness", value)
+        })
+    }
+
+    fun discoverPrinters() {
+        emit("discover_printers", JSONObject())
+    }
+
+    // Alerts
+    fun clearAlerts() {
+        _systemAlerts.value = emptyList()
+    }
+
+    // CAD operations
+    fun downloadCAD(cadId: String) {
+        emit("download_cad", JSONObject().apply {
+            put("cad_id", cadId)
+        })
+    }
+
+    fun iterateCAD(cadId: String) {
+        emit("iterate_cad", JSONObject().apply {
+            put("cad_id", cadId)
+        })
+    }
+
     // ----- server -> app event handlers -----
 
     private fun onStatus(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val msg = data.optString("msg", data.optString("text", "System"))
         if (msg.isNotEmpty()) addMessage(msg, false, true)
     }
 
     private fun onTranscription(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val text = data.optString("text", "")
         if (text.isEmpty()) return
@@ -274,7 +644,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onToolConfirmation(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val id = data.optString("id", "")
         if (id.isEmpty()) return
@@ -292,7 +662,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onConfirmationExpired(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val id = data.optString("id", "")
         if (_pendingApproval.value?.id == id) _pendingApproval.value = null
@@ -301,13 +671,13 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onApprovalAck(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         addMessage(if (data.optBoolean("approved", false)) "Approved." else "Denied.", false, true)
     }
 
     private fun onSystemMetrics(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         _systemMetrics.value = SystemMetrics(
             cpuPercent = data.optDouble("cpu_percent", 0.0),
@@ -322,7 +692,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onAudioData(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         try {
             val arr = (args[0] as JSONObject).getJSONArray("data")
             val bytes = ArrayList<Int>(arr.length())
@@ -332,7 +702,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onFileProcessingResult(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val error = data.optString("error", "")
         val ok = data.optBoolean("ok", error.isEmpty())
@@ -340,7 +710,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onFileDownload(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val name = data.optString("name", data.optString("filename", "file"))
         val payload = data.optString("data", data.optString("payload", ""))
@@ -362,10 +732,11 @@ class FridaySocketManager @Inject constructor(
     // ----- Tier 1 handler methods -----
 
     private fun onTaskCards(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         try {
-            val arr = (args[0] as JSONObject).getJSONArray("task_cards")
-            val list = ArrayList<FridayTask>()
+            // Server emits task_cards directly as a JSONArray
+            val arr = args[0] as JSONArray
+            val list = ArrayList<FridayTask>(arr.length())
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 list.add(FridayTask(
@@ -382,7 +753,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onTaskActionResponse(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val taskId = data.optString("task_id", "")
         val action = data.optString("action", "")
@@ -393,7 +764,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onAutonomyStatus(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         try {
             val phases = mutableMapOf<String, String>()
@@ -401,7 +772,7 @@ class FridaySocketManager @Inject constructor(
             if (phasesObj != null) {
                 val keys = phasesObj.keys()
                 while (keys.hasNext()) {
-                    val key = keys.next()
+                    val key = keys.next() as String
                     phases[key] = phasesObj.getString(key)
                 }
             }
@@ -417,7 +788,8 @@ class FridaySocketManager @Inject constructor(
         } catch (e: Exception) { /* ignore malformed */ }
     }
 
-    private fun parseProposals(arr: org.json.JSONArray?): List<AutonomyProposal> {
+    private fun parseProposals(arr: JSONArray?): List<AutonomyProposal> {
+
         if (arr == null) return emptyList()
         val list = ArrayList<AutonomyProposal>()
         for (i in 0 until arr.length()) {
@@ -434,7 +806,8 @@ class FridaySocketManager @Inject constructor(
         return list
     }
 
-    private fun parseSecurityFindings(arr: org.json.JSONArray?): List<SecurityFinding> {
+    private fun parseSecurityFindings(arr: JSONArray?): List<SecurityFinding> {
+
         if (arr == null) return emptyList()
         val list = ArrayList<SecurityFinding>()
         for (i in 0 until arr.length()) {
@@ -448,7 +821,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onAutonomyApprovalResult(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val ok = data.optBoolean("ok", !data.has("error"))
         val msg = if (ok) "Approval applied." else "Approval failed: ${data.optString("error", "unknown")}"
@@ -457,10 +830,11 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onRemindersList(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         try {
-            val arr = (args[0] as JSONObject).getJSONArray("reminders")
-            val list = ArrayList<FridayReminder>()
+            // Server emits reminders_list directly as a JSONArray
+            val arr = args[0] as JSONArray
+            val list = ArrayList<FridayReminder>(arr.length())
             for (i in 0 until arr.length()) {
                 val obj = arr.getJSONObject(i)
                 list.add(FridayReminder(
@@ -474,7 +848,7 @@ class FridaySocketManager @Inject constructor(
     }
 
     private fun onUnifiedNotification(args: Array<Any?>) {
-        if (args.isEmpty) return
+        if (args.isEmpty()) return
         val data = args[0] as JSONObject
         val category = data.optString("category", "general")
         val title = data.optString("title", "")
@@ -482,6 +856,193 @@ class FridaySocketManager @Inject constructor(
         if (title.isNotEmpty() || message.isNotEmpty()) {
             addMessage("[${category}] ${if (title.isNotEmpty()) title else message}", false, true)
         }
+    }
+
+    private fun onActionPlan(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            val stepsArray = data.optJSONArray("steps")
+            val steps = ArrayList<ActionStep>()
+            if (stepsArray != null) {
+                for (i in 0 until stepsArray.length()) {
+                    val stepObj = stepsArray.getJSONObject(i)
+                    steps.add(ActionStep(
+                        description = stepObj.optString("description", ""),
+                        status = stepObj.optString("status", "pending")
+                    ))
+                }
+            }
+            _actionPlan.value = ActionPlan(
+                id = data.optString("id", ""),
+                steps = steps
+            )
+            
+            // Auto-hide if all steps are done/error/cancelled
+            if (steps.all { it.status in listOf("done", "error", "cancelled") }) {
+                kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
+                    kotlinx.coroutines.delay(4000)
+                    _actionPlan.value = null
+                }
+            }
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onSettings(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            val toolPermissions = mutableMapOf<String, Boolean>()
+            val permissionsObj = data.optJSONObject("tool_permissions")
+            if (permissionsObj != null) {
+                val keys = permissionsObj.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next() as String
+                    toolPermissions[key] = permissionsObj.getBoolean(key)
+                }
+            }
+            
+            val interruptPrefs = data.optJSONObject("interrupt_preferences")
+            
+            _settings.value = FridaySettings(
+                faceAuthEnabled = data.optBoolean("face_auth_enabled", false),
+                systemAlertsEnabled = data.optBoolean("system_alerts_enabled", true),
+                quietMode = data.optBoolean("quiet_mode", false),
+                urgentOnly = interruptPrefs?.optBoolean("urgent_only", false) ?: false,
+                emergenciesOnly = interruptPrefs?.optBoolean("emergencies_only", false) ?: false,
+                currentMode = data.optString("current_mode", "active"),
+                voiceVisionProvider = data.optString("voice_vision_provider", "Gemini Live"),
+                textReasoningProvider = data.optString("text_reasoning_provider", "Gemini"),
+                codingProvider = data.optString("coding_provider", "OpenClaw"),
+                toolPermissions = toolPermissions
+            )
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onWeatherData(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            _weatherData.value = WeatherData(
+                location = data.optString("location", "Unknown"),
+                temperature = data.optInt("temperature", 0),
+                feelsLike = data.optInt("feels_like", 0),
+                condition = data.optString("condition", "Unknown"),
+                humidity = data.optInt("humidity", 0),
+                windSpeed = data.optInt("wind_speed", 0),
+                cloudiness = data.optInt("cloudiness", 0),
+                high = data.optInt("high", 0),
+                low = data.optInt("low", 0),
+                unit = data.optString("unit", "C")
+            )
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onGoogleAccountStatus(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            _googleServices.value = GoogleServices(
+                connected = data.optBoolean("connected", false),
+                gmailEnabled = data.optBoolean("gmail_enabled", false),
+                calendarEnabled = data.optBoolean("calendar_enabled", false),
+                contactsEnabled = data.optBoolean("contacts_enabled", false),
+                driveEnabled = data.optBoolean("drive_enabled", false)
+            )
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onKasaDevices(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        try {
+            val arr = args[0] as JSONArray
+            val list = ArrayList<KasaDevice>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                list.add(KasaDevice(
+                    id = obj.optString("id", ""),
+                    name = obj.optString("name", "Unknown"),
+                    type = obj.optString("type", "device"),
+                    isOn = obj.optBoolean("is_on", false),
+                    brightness = obj.optInt("brightness", 100)
+                ))
+            }
+            _kasaDevices.value = list
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onPrinters(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        try {
+            val arr = args[0] as JSONArray
+            val list = ArrayList<Printer>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.getJSONObject(i)
+                val jobObj = obj.optJSONObject("current_job")
+                val job = if (jobObj != null) {
+                    PrintJob(
+                        name = jobObj.optString("name", ""),
+                        progress = jobObj.optInt("progress", 0),
+                        timeRemaining = jobObj.optString("time_remaining", "")
+                    )
+                } else null
+                
+                list.add(Printer(
+                    id = obj.optString("id", ""),
+                    name = obj.optString("name", "Unknown"),
+                    type = obj.optString("type", "printer"),
+                    status = obj.optString("status", "idle"),
+                    nozzleTemp = obj.optInt("nozzle_temp", 0),
+                    targetNozzleTemp = obj.optInt("target_nozzle_temp", 0),
+                    bedTemp = obj.optInt("bed_temp", 0),
+                    targetBedTemp = obj.optInt("target_bed_temp", 0),
+                    currentJob = job
+                ))
+            }
+            _printers.value = list
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onSystemAlert(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            val alert = SystemAlert(
+                id = data.optString("id", System.currentTimeMillis().toString()),
+                title = data.optString("title", "Alert"),
+                message = data.optString("message", ""),
+                severity = data.optString("severity", "info"),
+                timestamp = System.currentTimeMillis()
+            )
+            _systemAlerts.value = _systemAlerts.value + alert
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onCADData(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            _cadData.value = CADData(
+                id = data.optString("id", ""),
+                name = data.optString("name", "Unknown"),
+                description = data.optString("description", ""),
+                format = data.optString("format", "STL"),
+                vertices = data.optInt("vertices", 0),
+                faces = data.optInt("faces", 0)
+            )
+        } catch (e: Exception) { /* ignore malformed */ }
+    }
+
+    private fun onCADStatus(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        try {
+            _cadStatus.value = CADStatus(
+                status = data.optString("status", "idle"),
+                progress = data.optInt("progress", 0),
+                currentStep = data.optString("current_step", "")
+            )
+        } catch (e: Exception) { /* ignore malformed */ }
     }
 
     // ----- helpers -----
@@ -509,9 +1070,9 @@ class FridaySocketManager @Inject constructor(
             while (_connectionState.value == ConnectionState.CONNECTED) {
                 try {
                     requestSystemMonitor()
-                    sleep(2000L)
+                    delay(2000L)
                 } catch (e: Exception) {
-                    sleep(2000L)
+                    delay(2000L)
                 }
             }
         }

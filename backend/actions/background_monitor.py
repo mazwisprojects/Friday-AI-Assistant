@@ -5,9 +5,12 @@ No crypto, no finance, no uninvited tracking.
 """
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # ── Blocked categories (never monitor regardless of what user says) ────────────
@@ -73,7 +76,7 @@ def add_monitor(topic: str) -> str:
         "last_hash":  "",
     }
     _save(monitors)
-    print(f"[Monitor] ➕ Added: {topic}")
+    logger.info("Added monitor for topic: %s", topic)
     return f"Now monitoring: {topic}"
 
 
@@ -148,10 +151,10 @@ def check_all() -> list[str]:
             if source:
                 parts.append(f"Source: {source}")
             alerts.append("\n".join(parts))
-            print(f"[Monitor] 🔔 New headline for '{topic}': {title[:60]}")
+            logger.info("New headline for '%s': %s", topic, title[:60])
 
         except Exception as e:
-            print(f"[Monitor] ⚠️ Check failed for '{topic}': {e}")
+            logger.warning("Check failed for '%s': %s", topic, e)
 
     if changed:
         _save(monitors)

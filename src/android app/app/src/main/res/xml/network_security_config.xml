@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Allow cleartext traffic for local network development -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">192.168.1.1</domain>
+        <domain includeSubdomains="true">192.168.1.100</domain>
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">10.0.2.2</domain> <!-- Android Emulator Loopback -->
+        <!-- Tailscale IP range (100.64.0.0/10) for remote access -->
+        <domain includeSubdomains="true">100.64.0.0</domain>
+        <domain includeSubdomains="true">100.65.0.0</domain>
+        <domain includeSubdomains="true">100.66.0.0</domain>
+        <domain includeSubdomains="true">100.67.0.0</domain>
+        <domain includeSubdomains="true">100.68.0.0</domain>
+        <domain includeSubdomains="true">100.69.0.0</domain>
+        <domain includeSubdomains="true">100.70.0.0</domain>
+        <domain includeSubdomains="true">100.71.0.0</domain>
+        <domain includeSubdomains="true">100.72.0.0</domain>
+        <domain includeSubdomains="true">100.73.0.0</domain>
+        <domain includeSubdomains="true">100.74.0.0</domain>
+        <domain includeSubdomains="true">100.75.0.0</domain>
+        <domain includeSubdomains="true">100.76.0.0</domain>
+        <domain includeSubdomains="true">100.77.0.0</domain>
+        <domain includeSubdomains="true">100.78.0.0</domain>
+        <domain includeSubdomains="true">100.79.0.0</domain>
+        <domain includeSubdomains="true">100.80.0.0</domain>
+        <domain includeSubdomains="true">100.81.0.0</domain>
+        <domain includeSubdomains="true">100.82.0.0</domain>
+        <domain includeSubdomains="true">100.83.0.0</domain>
+        <domain includeSubdomains="true">100.84.0.0</domain>
+        <domain includeSubdomains="true">100.85.0.0</domain>
+        <domain includeSubdomains="true">100.86.0.0</domain>
+        <domain includeSubdomains="true">100.87.0.0</domain>
+        <domain includeSubdomains="true">100.88.0.0</domain>
+        <domain includeSubdomains="true">100.89.0.0</domain>
+        <domain includeSubdomains="true">100.90.0.0</domain>
+        <domain includeSubdomains="true">100.91.0.0</domain>
+        <domain includeSubdomains="true">100.92.0.0</domain>
+        <domain includeSubdomains="true">100.93.0.0</domain>
+        <domain includeSubdomains="true">100.94.0.0</domain>
+        <domain includeSubdomains="true">100.95.0.0</domain>
+        <domain includeSubdomains="true">100.96.0.0</domain>
+        <domain includeSubdomains="true">100.97.0.0</domain>
+        <domain includeSubdomains="true">100.98.0.0</domain>
+        <domain includeSubdomains="true">100.99.0.0</domain>
+        <domain includeSubdomains="true">100.100.0.0</domain>
+        <domain includeSubdomains="true">100.101.0.0</domain>
+        <domain includeSubdomains="true">100.102.0.0</domain>
+        <domain includeSubdomains="true">100.103.0.0</domain>
+        <domain includeSubdomains="true">100.104.0.0</domain>
+        <domain includeSubdomains="true">100.105.0.0</domain>
+        <domain includeSubdomains="true">100.106.0.0</domain>
+        <domain includeSubdomains="true">100.107.0.0</domain>
+        <domain includeSubdomains="true">100.108.0.0</domain>
+        <domain includeSubdomains="true">100.109.0.0</domain>
+        <domain includeSubdomains="true">100.110.0.0</domain>
+        <domain includeSubdomains="true">100.111.0.0</domain>
+        <domain includeSubdomains="true">100.112.0.0</domain>
+        <domain includeSubdomains="true">100.113.0.0</domain>
+        <domain includeSubdomains="true">100.114.0.0</domain>
+        <domain includeSubdomains="true">100.115.0.0</domain>
+        <domain includeSubdomains="true">100.116.0.0</domain>
+        <domain includeSubdomains="true">100.117.0.0</domain>
+        <domain includeSubdomains="true">100.118.0.0</domain>
+        <domain includeSubdomains="true">100.119.0.0</domain>
+        <domain includeSubdomains="true">100.120.0.0</domain>
+        <domain includeSubdomains="true">100.121.0.0</domain>
+        <domain includeSubdomains="true">100.122.0.0</domain>
+        <domain includeSubdomains="true">100.123.0.0</domain>
+        <domain includeSubdomains="true">100.124.0.0</domain>
+        <domain includeSubdomains="true">100.125.0.0</domain>
+        <domain includeSubdomains="true">100.126.0.0</domain>
+        <domain includeSubdomains="true">100.127.0.0</domain>
+    </domain-config>
+
+    <!-- Production fallback: Block cleartext -->
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>

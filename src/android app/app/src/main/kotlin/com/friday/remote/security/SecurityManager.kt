@@ -2,6 +2,7 @@ package com.friday.remote.security
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -25,26 +26,35 @@ class SecurityManager @Inject constructor(
     )
 
     fun getServerUrl(): String {
-        return sharedPreferences.getString("server_url", "http://192.168.1.100:8000") ?: ""
+        val url = sharedPreferences.getString("server_url", "http://REPLACE_WITH_SERVER_IP:8000") ?: ""
+        Log.d("FridaySecurity", "getServerUrl() = '$url'")
+        return url
     }
 
     fun setServerUrl(url: String) {
+        Log.d("FridaySecurity", "setServerUrl('$url')")
         sharedPreferences.edit().putString("server_url", url).apply()
     }
 
     fun getToken(): String {
-        return sharedPreferences.getString("auth_token", "") ?: ""
+        val token = sharedPreferences.getString("auth_token", "") ?: ""
+        Log.d("FridaySecurity", "getToken() = '${if (token.isNotEmpty()) "[SET]" else "[EMPTY]"}'")
+        return token
     }
 
     fun setToken(token: String) {
+        Log.d("FridaySecurity", "setToken('$token')")
         sharedPreferences.edit().putString("auth_token", token).apply()
     }
 
     fun isTlsEnabled(): Boolean {
-        return sharedPreferences.getBoolean("tls_enabled", false)
+        val enabled = sharedPreferences.getBoolean("tls_enabled", false)
+        Log.d("FridaySecurity", "isTlsEnabled() = $enabled")
+        return enabled
     }
 
     fun setTlsEnabled(enabled: Boolean) {
+        Log.d("FridaySecurity", "setTlsEnabled($enabled)")
         sharedPreferences.edit().putBoolean("tls_enabled", enabled).apply()
     }
 }

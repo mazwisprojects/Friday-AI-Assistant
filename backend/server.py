@@ -1,8 +1,14 @@
-import sys
 import asyncio
-
 import base64
+import json
+import logging
+import os
+import sys
 import tempfile
+import threading
+from datetime import datetime
+from pathlib import Path
+
 # Fix for asyncio subprocess support on Windows
 # MUST BE SET BEFORE OTHER IMPORTS
 if sys.platform == 'win32':
@@ -11,13 +17,8 @@ if sys.platform == 'win32':
 import socketio
 import uvicorn
 from fastapi import FastAPI
-import asyncio
-import threading
-import sys
-import os
-import json
-from datetime import datetime
-from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 
@@ -39,15 +40,30 @@ from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 from actions import agent_dispatcher as agent_dispatcher_module
 
-# Create a Socket.IO server with restricted CORS
-# Allow localhost for development and Electron app origins
+# Create a Socket.IO server with CORS configured for remote access
+# Allow localhost for development, Electron app origins, and remote connections
+# For production, consider restricting this to specific origins or using a reverse proxy
 allowed_origins = [
     'http://localhost:5173',  # Vite dev server
     'http://127.0.0.1:5173',  # Alternative localhost
     'capacitor://localhost',  # Capacitor/Electron
     'ionic://localhost',      # Ionic
+    # Allow all origins for remote access (Android app, Tailscale, etc.)
+    # Socket.IO clients from mobile apps may not send a standard Origin header
+    '*',
 ]
-sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins=allowed_origins)
+sio = socketio.AsyncServer(
+    async_mode='asgi',
+    cors_allowed_origins=allowed_origins,
+    # Allow long-polling as fallback for networks that block WebSocket
+    # This is important for mobile networks that may have restrictive proxies
+    transports=['websocket', 'polling'],
+    # Increase ping timeout for mobile networks with higher latency
+    ping_timeout=60,
+    ping_interval=25,
+    # Maximum buffer size for large file uploads (50MB)
+    max_http_buffer_size=50 * 1024 * 1024,
+)
 app = FastAPI()
 app_socketio = socketio.ASGIApp(sio, app)
 
@@ -59,12 +75,12 @@ def signal_handler(sig, frame):
     # Clean up audio loop
     if audio_loop:
         try:
-            print("[SERVER] Stopping Audio Loop...")
-            audio_loop.stop() 
-        except:
-            pass
+            logger.info("Stopping Audio Loop...")
+            audio_loop.stop()
+        except Exception as e:
+            logger.error("Error stopping audio loop: %s", e)
     # Force kill
-    print("[SERVER] Force exiting...")
+    logger.info("Force exiting...")
     os._exit(0)
 
 signal.signal(signal.SIGINT, signal_handler)

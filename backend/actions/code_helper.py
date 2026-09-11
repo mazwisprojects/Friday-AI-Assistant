@@ -1,8 +1,9 @@
+import json
+import logging
+import os
+import re
 import subprocess
 import sys
-import os
-import json
-import re
 import time
 from pathlib import Path
 
@@ -10,6 +11,8 @@ from pathlib import Path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import get_api_key
 from claude_provider import get_text_provider
+
+logger = logging.getLogger(__name__)
 
 def get_base_dir():
     if getattr(sys, "frozen", False):
@@ -259,7 +262,7 @@ def _build(description, language, output_path, args, timeout, speak=None, player
 
     try:
         code, path = _write(description, lang, output_path, player)
-        print(f"[Code] ✅ Written: {path}")
+        logger.info("Code written to: %s", path)
     except Exception as e:
         msg = f"Could not write initial code: {e}"
         if speak: speak(msg)
@@ -267,7 +270,7 @@ def _build(description, language, output_path, args, timeout, speak=None, player
 
     last_output = ""
     for attempt in range(1, MAX_BUILD_ATTEMPTS + 1):
-        print(f"[Code] 🔄 Attempt {attempt}/{MAX_BUILD_ATTEMPTS}")
+        logger.info("Build attempt %d/%d", attempt, MAX_BUILD_ATTEMPTS)
         if player:
             player.write_log(f"[Code] Attempt {attempt}...")
 
@@ -282,7 +285,7 @@ def _build(description, language, output_path, args, timeout, speak=None, player
             if speak: speak(msg)
             return f"{msg}\n\nOutput:\n{last_output}"
 
-        print(f"[Code] ⚠️ Error on attempt {attempt}, fixing...")
+        logger.warning("Error on attempt %d, fixing...", attempt)
         if player:
             player.write_log(f"[Code] Fixing (attempt {attempt})...")
 

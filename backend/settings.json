@@ -78,5 +78,11 @@
             "model": "KL135"
         }
     ],
-    "camera_flipped": false
+    "camera_flipped": false,
+    "sync": {
+        "dest": "",
+        "interval_hours": 6,
+        "keep": 10,
+        "last_backup": 1789093187.867513
+    }
 }

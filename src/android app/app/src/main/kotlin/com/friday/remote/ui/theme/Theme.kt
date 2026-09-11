@@ -1,14 +1,21 @@
 package com.friday.remote.ui.theme
 
 import android.app.Activity
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+
+// Friday Theme Colors
+val FridayDark = Color(0xFF0A0E1A)
+val FridayAccent = Color(0xFF06B8D8)
+val FridayGrey = Color(0xFF1A1A2E)
+val White = Color(0xFFFFFFFF)
+val LightGray = Color(0xFFCCCCCC)
 
 private val DarkColorScheme = darkColorScheme(
     primary = FridayAccent,
@@ -20,7 +27,7 @@ private val DarkColorScheme = darkColorScheme(
     onSecondary = White,
     onTertiary = White,
     onBackground = White,
-    onSurface = White,
+    onSurface = White
 )
 
 @Composable
@@ -39,7 +46,7 @@ fun FridayTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = Typography, // I'll create this next
+        typography = Typography,
         content = content
     )
 }

@@ -1,9 +1,12 @@
 import asyncio
 import aiohttp
+import logging
 import sys
 
 # Usage: python3 debug_printer_connection.py <IP>
 # Example: python3 debug_printer_connection.py 10.0.0.34
+
+logger = logging.getLogger(__name__)
 
 async def probe(ip):
     print(f"--- Probing {ip} ---")
@@ -38,9 +41,9 @@ async def probe(ip):
                     try:
                         async with session.get(url) as resp:
                             print(f"  [API]  {url} -> {resp.status}")
-                    except:
-                        pass
-                        
+                    except Exception as e:
+                        print(f"  [API]  {url} -> Error: {e}")
+
             except Exception as e:
                  print(f"  Port Error: {e}")
 
