@@ -8,6 +8,8 @@ Provides:
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -61,7 +63,7 @@ class EmotionDetector:
     }
 
     async def analyze_text(self, text: str) -> EmotionalState:
-        """Analyze text for emotional content."""
+        """Analyze text for emotional content: regex fast path, LLM on miss/low signal."""
         if not text:
             return EmotionalState()
 
@@ -78,7 +80,92 @@ class EmotionDetector:
                 except re.error:
                     # Skip invalid regex patterns
                     continue
+
+        # Regex found nothing definitive — escalate to LLM for nuanced detection
+        # (sarcasm, mixed feelings, implied emotion) that keywords can't catch.
+        llm_state = await self._llm_emotion(text)
+        if llm_state:
+            return llm_state
         return EmotionalState(primary="neutral", confidence=0.5)
+
+    async def _llm_emotion(self, text: str) -> EmotionalState | None:
+        """LLM-assisted emotion classification. Returns None when unavailable."""
+        try:
+            from model_router import generate_response
+            prompt = (
+                "Classify the emotional state of this message. Consider phrasing, "
+                "punctuation, sarcasm, and implied feeling.\n\n"
+                f"Message: {text[:800]}\n\n"
+                'Return ONLY JSON: {"primary": "frustrated|happy|sad|anxious|confused|'
+                'excited|grateful|urgent|neutral", "intensity": 0.0-1.0, '
+                '"secondary": "<secondary emotion or empty>", "confidence": 0.0-1.0}'
+            )
+            response = await asyncio.to_thread(generate_response, prompt, "lite")
+            if not getattr(response, "ok", False):
+                return None
+            match = re.search(r"\{.*\}", (response.text or "").strip(), re.DOTALL)
+            if not match:
+                return None
+            parsed = json.loads(match.group(0))
+            primary = str(parsed.get("primary", "neutral")).lower()
+            if primary == "neutral":
+                return EmotionalState(primary="neutral", confidence=0.6)
+            return EmotionalState(
+                primary=primary,
+                secondary=str(parsed.get("secondary", ""))[:40],
+                intensity=float(parsed.get("intensity", 0.6)),
+                confidence=float(parsed.get("confidence", 0.7)),
+                metadata={"source": "llm"},
+            )
+        except Exception as e:
+            logger.debug("LLM emotion detection unavailable: %s", e)
+            return None
+
+    # ---------- P3.10: voice-tone emotion from raw PCM audio ----------
+
+    def analyze_voice_bytes(self, pcm: bytes, sample_rate: int = 24000) -> EmotionalState:
+        """Analyze raw PCM audio (int16 little-endian) for arousal/energy cues.
+
+        No heavy ML deps: RMS loudness + peak ratio + zero-crossing rate give a
+        real, defensible signal for loud/excited vs. soft/calm delivery. The Live
+        API transmits 24kHz int16 PCM by default.
+        """
+        if not pcm or not isinstance(pcm, (bytes, bytearray)):
+            return EmotionalState(primary="neutral", confidence=0.3,
+                                  metadata={"source": "voice", "feature": "none"})
+        n = len(pcm) // 2
+        if n < 8:
+            return EmotionalState(primary="neutral", confidence=0.3,
+                                  metadata={"source": "voice", "feature": "none"})
+        try:
+            import struct
+            samples = struct.unpack(f"<{n}h", pcm[: n * 2])
+        except Exception:
+            return EmotionalState(primary="neutral", confidence=0.3,
+                                  metadata={"source": "voice", "feature": "none"})
+        peak = max(abs(s) for s in samples) / 32768.0
+        rms = (sum(s * s for s in samples) / len(samples)) ** 0.5 / 32768.0
+        crossings = sum(
+            1 for i in range(1, len(samples)) if (samples[i] >= 0) != (samples[i - 1] >= 0)
+        )
+        zcr = crossings / max(1, len(samples) - 1)
+
+        # Arousal scoring: loud + high zero-crossing => excited/frustrated/urgent
+        loudness = min(1.0, rms * 4.0)
+        arousal = min(1.0, loudness * 0.7 + zcr * 0.3)
+        if peak < 0.05:
+            emotion, conf, intensity = "neutral", 0.4, 0.1
+        elif arousal >= 0.6:
+            emotion, conf, intensity = "excited", 0.7, arousal
+        elif loudness < 0.25 and zcr < 0.1:
+            emotion, conf, intensity = "calm", 0.6, 0.3
+        else:
+            emotion, conf, intensity = "neutral", 0.5, arousal
+        return EmotionalState(
+            primary=emotion, confidence=conf, intensity=round(intensity, 2),
+            metadata={"source": "voice", "rms": round(rms, 4), "peak": round(peak, 4),
+                      "zcr": round(zcr, 4), "arousal": round(arousal, 2)},
+        )
 
     async def analyze_context(self, context: dict[str, Any] | None) -> EmotionalState:
         """Analyze context for emotional cues."""
@@ -156,7 +243,10 @@ class EmotionalIntelligence:
 
         voice_emotion = EmotionalState()
         if voice_data:
-            voice_emotion = await self.emotion_detector.analyze_voice(voice_data)
+            if isinstance(voice_data, (bytes, bytearray)):
+                voice_emotion = self.emotion_detector.analyze_voice_bytes(bytes(voice_data))
+            else:
+                voice_emotion = await self.analyze_voice(voice_data)
 
         context_emotion = await self.emotion_detector.analyze_context(context or {})
 
@@ -186,7 +276,22 @@ class EmotionalIntelligence:
 
 
     async def analyze_voice(self, voice_data: Any) -> EmotionalState:
-        """Analyze voice for emotional content."""
+        """Analyze voice for emotional content (P3.10: raw PCM → arousal cues).
+
+        Accepts raw PCM bytes (analysed via analyze_voice_bytes) or pre-computed
+        dict features.
+        """
+        if isinstance(voice_data, (bytes, bytearray)):
+            return self.emotion_detector.analyze_voice_bytes(bytes(voice_data))
+        if isinstance(voice_data, dict):
+            # Pre-computed features: honour explicit emotion or arousal score
+            if voice_data.get("emotion"):
+                return EmotionalState(
+                    primary=str(voice_data["emotion"]),
+                    confidence=float(voice_data.get("confidence", 0.6)),
+                    intensity=float(voice_data.get("intensity", 0.5)),
+                    metadata={"source": "voice", **voice_data},
+                )
         return EmotionalState(primary="neutral", confidence=0.3)
 
     async def analyze_context(self, context: dict[str, Any]) -> EmotionalState:

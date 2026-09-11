@@ -174,6 +174,43 @@ def _cognitive_system_directive() -> str:
     except Exception:
         return ""
 
+def _cognitive_memory_directive() -> str:
+    """Build the durable-lessons + knowledge-graph directive injected at session startup.
+
+    Reads the persisted brain (learning_state.json + knowledge_graph.json) directly,
+    because this runs at import time before the AudioLoop / FridayCognition exists.
+    """
+    parts = []
+    try:
+        from pathlib import Path as _P
+        state_dir = _P(__file__).resolve().parent / "long_term_memory"
+        # Lessons learned — from persisted learning state
+        lpath = state_dir / "learning_state.json"
+        if lpath.exists():
+            import json as _json
+            data = _json.loads(lpath.read_text(encoding="utf-8"))
+            mistakes = data.get("mistakes", []) or []
+            lessons = [
+                m.get("lesson", "").strip()
+                for m in mistakes
+                if isinstance(m, dict) and m.get("lesson") and m.get("lesson") != "To be derived"
+             ][-10:]
+            if lessons:
+                parts.append("LESSONS LEARNED FROM PAST MISTAKES (apply these in this conversation): "
+                             + " ".join(f"({l})" for l in lessons))
+        # Knowledge graph summary — from persisted graph state
+        kpath = state_dir / "knowledge_graph.json"
+        if kpath.exists():
+            import json as _json
+            data = _json.loads(kpath.read_text(encoding="utf-8"))
+            entities = data.get("entities", []) or []
+            if entities:
+                names = [e.get("name", "") for e in entities[:40] if e.get("name")]
+                parts.append("PERSISTED KNOWLEDGE: " + ", ".join(names[:40]))
+    except Exception:
+        pass
+    return " ".join(parts)
+
 # --- CONFIG UPDATE: Enabled Transcription ---
 config = types.LiveConnectConfig(
     response_modalities=["AUDIO"],
@@ -266,6 +303,10 @@ class AudioLoop:
             print("[FRIDAY] [COGNITION] Cognitive core attached to AudioLoop.")
         except Exception as e:
             print(f"[FRIDAY] [COGNITION] Init failed (brain disabled this session): {e}")
+
+        # P3.10: rolling user voice-emotion state (arousal cues from mic PCM)
+        self._voice_emotion = None
+        self._voice_emotion_buffer = bytearray()
 
         self.audio_in_queue = None
         self.out_queue = None
@@ -563,6 +604,34 @@ class AudioLoop:
                     metadata={"source": "voice", "project": self.project_manager.current_project},
                 )
                 response = await self.cognition.process(ctx)
+                # P3.10: fuse text emotion with voice-tone analysis (utterance buffer)
+                voice_buf = getattr(self, "_voice_emotion_buffer", None)
+                try:
+                    if voice_buf:
+                        vstate = self.cognition.emotional_intelligence.emotion_detector.analyze_voice_bytes(bytes(voice_buf))
+                        if vstate.primary not in ("neutral", "") and (vstate.intensity or 0) >= 0.6:
+                            # Fuse: voice-tone reinforces/raises text emotion
+                            if not response.emotion.secondary:
+                                response.emotion.secondary = vstate.primary
+                            vmeta = response.emotion.metadata if isinstance(response.emotion.metadata, dict) else {}
+                            vmeta["voice_primary"] = vstate.primary
+                            vmeta["voice_intensity"] = vstate.intensity
+                            vmeta["voice_arousal"] = getattr(vstate, "metadata", {}).get("arousal") if isinstance(getattr(vstate, "metadata", None), dict) else None
+                            response.emotion.metadata = vmeta
+                            response.emotion.intensity = max(
+                                float(response.emotion.intensity or 0.0),
+                                float(vstate.intensity or 0.0) - 0.1,
+                            )
+                            print(f"[FRIDAY] [COGNITION] Voice tone: primary={vstate.primary} intensity={vstate.intensity}")
+                except Exception:
+                    pass
+                finally:
+                    # Fresh buffer per turn so tone reflects the current utterance
+                    if voice_buf is not None:
+                        try:
+                            del voice_buf[:]
+                        except Exception:
+                            pass
                 urgency = getattr(response.situation, "urgency", "normal")
                 emotion = getattr(response.emotion, "primary", "neutral")
                 intensity = float(getattr(response.emotion, "intensity", 0.0) or 0.0)
@@ -747,12 +816,29 @@ class AudioLoop:
                 active_goals = goal_engine.tick().get("count", 0)
             except Exception:
                 pass
+
+            # P2.7: nightly cognitive consolidation — episodic → durable memory.
+            # The brain saves itself, mirrors lessons into semantic memory, and the
+            # summary lands in the ops digest so the day becomes permanent.
+            cognitive_summary = ""
+            if self.cognition:
+                try:
+                    consolidation = await self.cognition.consolidate_daily()
+                    cognitive_summary = str(consolidation.get("summary", ""))
+                except Exception as exc:
+                    cognitive_summary = f"Cognitive consolidation failed: {exc}"
+            else:
+                cognitive_summary = "Cognition not attached; consolidation skipped"
+
             report = {"tools_ok": tools_ok, "tools_failed": tools_failed, "backup": backup,
                       "models": model_health, "active_goals": active_goals,
+                      "cognitive_consolidation": cognitive_summary,
                       "duration_s": round(time.time() - started, 1)}
             result = ops_journal.log_nightly(report)
             await self.notifications.notify("ops", "Nightly ops complete", result.get("headline", "done"))
             print(f"[FRIDAY] [MAINT] {result.get('headline')}")
+            if cognitive_summary:
+                print(f"[FRIDAY] [COGNITION] {cognitive_summary}")
         except Exception as exc:
             print(f"[FRIDAY] Nightly ops failed: {exc}")
             try:
@@ -1155,7 +1241,14 @@ class AudioLoop:
                 if rms > VAD_THRESHOLD:
                     # Speech Detected
                     self._silence_start_time = None
-                    
+                    # P3.10: feed raw mic PCM into the rolling voice-emotion buffer (~20s cap)
+                    try:
+                        self._voice_emotion_buffer.extend(data)
+                        _max_voice_bytes = 640_000
+                        if len(self._voice_emotion_buffer) > _max_voice_bytes:
+                            del self._voice_emotion_buffer[:len(self._voice_emotion_buffer) - _max_voice_bytes]
+                    except Exception:
+                        pass
                     if not self._is_speaking:
                         # NEW Speech Utterance Started
                         self._is_speaking = True
@@ -3156,6 +3249,10 @@ class AudioLoop:
                             pass
                         if compact_context != "Compact long-term memory:\n":
                             print("[FRIDAY DEBUG] [STARTUP] Loading compact long-term memory and recent conversation...")
+                            # P0.2: inject the persisted brain too — lessons learned + knowledge graph
+                            cognitive_ctx = _cognitive_memory_directive()
+                            if cognitive_ctx:
+                                compact_context += "\n\n" + cognitive_ctx
                             memory_msg = "System Notification: Load this compact long-term memory silently and use it when relevant:\n\n" + compact_context
                             await self.session.send(input=memory_msg, end_of_turn=True)
 

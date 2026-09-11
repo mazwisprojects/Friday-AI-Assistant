@@ -73,15 +73,14 @@ class FridayCognition:
         workspace_root: str | None = None,
     ):
         # Core cognitive systems
+        self.llm_client = llm_client
         self.reasoning_engine = ReasoningEngine(llm_client=llm_client)
         self.world_model = WorldModel(llm_client=llm_client)
         self.identity = FridayIdentity(identity_path=identity_path)
         self.proactive_engine = ProactiveEngine()
         self.agent_swarm = AgentSwarm()
-        self.learning_engine = LearningEngine()
         self.situation_awareness = SituationAwareness()
         self.decision_engine = DecisionEngine()
-        self.knowledge_graph = KnowledgeGraph()
         self.emotional_intelligence = EmotionalIntelligence()
 
         # State
@@ -90,12 +89,50 @@ class FridayCognition:
         self._last_proactive_scan = 0.0
         self._proactive_scan_interval = 300  # 5 minutes
 
+        # P0.2: persisted brain — knowledge graph + learning engine load from disk
+        self._state_dir = None
+        if self.workspace_root:
+            self._state_dir = self.workspace_root / "long_term_memory"
+            self._state_dir.mkdir(parents=True, exist_ok=True)
+        self.knowledge_graph = KnowledgeGraph(
+            storage_path=str(self._state_dir / "knowledge_graph.json") if self._state_dir else None)
+        self.learning_engine = LearningEngine(
+            storage_path=str(self._state_dir / "learning_state.json") if self._state_dir else None)
+
     async def initialize(self) -> None:
         """Initialize all cognitive systems."""
         logger.info("Initializing F.R.I.D.A.Y cognitive systems...")
         self.identity.load_identity()
+        # P0.2: persisted brain surfaces durable state automatically via storage_path
         self._initialized = True
-        logger.info("F.R.I.D.A.Y cognitive systems initialized")
+        logger.info(
+            "F.R.I.D.A.Y cognitive systems initialized "
+            "(lessons=%d, kg_entities=%d)",
+            len(self.learning_engine.get_lessons(limit=50)),
+            self.knowledge_graph.get_stats()["entity_count"],
+        )
+
+    def get_memory_directive(self) -> str:
+        """Build a durable-lessons directive for injection into the Live session,
+        so Friday actually stops repeating mistakes in future conversations."""
+        lessons = self.learning_engine.get_lessons(limit=10)
+        if not lessons:
+            return ""
+        lines = "\n".join(f"- {l}" for l in lessons)
+        return (
+            "System Notification: Lessons learned from past mistakes (follow these "
+            "in this conversation):\n" + lines + "\n"
+        )
+
+    def get_kg_context(self, limit: int = 20) -> str:
+        """Summarize the knowledge graph entities as compact context."""
+        stats = self.knowledge_graph.get_stats()
+        entities = list(self.knowledge_graph.graph.entities.values())
+        if not entities:
+            return ""
+        lines = "\n".join(
+            f"- {e.name} ({e.entity_type})" for e in entities[:limit])
+        return f"Known knowledge ({stats['entity_count']} entities, {stats['relationship_count']} relations):\n{lines}\n"
 
     async def process(self, context: CognitiveContext) -> CognitiveResponse:
         """
@@ -108,18 +145,24 @@ class FridayCognition:
 
         response = CognitiveResponse()
 
-        # Step 1: Assess the situation
-        situation = await self.situation_awareness.assess_situation(
-            context.user_input,
-            metadata=context.metadata,
-        )
+        # Steps 1-2 (P3.9 parallel cognition): situation + emotion run concurrently,
+        # because they're independent reads over the same input.
+        if context.metadata.get("parallel", True):
+            situation_task = self.situation_awareness.assess_situation(
+                context.user_input, metadata=context.metadata)
+            emotion_task = self.emotional_intelligence.understand_emotion(
+                text=context.user_input,
+                context={"urgency": "unknown", **context.metadata},
+            )
+            situation, emotion = await asyncio.gather(situation_task, emotion_task)
+        else:
+            situation = await self.situation_awareness.assess_situation(
+                context.user_input, metadata=context.metadata)
+            emotion = await self.emotional_intelligence.understand_emotion(
+                text=context.user_input,
+                context={"urgency": situation.urgency, **context.metadata},
+            )
         response.situation = situation
-
-        # Step 2: Understand emotion
-        emotion = await self.emotional_intelligence.understand_emotion(
-            text=context.user_input,
-            context={"urgency": situation.urgency, **context.metadata},
-        )
         response.emotion = emotion
 
         # Step 3: Reason about the query (for complex queries)
@@ -135,7 +178,7 @@ class FridayCognition:
             )
             response.reasoning = reasoning
 
-        # Step 4: Make a decision
+        # Step 4: Make a decision (maps to a REAL tool from the action registry)
         options = await self._generate_options(situation, context)
         decision = await self.decision_engine.decide(
             situation.deep_intent,
@@ -143,6 +186,26 @@ class FridayCognition:
             context={"urgency": situation.urgency, "emotion": emotion.primary},
         )
         response.decision = decision
+
+        # Step 4.5 (P3.11 scenario rehearsal): for high/critical decisions on real
+        # tools, simulate the outcome before committing so Friday knows what will
+        # happen — not just hope.
+        if decision.tool and decision.urgency in ("high", "critical") or (
+                decision.risk_level if hasattr(decision, "risk_level") else "") in ("high", "critical"):
+            try:
+                rehearsal = await self.world_model.simulate_scenario(Scenario(
+                    description=f"{decision.action}: {context.user_input[:150]}",
+                    actions=[Action(name=decision.tool, description=decision.action)],
+                    objectives=[situation.deep_intent],
+                ))
+                response.metadata["rehearsal"] = {
+                    "recommendation": rehearsal.recommendation,
+                    "success_rate": round(
+                        sum(1 for p in rehearsal.paths if p.is_success) /
+                        max(1, len(rehearsal.paths)), 2),
+                }
+            except Exception as e:
+                logger.debug("Scenario rehearsal failed: %s", e)
 
         # Step 5: Generate response
         base_response = await self._generate_base_response(
@@ -180,14 +243,24 @@ class FridayCognition:
     async def _generate_options(
         self, situation: SituationAssessment, context: CognitiveContext
     ) -> list[str]:
-        """Generate possible response options."""
+        """Generate possible response options — mapped to REAL tools (P1.3)."""
+        try:
+            from .action_registry import registry as _reg
+        except Exception:
+            _reg = None
+
         options = [f"Respond to: {situation.deep_intent}"]
+        if _reg:
+            # Real tool suggestions from the registry based on intent
+            for tool in _reg.suggest(situation.deep_intent):
+                options.append(tool)
         if situation.urgency == "critical":
             options.append("Take immediate action")
             options.append("Alert user immediately")
         if situation.deep_intent == "requesting_help":
             options.append("Provide step-by-step help")
-            options.append("Search for solutions")
+            if _reg and _reg.exists("web_search"):
+                options.append("web_search")
         return options
 
     async def _generate_base_response(
@@ -244,6 +317,9 @@ class FridayCognition:
         """Shutdown cognitive systems and save state."""
         logger.info("Shutting down F.R.I.D.A.Y cognitive systems...")
         self.identity.save_identity()
+        # P0.2: persist the brain on shutdown too (defense in depth)
+        self.knowledge_graph.save()
+        self.learning_engine.save()
         logger.info("F.R.I.D.A.Y cognitive systems shutdown complete")
 
     async def proactive_scan(self) -> list[ProactiveAction]:
@@ -253,7 +329,11 @@ class FridayCognition:
             return []
 
         self._last_proactive_scan = now
-        context = {"identity": self.identity.get_self_model()}
+        context = {
+            "identity": self.identity.get_self_model(),
+            "knowledge_graph": self.knowledge_graph.get_stats(),
+            "learning": self.learning_engine.get_learning_stats(),
+        }
         actions = await self.proactive_engine.continuous_scan(context)
         logger.info("Proactive scan found %d actions", len(actions))
         return actions
@@ -271,12 +351,47 @@ class FridayCognition:
         await self.learning_engine.learn_from_interaction(interaction)
 
     async def add_knowledge(self, fact: dict[str, Any]) -> None:
-        """Add knowledge to the knowledge graph."""
+        """Add knowledge to the knowledge graph (also mirrors to semantic memory)."""
+        # P1.5: mirror durable facts into the vector semantic memory too
+        try:
+            from actions import semantic_memory as _sem
+            text = fact.get("text") or fact.get("value") or fact.get("name") or ""
+            if text:
+                _sem.remember(str(text)[:700], kind="knowledge", source="knowledge_graph")
+        except Exception:
+            pass
         await self.knowledge_graph.add_knowledge(fact)
 
     async def query_knowledge(self, query: str) -> Any:
-        """Query the knowledge graph."""
+        """Query the knowledge graph (enriched with semantic memory hits)."""
         return await self.knowledge_graph.query(query)
+
+    async def consolidate_daily(self) -> dict[str, Any]:
+        """P2.7 nightly consolidation — episodic → semantic/durable memory.
+
+        Saves the day's state, mirrors lessons into semantic memory, and returns
+        a summary for the ops digest.
+        """
+        self.knowledge_graph.save()
+        self.learning_engine.save()
+        lessons = self.learning_engine.get_lessons(limit=10)
+        try:
+            from actions import semantic_memory as _sem
+            for lesson in lessons:
+                _sem.remember(f"LESSON: {lesson}", kind="lesson", source="nightly_consolidation")
+            kg_stats = self.knowledge_graph.get_stats()
+            learning_stats = self.learning_engine.get_learning_stats()
+            summary = (
+                f"Cognitive consolidation: {kg_stats['entity_count']} entities, "
+                f"{kg_stats['relationship_count']} relations, "
+                f"{learning_stats['skill_count']} skills, "
+                f"{learning_stats['mistake_count']} mistakes, "
+                f"{len(lessons)} mirrored lessons."
+            )
+            return {"ok": True, "summary": summary, "lessons": lessons}
+        except Exception as e:
+            logger.warning("Daily consolidation partial failure: %s", e)
+            return {"ok": False, "summary": "Consolidation failed", "error": str(e)}
 
     def get_status(self) -> dict[str, Any]:
         """Get status of all cognitive systems."""
@@ -286,4 +401,5 @@ class FridayCognition:
             "learning": self.learning_engine.get_learning_stats(),
             "knowledge_graph": self.knowledge_graph.get_stats(),
             "agent_swarm": self.agent_swarm.get_agent_status(),
+            "registry": self.decision_engine.registry.available_action_summary() if self.decision_engine.registry else None,
         }

@@ -27,6 +27,7 @@ from .agent_swarm import AgentSwarm, Task, TaskResult, BaseAgent
 from .learning_engine import LearningEngine, Interaction
 from .situation_awareness import SituationAwareness, SituationAssessment
 from .decision_engine import DecisionEngine, Decision, Evaluation
+from .action_registry import ActionRegistry, ActionSpec
 from .knowledge_graph import KnowledgeGraph, QueryResult, Entity, Relationship
 from .emotional_intelligence import EmotionalIntelligence, EmotionalState
 
@@ -50,4 +51,6 @@ __all__ = [
     "KnowledgeGraph",
     "EmotionalIntelligence",
     "EmotionalState",
+    "ActionRegistry",
+    "ActionSpec",
 ]

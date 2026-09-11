@@ -137,11 +137,22 @@ class SwarmCoordinator:
 
 
 class AgentSwarm:
-    """Coordinate multiple specialized agents."""
+    """Coordinate multiple specialized agents.
+
+    P2.6: in addition to the in-memory cognitive agents, the swarm bridges to
+    the REAL agent_dispatcher registry (repo_repair, dev_agent, plugins) — so
+    complex tasks run through actual background agents instead of shells.
+    """
 
     def __init__(self):
         self.coordinator = SwarmCoordinator()
         self._initialize_agents()
+        self.dispatcher = None
+        try:
+            from actions import agent_dispatcher as _ad
+            self.dispatcher = _ad.dispatcher
+        except Exception as e:
+            logger.debug("agent_dispatcher unavailable: %s", e)
 
     def _initialize_agents(self) -> None:
         """Initialize default agents."""
@@ -164,8 +175,38 @@ class AgentSwarm:
                 result = await agent.execute(sub)
                 results.append(result)
 
+        # If the real dispatcher has registered agents and the task is
+        # long-running, offer delegation to a real background agent.
+        delegated = None
+        if self.dispatcher:
+            try:
+                registered = self.dispatcher.registered_agents()
+                if registered and ("delegate" in task_description.lower()
+                                   or "fix" in task_description.lower()
+                                   or "repair" in task_description.lower()):
+                    # Prefer the most relevant registered type
+                    chosen = next(
+                        (t for t in registered if t in task_description.lower()),
+                        registered[0])
+                    delegated = {
+                        "agent_id": self.dispatcher.deploy_agent(
+                            chosen, goal=task_description, repo_path="."),
+                        "agent_type": chosen,
+                    }
+                    if delegated["agent_id"]:
+                        results.append({
+                            "task_id": "delegated",
+                            "success": True,
+                            "result": delegated,
+                        })
+            except Exception as e:
+                logger.debug("Dispatcher delegation failed: %s", e)
+
         # Synthesize results
-        return await self.coordinator.synthesize(results)
+        output = await self.coordinator.synthesize(results)
+        if delegated:
+            output["delegated"] = delegated
+        return output
 
     def _select_agent(self, task: Task) -> Optional[BaseAgent]:
         """Select the best agent for a task."""

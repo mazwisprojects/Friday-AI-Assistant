@@ -144,21 +144,71 @@ class PredictionEngine:
     async def run_monte_carlo(
         self, scenario: Scenario, iterations: int = 100
     ) -> list[SimulationPath]:
-        """Run Monte Carlo simulation on a scenario."""
+        """Run Monte Carlo simulation on a scenario.
+
+        P0.1: when an LLM is reachable, step success probabilities come from a
+        realistic scenario tree; otherwise falls back to random sampling.
+        """
+        # Ask the LLM once for realistic per-action success probabilities
+        action_probs = await self._llm_scenario_model(scenario)
+
         paths = []
         for i in range(iterations):
-            path = await self._simulate_path(scenario)
+            path = await self._simulate_path(scenario, action_probs)
             paths.append(path)
         return paths
 
-    async def _simulate_path(self, scenario: Scenario) -> SimulationPath:
-        """Simulate a single path through a scenario."""
+    async def _llm_scenario_model(self, scenario: Scenario) -> dict[str, float]:
+        """Realistic success probabilities per action from the LLM (empty = random)."""
+        if not scenario.actions:
+            return {}
+        try:
+            import asyncio, json, re
+            from model_router import generate_response
+            actions_desc = "; ".join(
+                f"{a.name}: {a.description[:100]}" for a in scenario.actions[:6])
+            prompt = (
+                "Rate the realistic probability each action succeeds in this scenario. "
+                "Be concrete and conservative (most actions fail more than 50% in the "
+                "real world).\n\n"
+                f"Scenario: {scenario.description[:300]}\n"
+                f"Actions: {actions_desc}\n\n"
+                'Return ONLY JSON: {"action_success_rates": {"<action name>": 0.00-1.00, ...}}'
+            )
+            response = await asyncio.to_thread(generate_response, prompt, "flash")
+            raw = (getattr(response, "text", "") or "").strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not match:
+                return {}
+            parsed = json.loads(match.group(0))
+            rates = {
+                str(k).strip().lower(): max(0.05, min(0.98, float(v)))
+                for k, v in parsed.get("action_success_rates", {}).items()
+            }
+            # Only keep entries for actions we actually simulate
+            known = {a.name.strip().lower() for a in scenario.actions}
+            return {k: v for k, v in rates.items() if k in known}
+        except Exception as e:
+            logger.debug("LLM scenario model failed: %s", e)
+            return {}
+
+    async def _simulate_path(self, scenario: Scenario,
+                             action_probs: dict[str, float] | None = None) -> SimulationPath:
+        """Simulate a single path through a scenario.
+
+        Uses LLM-informed probabilities when provided; random otherwise.
+        """
+        action_probs = action_probs or {}
         steps = []
         probability = 1.0
         is_success = True
 
         for action in scenario.actions:
-            success_prob = 0.7 + (random.random() * 0.3)
+            # LLM-informed probability, else random sampling
+            success_prob = action_probs.get(
+                action.name.strip().lower(),
+                0.7 + (random.random() * 0.3),
+            )
             if random.random() < success_prob:
                 steps.append(f"SUCCESS: {action.name}")
                 probability *= success_prob
@@ -228,9 +278,9 @@ class WorldModel:
             assumptions=["Standard operating conditions"],
         )
 
-    async def simulate_scenario(self, scenario: Scenario) -> SimulationResult:
+    async def simulate_scenario(self, scenario: Scenario, iterations: int = 100) -> SimulationResult:
         """Run 'what-if' simulations (Sokovia scenario planning)."""
-        paths = await self.prediction_engine.run_monte_carlo(scenario)
+        paths = await self.prediction_engine.run_monte_carlo(scenario, iterations=iterations)
 
         if not paths:
             return SimulationResult(
@@ -267,8 +317,30 @@ class WorldModel:
         )
 
     async def _llm_predict(self, action: Action, context: dict) -> list[str]:
-        """Use LLM for deeper prediction."""
-        return [f"Predicted effect of {action.name}"]
+        """Use LLM for deeper prediction (real causal analysis, not placeholders)."""
+        prompt = (
+            "Predict the realistic consequences of this action. Be concrete and causal.\n\n"
+            f"Action: {action.name}\nDescription: {action.description}\n"
+            f"Preconditions: {action.preconditions}\n"
+            f"Context: {json.dumps(context, default=str)[:800]}\n\n"
+            'Return ONLY JSON: {"effects": ["effect 1", "effect 2"], "risks": ["risk 1"]}'
+        )
+        try:
+            from model_router import generate_response
+            response = await asyncio.to_thread(generate_response, prompt, "flash")
+            if not getattr(response, "ok", False):
+                return []
+            raw = (response.text or "").strip()
+            match = re.search(r"\{.*\}", raw, re.DOTALL)
+            if not match:
+                return []
+            parsed = json.loads(match.group(0))
+            effects = [str(e) for e in parsed.get("effects", [])][:6]
+            action.risks.extend(str(r) for r in parsed.get("risks", [])[:4])
+            return effects
+        except Exception as e:
+            logger.debug("LLM prediction failed: %s", e)
+            return []
 
     def _calculate_confidence(self, action: Action, context: dict) -> float:
         """Calculate confidence in a prediction."""
@@ -278,21 +350,3 @@ class WorldModel:
         if context.get("historical_data"):
             base_confidence += 0.1
         return min(base_confidence, 1.0)
-
-
-        is_success = all(s.startswith("SUCCESS") for s in steps)
-        outcome = "success" if is_success else "partial_failure" if steps else "no_action"
-
-        return SimulationPath(
-            steps=steps,
-            probability=probability,
-            outcome=outcome,
-            is_success=is_success,
-        )
-
-    """A scenario to simulate."""
-    description: str
-    initial_conditions: list[str] = field(default_factory=list)
-    actions: list[Action] = field(default_factory=list)
-    objectives: list[str] = field(default_factory=list)
-    constraints: list[str] = field(default_factory=list)

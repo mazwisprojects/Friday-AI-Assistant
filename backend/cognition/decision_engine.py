@@ -41,6 +41,10 @@ class Decision:
     risks: list[str] = field(default_factory=list)
     confidence: float = 0.0
     metadata: dict[str, Any] = field(default_factory=dict)
+    # Concrete tool mapping (P1.3 — decision → real action registry)
+    tool: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    autonomous: bool = False
 
 
 class RiskAssessor:
@@ -106,11 +110,21 @@ class EthicsModule:
 
 
 class DecisionEngine:
-    """Make autonomous decisions with appropriate confidence."""
+    """Make autonomous decisions with appropriate confidence.
+
+    P1.3: options now map to the REAL tool registry — the decision carries a
+    concrete {tool, params} that the existing tool pipeline can execute.
+    """
 
     def __init__(self):
         self.risk_assessor = RiskAssessor()
         self.ethics_module = EthicsModule()
+        try:
+            from .action_registry import registry
+            self.registry = registry
+        except Exception:
+            from action_registry import registry  # standalone fallback
+            self.registry = registry
 
     async def decide(
         self,
@@ -128,6 +142,8 @@ class DecisionEngine:
                 reasoning=None,
                 urgency="low",
                 confidence=0.0,
+                tool="",
+                params={},
             )
 
         # Evaluate each option
@@ -136,27 +152,83 @@ class DecisionEngine:
             evaluation = await self._evaluate_option(option, context)
             evaluations.append(evaluation)
 
-        # Select best option
-        best = max(evaluations, key=lambda e: e.score)
+        # Select best option (P1.3: prefer options that resolve to REAL tools)
+        best = max(
+            evaluations,
+            key=lambda e: e.score + self._tool_bonus(e.option),
+        )
 
-        # Determine if approval is needed
+        # Map to a real, executable tool from the registry
+        spec = self._resolve_action(best.option)
+
+        # Determine if approval is needed (real API-checked risk from the registry)
         needs_approval = (
             best.risk_level in ("high", "critical")
             or not best.ethical_clear
+            or not spec.autonomous
         )
 
         # Get alternatives
         alternatives = [e.option for e in evaluations if e.option != best.option][:3]
 
         return Decision(
-            action=best.option,
+            action=spec.tool or best.option,
             needs_approval=needs_approval,
             reasoning=best,
             urgency=context.get("urgency", "normal"),
             alternatives=alternatives,
-            risks=[f"{best.risk_level} risk"],
+            risks=[f"{best.risk_level} risk"] if best.risk_level != "low" else [],
             confidence=best.confidence,
+            tool=spec.tool,
+            params=spec.params,
+            autonomous=spec.autonomous,
+            metadata={"original_option": best.option, "description": spec.description},
         )
+
+    def _tool_bonus(self, option: str) -> float:
+        """Bonus for options that resolve to a real registered tool — so Friday
+        actually picks an executable action over a generic chat response."""
+        spec = self._resolve_action(option)
+        if spec and spec.tool and spec.tool != option.strip().lower() and spec.tool not in ("Respond to",):
+            # Real tool resolution
+            if spec.autonomous:
+                return 0.15
+            return 0.05
+        if spec and spec.tool in self.registry.tools:
+            return 0.10
+        return 0.0
+
+    def _resolve_action(self, option: str):
+        """Resolve an option string to a concrete ActionSpec via the registry."""
+        # Option is already a real tool name
+        clean = option.strip().lower()
+        for tool in self._candidate_tools(option):
+            spec = self.registry.to_spec(tool, description=option, confidence=0.6)
+            if spec.tool:
+                return spec
+        # Fallthrough: unknown tool — keep the option as-is with medium risk
+        fallback = self.registry.to_spec(clean, description=option, confidence=0.4)
+        if fallback.tool and fallback.tool != clean:
+            return fallback
+        # register a plain string spec
+        class _S:
+            tool = clean or "no_action"
+            params = {}
+            description = option
+            risk_level = "medium"
+            autonomous = False
+            confidence = 0.4
+        return _S()
+
+    def _candidate_tools(self, option: str):
+        """Yield registry tool names matching the option."""
+        low = option.lower()
+        exact = self.registry.tools
+        if low in exact:
+            yield low
+        for tool in exact:
+            if low in tool or tool in low.replace(" ", "_"):
+                yield tool
 
     async def _evaluate_option(self, option: str, context: dict) -> Evaluation:
         """Evaluate a single option."""
