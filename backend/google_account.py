@@ -24,6 +24,8 @@ class GoogleAccount:
         "https://www.googleapis.com/auth/calendar.events",
         "https://www.googleapis.com/auth/contacts",
         "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/sdm.service",
+        "https://www.googleapis.com/auth/homegraph",
     ]
 
     def __init__(self, base_dir: str):
@@ -72,7 +74,13 @@ class GoogleAccount:
     def status(self) -> dict:
         return {
             "connected": bool(self.credentials and self.credentials.valid),
-            "scopes": ["Gmail (read/drafts)", "Calendar (create/read/update/delete)", "Contacts (read/write)", "Drive (read)"],
+            "scopes": [
+                "Gmail (read/drafts)",
+                "Calendar (create/read/update/delete)",
+                "Contacts (read/write)",
+                "Drive (read)",
+                "Google Home / Smart Home (device management)",
+            ],
         }
 
     def read_emails(self, query: str = "is:unread", limit: int = 10) -> list[dict]:

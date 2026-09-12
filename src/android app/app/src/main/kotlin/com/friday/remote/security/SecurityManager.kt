@@ -47,6 +47,18 @@ class SecurityManager @Inject constructor(
         sharedPreferences.edit().putString("auth_token", token).apply()
     }
 
+    fun getDeviceToken(): String = sharedPreferences.getString("device_token", "") ?: ""
+
+    fun setDeviceToken(token: String) {
+        sharedPreferences.edit().putString("device_token", token).apply()
+    }
+
+    fun getDeviceId(): String = sharedPreferences.getString("device_id", "") ?: ""
+
+    fun setDeviceId(deviceId: String) {
+        sharedPreferences.edit().putString("device_id", deviceId).apply()
+    }
+
     fun isTlsEnabled(): Boolean {
         val enabled = sharedPreferences.getBoolean("tls_enabled", false)
         Log.d("FridaySecurity", "isTlsEnabled() = $enabled")

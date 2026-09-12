@@ -76,7 +76,7 @@ search_memory_tool = {
 
 list_smart_devices_tool = {
     "name": "list_smart_devices",
-    "description": "Lists all available smart home devices (lights, plugs, etc.) on the network.",
+    "description": "Discovers all available smart-home devices from local integrations and the connected Google Home account. Never assume a fixed device list.",
     "parameters": {
         "type": "OBJECT",
         "properties": {},
@@ -91,7 +91,7 @@ control_light_tool = {
         "properties": {
             "target": {
                 "type": "STRING",
-                "description": "The IP address of the device to control. Always prefer the IP address over the alias for reliability."
+                "description": "The discovered device ID, network address, or device name returned by list_smart_devices."
             },
             "action": {
                 "type": "STRING",

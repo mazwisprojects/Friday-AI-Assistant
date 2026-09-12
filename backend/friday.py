@@ -75,6 +75,7 @@ from actions.proactive import ProactiveEngine
 from memory.memory_manager import load_memory as load_legacy_memory
 from contacts_manager import ContactsManager
 from google_account import GoogleAccount
+from google_home import GoogleHomeBridge
 from notification_manager import NotificationManager
 from tool_builder import ToolBuilder
 from hot_reload import CapabilityEngine
@@ -361,6 +362,7 @@ class AudioLoop:
         self.project_manager = ProjectManager(project_root)
         self.contacts_manager = ContactsManager(project_root)
         self.google_account = GoogleAccount(current_dir)
+        self.google_home = GoogleHomeBridge(self.google_account)
         self.tool_builder = custom_tool_builder
         self.agent_builder = agent_builder
         self.plugin_manager = plugin_manager
@@ -453,11 +455,12 @@ class AudioLoop:
 
         if tool_name == "control_light":
             target = args.get("target", "")
+            google_target = self._find_google_home_device(target)
             if not target or target not in self.kasa_agent.devices and not any(
                 getattr(device, "alias", "").lower() == target.lower()
                 for device in self.kasa_agent.devices.values()
-            ):
-                return "That Kasa device is not known. Discover Kasa devices first."
+            ) and not google_target:
+                return "That device is not known. Discover smart-home devices first."
 
         if tool_name in {"print_stl", "get_print_status"}:
             printer_target = args.get("printer", "")
@@ -996,6 +999,8 @@ class AudioLoop:
             raise PermissionError(f"OpenClaw cannot execute approval-required tool automatically: {tool_name}. {policy['reason']}")
         if tool_name == "gmail_read":
             return self.google_account.read_emails(args.get("query", "is:unread"), args.get("limit", 10))
+        if tool_name == "list_smart_devices":
+            return self._list_smart_devices()
         if tool_name == "gmail_thread_read":
             return self.google_account.read_gmail_thread(args.get("thread_id", ""))
         if tool_name == "google_calendar_list":
@@ -1022,6 +1027,48 @@ class AudioLoop:
         if tool_name in self.tool_builder.tools:
             return self.tool_builder.execute(tool_name, args)
         raise ValueError(f"OpenClaw tool is registered but not executable through the live boundary: {tool_name}")
+
+    def _google_home_device_summary(self, device: dict) -> dict:
+        name = str(device.get("name", ""))
+        device_id = name.rsplit("/devices/", 1)[-1] if "/devices/" in name else name
+        traits = device.get("traits", {})
+        state = device.get("state", {})
+        return {
+            "id": device_id,
+            "name": device.get("customData", {}).get("name") or device.get("name", device_id),
+            "model": device.get("type", "Google Home device"),
+            "type": "google_home",
+            "provider": "google_home",
+            "traits": sorted(traits),
+            "state": state,
+            "online": device.get("online", True),
+            "has_brightness": "sdm.devices.traits.Brightness" in traits,
+            "has_color": "sdm.devices.traits.ColorSetting" in traits,
+        }
+
+    def _list_smart_devices(self) -> list[dict]:
+        """Return every locally discovered Kasa and Google Home device."""
+        devices = []
+        for ip, device in self.kasa_agent.devices.items():
+            devices.append({"ip": ip, "alias": device.alias, "provider": "kasa", "model": device.model})
+        if self.google_home.available:
+            try:
+                devices.extend(self._google_home_device_summary(device) for device in self.google_home.list_devices())
+            except Exception:
+                logger.exception("Google Home discovery failed")
+        return devices
+
+    def _find_google_home_device(self, target: str) -> dict | None:
+        if not self.google_home.available or not target:
+            return None
+        try:
+            for device in self.google_home.list_devices():
+                summary = self._google_home_device_summary(device)
+                if target in {summary["id"], summary["name"], device.get("name", "")}:
+                    return device
+        except Exception:
+            logger.exception("Google Home target lookup failed")
+        return None
 
     async def run_background_tool(self, tool_name: str, function, params: dict):
         """Run blocking action code off-loop and report its result after completion."""
@@ -1819,45 +1866,14 @@ class AudioLoop:
 
                                 elif fc.name == "list_smart_devices":
                                     logger.debug("Tool call list_smart_devices")
-                                    # Use cached devices directly for speed
-                                    # devices_dict is {ip: SmartDevice}
-                                    
-                                    dev_summaries = []
-                                    frontend_list = []
-                                    
-                                    for ip, d in self.kasa_agent.devices.items():
-                                        dev_type = "unknown"
-                                        if d.is_bulb: dev_type = "bulb"
-                                        elif d.is_plug: dev_type = "plug"
-                                        elif d.is_strip: dev_type = "strip"
-                                        elif d.is_dimmer: dev_type = "dimmer"
-                                        
-                                        # Format for Model
-                                        info = f"{d.alias} (IP: {ip}, Type: {dev_type})"
-                                        if d.is_on:
-                                            info += " [ON]"
-                                        else:
-                                            info += " [OFF]"
-                                        dev_summaries.append(info)
-                                        
-                                        # Format for Frontend
-                                        frontend_list.append({
-                                            "ip": ip,
-                                            "alias": d.alias,
-                                            "model": d.model,
-                                            "type": dev_type,
-                                            "is_on": d.is_on,
-                                            "brightness": d.brightness if d.is_bulb or d.is_dimmer else None,
-                                            "hsv": d.hsv if d.is_bulb and d.is_color else None,
-                                            "has_color": d.is_color if d.is_bulb else False,
-                                            "has_brightness": d.is_dimmable if d.is_bulb or d.is_dimmer else False
-                                        })
-                                    
-                                    result_str = "No devices found in cache."
-                                    if dev_summaries:
-                                        result_str = "Found Devices (Cached):\n" + "\n".join(dev_summaries)
-                                    
-                                    # Trigger frontend update
+                                    frontend_list = self._list_smart_devices()
+                                    result_str = "No smart-home devices found."
+                                    if frontend_list:
+                                        result_str = "Found devices:\n" + "\n".join(
+                                            f"{device.get('name') or device.get('alias')} "
+                                            f"({device.get('provider', 'unknown')}, id: {device.get('id', device.get('ip', ''))})"
+                                            for device in frontend_list
+                                        )
                                     if self.on_device_update:
                                         self.on_device_update(frontend_list)
 
@@ -1876,8 +1892,27 @@ class AudioLoop:
                                     
                                     result_msg = f"Action '{action}' on '{target}' failed."
                                     success = False
-                                    
-                                    if action == "turn_on":
+                                    google_device = self._find_google_home_device(target)
+
+                                    if google_device:
+                                        command = "sdm.devices.commands.OnOff"
+                                        params = {"on": action == "turn_on"}
+                                        if action == "set" and brightness is not None:
+                                            command = "sdm.devices.commands.BrightnessAbsolute"
+                                            params = {"brightness": max(0, min(100, int(brightness)))}
+                                        try:
+                                            await asyncio.to_thread(
+                                                self.google_home.execute_command,
+                                                google_device.get("name", ""),
+                                                command,
+                                                params,
+                                            )
+                                            success = True
+                                            result_msg = f"Updated Google Home device '{target}'."
+                                        except Exception as exc:
+                                            logger.exception("Google Home command failed")
+                                            result_msg = f"Google Home command failed: {exc}"
+                                    elif action == "turn_on":
                                         success = await self.kasa_agent.turn_on(target)
                                         if success:
                                             result_msg = f"Turned ON '{target}'."

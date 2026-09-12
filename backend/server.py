@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -38,11 +39,13 @@ import friday
 from actions import system_monitor as system_monitor_module
 from contacts_manager import ContactsManager
 from google_account import GoogleAccount
+from google_home import GoogleHomeBridge
 from claude_provider import ClaudeProvider
 from openclaw_bridge import OpenClawBridge
 from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
+from device_registry import DeviceRegistry
 from actions import agent_dispatcher as agent_dispatcher_module
 
 # Create a Socket.IO server with CORS configured for remote access
@@ -70,7 +73,23 @@ sio = socketio.AsyncServer(
     # Maximum buffer size for large file uploads (50MB)
     max_http_buffer_size=50 * 1024 * 1024,
 )
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_app):
+    logger.info("Startup event triggered; Python version: %s", sys.version)
+    try:
+        loop = asyncio.get_running_loop()
+        logger.debug("Running loop: %s", type(loop))
+        policy = asyncio.get_event_loop_policy()
+        logger.debug("Current event loop policy: %s", type(policy))
+    except Exception:
+        logger.exception("Error checking event loop")
+
+    logger.info("Initializing Kasa Agent")
+    await kasa_agent.initialize()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 app_socketio = socketio.ASGIApp(sio, app)
 
 import signal
@@ -206,6 +225,8 @@ SETTINGS = _copy.deepcopy(DEFAULT_SETTINGS)
 contacts_manager = ContactsManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 global_memory_manager = MemoryManager(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 google_account = GoogleAccount(BACKEND_DIR)
+google_home = GoogleHomeBridge(google_account)
+paired_device_registry = DeviceRegistry(Path(ROOT_DIR) / "long_term_memory" / "paired_devices.json")
 
 async def ensure_audio_ready(sid, require_session=True):
     if not audio_loop:
@@ -258,21 +279,6 @@ authenticator = None
 kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
 # tool_permissions is now SETTINGS["tool_permissions"]
 
-@app.on_event("startup")
-async def startup_event():
-    import sys
-    logger.info("Startup event triggered; Python version: %s", sys.version)
-    try:
-        loop = asyncio.get_running_loop()
-        logger.debug("Running loop: %s", type(loop))
-        policy = asyncio.get_event_loop_policy()
-        logger.debug("Current event loop policy: %s", type(policy))
-    except Exception as e:
-        logger.exception("Error checking event loop")
-
-    logger.info("Initializing Kasa Agent")
-    await kasa_agent.initialize()
-
 @app.get("/status")
 async def status():
     return {
@@ -281,6 +287,7 @@ async def status():
         "gemini_live": bool(os.getenv("GEMINI_API_KEY")),
         "claude_text": ClaudeProvider().available,
         "google_account": google_account.status()["connected"],
+        "google_home": google_home.status(),
         "audio_runtime": bool(audio_loop),
         "openclaw": friday.openclaw_bridge.status(),
     }
@@ -1400,7 +1407,53 @@ async def get_settings(sid):
     await sio.emit('settings', SETTINGS)
     await sio.emit('provider_routing', SETTINGS.get('provider_routing', {}), room=sid)
     await sio.emit('google_account_status', google_account.status(), room=sid)
+    await sio.emit('paired_devices', paired_device_registry.list_devices(), room=sid)
+    try:
+        await sio.emit('google_home_status', google_home.status(), room=sid)
+    except Exception as exc:
+        await sio.emit('google_home_status', {'connected': False, 'error': str(exc)}, room=sid)
     await sio.emit('openclaw_status', friday.openclaw_bridge.status(), room=sid)
+
+@sio.event
+async def request_device_pairing(sid, data=None):
+    """Create a short-lived code for a user-approved companion-device pairing."""
+    try:
+        pairing = paired_device_registry.create_pairing_code((data or {}).get('ttl_seconds', 300))
+        await sio.emit('device_pairing_code', pairing, room=sid)
+    except Exception as exc:
+        logger.exception("Could not create device pairing code")
+        await sio.emit('device_pairing_error', {'error': str(exc)}, room=sid)
+
+@sio.event
+async def pair_device(sid, data):
+    """Consume a pairing code and return a device token exactly once."""
+    try:
+        result = paired_device_registry.pair(str((data or {}).get('code', '')), data or {})
+        await sio.emit('device_paired', result, room=sid)
+        await sio.emit('paired_devices', paired_device_registry.list_devices())
+    except Exception as exc:
+        await sio.emit('device_pairing_error', {'error': str(exc)}, room=sid)
+
+@sio.event
+async def device_heartbeat(sid, data):
+    """Accept a companion heartbeat and publish the updated presence state."""
+    try:
+        device = paired_device_registry.heartbeat(str((data or {}).get('device_token', '')), data or {})
+        await sio.emit('device_heartbeat_ack', device, room=sid)
+        await sio.emit('paired_devices', paired_device_registry.list_devices())
+    except Exception as exc:
+        await sio.emit('device_heartbeat_error', {'error': str(exc)}, room=sid)
+
+@sio.event
+async def list_paired_devices(sid):
+    await sio.emit('paired_devices', paired_device_registry.list_devices(), room=sid)
+
+@sio.event
+async def revoke_paired_device(sid, data):
+    device_id = str((data or {}).get('device_id', ''))
+    removed = paired_device_registry.revoke(device_id)
+    await sio.emit('paired_device_revoked', {'device_id': device_id, 'removed': removed}, room=sid)
+    await sio.emit('paired_devices', paired_device_registry.list_devices())
 
 @sio.event
 async def get_openclaw_status(sid):
@@ -1848,15 +1901,6 @@ async def get_process_list(sid):
         await sio.emit('process_list', sorted(processes, key=lambda item: item.get('memory_percent') or 0, reverse=True)[:100], room=sid)
     except Exception as e:
         logger.exception("Error getting process list")
-
-@sio.event
-async def kill_process(sid, data):
-    """Kill a process for ProcessWindow."""
-    try:
-        pid = data.get('pid')
-        await sio.emit('status', {'msg': f'Process {pid} killed'})
-    except Exception as e:
-        logger.exception("Error killing process")
 
 @sio.event
 async def get_desktops(sid):
@@ -3147,7 +3191,6 @@ if __name__ == "__main__":
         "server:app_socketio", 
         host=_host, 
         port=8000, 
-        reload=False, # Reload enabled causes spawn of worker which might miss the event loop policy patch
+        reload=False,
         loop="asyncio",
-        reload_excludes=["temp_cad_gen.py", "output.stl", "*.stl"]
     )

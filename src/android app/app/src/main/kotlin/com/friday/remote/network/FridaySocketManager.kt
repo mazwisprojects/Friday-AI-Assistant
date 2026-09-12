@@ -1,6 +1,9 @@
 package com.friday.remote.network
 
 import android.content.Context
+import android.os.BatteryManager
+import android.os.Build
+import android.provider.Settings
 import com.friday.remote.security.SecurityManager
 import dagger.hilt.android.qualifiers.ApplicationContext
 import io.socket.client.IO
@@ -58,6 +61,7 @@ class FridaySocketManager @Inject constructor(
     @ApplicationContext private val context: Context
 ) {
     enum class ConnectionState { CONNECTED, DISCONNECTED, CONNECTING, ERROR }
+    enum class AuthenticationState { UNKNOWN, NOT_REQUIRED, AUTHENTICATED, REJECTED }
 
     data class FridayMessage(
         val text: String,
@@ -162,12 +166,32 @@ class FridaySocketManager @Inject constructor(
         val driveEnabled: Boolean
     )
 
+    data class VisionStatus(
+        val enabled: Boolean = false,
+        val source: String = "camera",
+        val sessionReady: Boolean = false,
+        val paused: Boolean = false,
+        val framesReceived: Int = 0,
+        val framesSent: Int = 0,
+        val error: String = ""
+    )
+
     data class KasaDevice(
         val id: String,
         val name: String,
         val type: String,
         val isOn: Boolean,
         val brightness: Int
+    )
+
+    data class PairedDevice(
+        val deviceId: String,
+        val name: String,
+        val platform: String,
+        val model: String,
+        val status: String,
+        val battery: Int?,
+        val network: String?
     )
 
     data class Printer(
@@ -218,11 +242,15 @@ class FridaySocketManager @Inject constructor(
 
     private var socket: Socket? = null
     private var monitorJob: Job? = null
+    private var heartbeatJob: Job? = null
     private var audioSink: AudioSink? = null
     private val _outbox = ArrayList<QueuedEvent>()
 
     private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
     val connectionState: StateFlow<ConnectionState> = _connectionState
+
+    private val _authenticationState = MutableStateFlow(AuthenticationState.UNKNOWN)
+    val authenticationState: StateFlow<AuthenticationState> = _authenticationState
 
     private val _messages = MutableStateFlow<List<FridayMessage>>(emptyList())
     val messages: StateFlow<List<FridayMessage>> = _messages
@@ -260,6 +288,12 @@ class FridaySocketManager @Inject constructor(
     private val _kasaDevices = MutableStateFlow<List<KasaDevice>>(emptyList())
     val kasaDevices: StateFlow<List<KasaDevice>> = _kasaDevices
 
+    private val _pairedDevice = MutableStateFlow<PairedDevice?>(null)
+    val pairedDevice: StateFlow<PairedDevice?> = _pairedDevice
+
+    private val _pairingError = MutableStateFlow("")
+    val pairingError: StateFlow<String> = _pairingError
+
     private val _printers = MutableStateFlow<List<Printer>>(emptyList())
     val printers: StateFlow<List<Printer>> = _printers
 
@@ -271,6 +305,9 @@ class FridaySocketManager @Inject constructor(
 
     private val _cadStatus = MutableStateFlow<CADStatus?>(null)
     val cadStatus: StateFlow<CADStatus?> = _cadStatus
+
+    private val _visionStatus = MutableStateFlow(VisionStatus())
+    val visionStatus: StateFlow<VisionStatus> = _visionStatus
 
     fun connect() {
         android.util.Log.i("FridaySocket", "=== CONNECT() CALLED ===")
@@ -298,6 +335,7 @@ class FridaySocketManager @Inject constructor(
                 reconnectionAttempts = Int.MAX_VALUE
                 timeout = 20000
                 transports = arrayOf("websocket", "polling")
+                auth = mapOf("token" to securityManager.getToken())
             }
             
             android.util.Log.d("FridaySocket", "Creating IO.socket...")
@@ -307,6 +345,11 @@ class FridaySocketManager @Inject constructor(
             socket?.on(Socket.EVENT_CONNECT) {
                 android.util.Log.i("FridaySocket", "🎉 EVENT_CONNECT - Connected!")
                 _connectionState.value = ConnectionState.CONNECTED
+                _authenticationState.value = if (securityManager.getToken().isEmpty()) {
+                    AuthenticationState.NOT_REQUIRED
+                } else {
+                    AuthenticationState.AUTHENTICATED
+                }
                 flushOutbox()
                 requestSystemMonitor()
                 requestTaskCards()
@@ -315,6 +358,8 @@ class FridaySocketManager @Inject constructor(
                 requestKasaDevices()
                 requestPrinters()
                 requestGoogleAccountStatus()
+                requestPairedDevices()
+                requestVisionStatus()
                 startMonitor()
             }
             
@@ -332,6 +377,10 @@ class FridaySocketManager @Inject constructor(
                     val ex = args?.firstOrNull() as Exception
                     android.util.Log.e("FridaySocket", "Message: ${ex.message}")
                     android.util.Log.e("FridaySocket", "Cause: ${ex.cause?.message}")
+                }
+                val message = args?.firstOrNull()?.toString()?.lowercase() ?: ""
+                if (message.contains("unauthorized") || message.contains("authentication") || message.contains("token")) {
+                    _authenticationState.value = AuthenticationState.REJECTED
                 }
                 _connectionState.value = ConnectionState.ERROR
             }
@@ -352,6 +401,8 @@ class FridaySocketManager @Inject constructor(
                 requestKasaDevices()
                 requestPrinters()
                 requestGoogleAccountStatus()
+                requestPairedDevices()
+                requestVisionStatus()
                 startMonitor()
             }
             
@@ -384,11 +435,15 @@ class FridaySocketManager @Inject constructor(
             socket?.on("settings") { args -> onSettings(args) }
             socket?.on("weather_data") { args -> onWeatherData(args) }
             socket?.on("google_account_status") { args -> onGoogleAccountStatus(args) }
+            socket?.on("device_paired") { args -> onDevicePaired(args) }
+            socket?.on("device_pairing_error") { args -> onDevicePairingError(args) }
+            socket?.on("device_heartbeat_ack") { args -> onDeviceHeartbeat(args) }
             socket?.on("kasa_devices") { args -> onKasaDevices(args) }
             socket?.on("printer_list") { args -> onPrinters(args) }
             socket?.on("system_alert") { args -> onSystemAlert(args) }
             socket?.on("cad_data") { args -> onCADData(args) }
             socket?.on("cad_status") { args -> onCADStatus(args) }
+            socket?.on("video_status") { args -> onVisionStatus(args) }
 
             socket?.connect()
             android.util.Log.i("FridaySocket", "🚀 socket.connect() called (async)")
@@ -417,6 +472,7 @@ class FridaySocketManager @Inject constructor(
 
     fun disconnect() {
         monitorJob?.cancel()
+        heartbeatJob?.cancel()
         socket?.disconnect()
         _connectionState.value = ConnectionState.DISCONNECTED
     }
@@ -447,7 +503,9 @@ class FridaySocketManager @Inject constructor(
         requestKasaDevices()
         requestPrinters()
         requestGoogleAccountStatus()
+        requestPairedDevices()
         requestWeather()
+        requestVisionStatus()
     }
 
     /** Offline-first: queue while disconnected, replay on reconnect. */
@@ -462,6 +520,18 @@ class FridaySocketManager @Inject constructor(
     fun sendUserInput(text: String) {
         addMessage(text, true, false)
         emit("user_input", JSONObject().put("text", text))
+    }
+
+    fun requestVisionStatus() {
+        emit("get_vision_status", JSONObject())
+    }
+
+    fun setVisionSource(source: String) {
+        emit("set_vision_source", JSONObject().put("source", source))
+    }
+
+    fun setLiveVision(enabled: Boolean) {
+        emit("set_live_video", JSONObject().put("enabled", enabled))
     }
 
     fun respondToApproval(id: String, approved: Boolean) {
@@ -569,6 +639,23 @@ class FridaySocketManager @Inject constructor(
 
     fun requestGoogleAccountStatus() {
         emit("get_google_account_status", JSONObject())
+    }
+
+    fun requestPairedDevices() {
+        emit("list_paired_devices", JSONObject())
+    }
+
+    fun pairDevice(code: String) {
+        _pairingError.value = ""
+        emit("pair_device", JSONObject().apply {
+            put("code", code.trim())
+            put("device_id", localDeviceId())
+            put("name", "Friday ${Build.MODEL}")
+            put("platform", "android")
+            put("model", Build.MODEL)
+            put("battery", batteryPercent())
+            put("network", networkType())
+        })
     }
 
     fun connectGoogleAccount() {
@@ -707,6 +794,20 @@ class FridaySocketManager @Inject constructor(
         val error = data.optString("error", "")
         val ok = data.optBoolean("ok", error.isEmpty())
         addMessage(if (ok) "File received by Friday." else "File upload failed: $error", false, true)
+    }
+
+    private fun onVisionStatus(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as JSONObject
+        _visionStatus.value = VisionStatus(
+            enabled = data.optBoolean("enabled", false),
+            source = data.optString("source", "camera"),
+            sessionReady = data.optBoolean("session_ready", false),
+            paused = data.optBoolean("paused", false),
+            framesReceived = data.optInt("frames_received", 0),
+            framesSent = data.optInt("frames_sent", 0),
+            error = data.optString("error", "")
+        )
     }
 
     private fun onFileDownload(args: Array<Any?>) {
@@ -952,6 +1053,40 @@ class FridaySocketManager @Inject constructor(
         } catch (e: Exception) { /* ignore malformed */ }
     }
 
+    private fun onDevicePaired(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        try {
+            val data = args[0] as JSONObject
+            val device = data.getJSONObject("device")
+            securityManager.setDeviceId(data.optString("device_id", localDeviceId()))
+            securityManager.setDeviceToken(data.optString("device_token", ""))
+            _pairingError.value = ""
+            onDeviceHeartbeat(arrayOf(device))
+            addMessage("This phone is paired with Friday.", false, true)
+        } catch (e: Exception) {
+            _pairingError.value = "Pairing response was invalid."
+        }
+    }
+
+    private fun onDevicePairingError(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        _pairingError.value = (args[0] as? JSONObject)?.optString("error", "Pairing failed") ?: "Pairing failed"
+    }
+
+    private fun onDeviceHeartbeat(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val data = args[0] as? JSONObject ?: return
+        _pairedDevice.value = PairedDevice(
+            deviceId = data.optString("device_id", securityManager.getDeviceId()),
+            name = data.optString("name", "This phone"),
+            platform = data.optString("platform", "android"),
+            model = data.optString("model", Build.MODEL),
+            status = data.optString("status", "online"),
+            battery = if (data.has("battery") && !data.isNull("battery")) data.optInt("battery") else null,
+            network = data.optString("network", null)
+        )
+    }
+
     private fun onKasaDevices(args: Array<Any?>) {
         if (args.isEmpty()) return
         try {
@@ -1066,6 +1201,7 @@ class FridaySocketManager @Inject constructor(
 
     private fun startMonitor() {
         monitorJob?.cancel()
+        heartbeatJob?.cancel()
         monitorJob = CoroutineScope(Dispatchers.IO).launch {
             while (_connectionState.value == ConnectionState.CONNECTED) {
                 try {
@@ -1075,6 +1211,52 @@ class FridaySocketManager @Inject constructor(
                     delay(2000L)
                 }
             }
+        }
+        heartbeatJob = CoroutineScope(Dispatchers.IO).launch {
+            while (_connectionState.value == ConnectionState.CONNECTED) {
+                try {
+                    sendDeviceHeartbeat()
+                    delay(60_000L)
+                } catch (e: Exception) {
+                    delay(60_000L)
+                }
+            }
+        }
+    }
+
+    private fun sendDeviceHeartbeat() {
+        val token = securityManager.getDeviceToken()
+        if (token.isEmpty()) return
+        emit("device_heartbeat", JSONObject().apply {
+            put("device_token", token)
+            put("device_id", securityManager.getDeviceId())
+            put("battery", batteryPercent())
+            put("network", networkType())
+        })
+    }
+
+    private fun localDeviceId(): String {
+        val saved = securityManager.getDeviceId()
+        if (saved.isNotEmpty()) return saved
+        return Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+            ?: "android-${Build.MODEL.lowercase().replace(" ", "-")}"
+    }
+
+    private fun batteryPercent(): Int? {
+        val manager = context.getSystemService(Context.BATTERY_SERVICE) as? BatteryManager ?: return null
+        val level = manager.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        return level.takeIf { it in 0..100 }
+    }
+
+    private fun networkType(): String {
+        val manager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? android.net.ConnectivityManager
+            ?: return "unknown"
+        val network = manager.activeNetwork ?: return "offline"
+        val capabilities = manager.getNetworkCapabilities(network) ?: return "unknown"
+        return when {
+            capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+            capabilities.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "cellular"
+            else -> "online"
         }
     }
 
