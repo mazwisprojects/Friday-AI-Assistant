@@ -32,6 +32,7 @@ from .situation_awareness import SituationAwareness, SituationAssessment
 from .decision_engine import DecisionEngine, Decision
 from .knowledge_graph import KnowledgeGraph
 from .emotional_intelligence import EmotionalIntelligence, EmotionalState
+from .event_bus import CognitiveEvent, CognitiveEventBus, get_bus
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +78,10 @@ class FridayCognition:
         self.reasoning_engine = ReasoningEngine(llm_client=llm_client)
         self.world_model = WorldModel(llm_client=llm_client)
         self.identity = FridayIdentity(identity_path=identity_path)
+        # P4.1: process-wide event bus (survives Live reconnects) + swarm wiring
+        self.event_bus = get_bus()
         self.proactive_engine = ProactiveEngine()
-        self.agent_swarm = AgentSwarm()
+        self.agent_swarm = AgentSwarm(event_bus=self.event_bus)
         self.situation_awareness = SituationAwareness()
         self.decision_engine = DecisionEngine()
         self.emotional_intelligence = EmotionalIntelligence()
@@ -134,6 +137,26 @@ class FridayCognition:
             f"- {e.name} ({e.entity_type})" for e in entities[:limit])
         return f"Known knowledge ({stats['entity_count']} entities, {stats['relationship_count']} relations):\n{lines}\n"
 
+    # ---------- P4.1: event bridge (background cognition -> live session) ----------
+
+    def publish_event(self, topic: str, summary: str, priority: str = "info",
+                      payload: dict[str, Any] | None = None, dedupe_key: str = "") -> bool:
+        """Publish a background-cognition event onto the process-wide bus.
+
+        Non-blocking and exception-safe: a failing bus can never break cognition.
+        """
+        try:
+            return self.event_bus.publish(CognitiveEvent(
+                topic=topic,
+                summary=summary,
+                priority=priority,
+                payload=payload or {},
+                dedupe_key=dedupe_key,
+            ))
+        except Exception:
+            logger.debug("publish_event failed", exc_info=True)
+            return False
+
     async def process(self, context: CognitiveContext) -> CognitiveResponse:
         """
         Process user input through all cognitive systems.
@@ -186,6 +209,18 @@ class FridayCognition:
             context={"urgency": situation.urgency, "emotion": emotion.primary},
         )
         response.decision = decision
+
+        # Step 4.4 (P4.1): high-urgency decisions that need Sir's approval flow to
+        # the live session via the event bus so Friday can ask out loud, even when
+        # this turn was triggered by background cognition.
+        if decision.needs_approval and decision.urgency in ("high", "critical"):
+            self.publish_event(
+                topic="approval_needed",
+                summary=f"Need your approval: {decision.action}",
+                priority="urgent",
+                payload={"tool": decision.tool or "", "risks": list(decision.risks or [])},
+                dedupe_key=f"approval:{decision.action[:80]}",
+            )
 
         # Step 4.5 (P3.11 scenario rehearsal): for high/critical decisions on real
         # tools, simulate the outcome before committing so Friday knows what will
@@ -336,6 +371,23 @@ class FridayCognition:
         }
         actions = await self.proactive_engine.continuous_scan(context)
         logger.info("Proactive scan found %d actions", len(actions))
+
+        # P4.1: threats stream to the live session via the event bus (push, not
+        # pull) — the initiative loop no longer has to be the only delivery path.
+        for action in actions:
+            if action.type != "threat_mitigation":
+                continue
+            severity = float(getattr(action, "confidence", 0.0) or 0.0)
+            self.publish_event(
+                topic="threat",
+                summary=action.description,
+                priority="urgent" if severity >= 0.8 else "important",
+                payload={
+                    "recommended_action": action.recommended_action,
+                    "severity": severity,
+                },
+                dedupe_key=f"threat:{action.description[:80]}",
+            )
         return actions
 
     async def simulate_scenario(self, scenario_description: str) -> SimulationResult:

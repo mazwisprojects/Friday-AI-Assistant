@@ -339,6 +339,7 @@ class AudioLoop:
         self.proactive_engine = ProactiveEngine()
         self.notifications = NotificationManager(on_hud=on_notification, on_voice=self._voice_notification)
         self._last_user_speech = time.monotonic()
+        self._last_cognitive_event_ts = 0.0  # P4.1: event-bridge speech rate limiter
         self.last_uploaded_image = None
         self.last_uploaded_file = None
         self.undo_manager = None
@@ -740,6 +741,11 @@ class AudioLoop:
                     except Exception as exc:
                         print(f"[FRIDAY] [COGNITION] Proactive scan failed: {exc}")
                 for caction in cognitive_actions:
+                    # P4.1: threats already stream to the session through the event
+                    # bus (drain_cognitive_events) — skip them here to avoid double
+                    # delivery. Needs/opportunities remain deliberate, budgeted work.
+                    if caction.type == "threat_mitigation":
+                        continue
                     prompt = (
                         "System Notification: Your cognitive core flagged the following proactively. "
                         f"Type: {caction.type}; urgency: {caction.urgency}. "
@@ -926,6 +932,36 @@ class AudioLoop:
         except Exception as error:
             self._pending_runtime_notifications.append(payload)
             print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivery failed: {error}")
+
+    async def drain_cognitive_events(self):
+        """P4.1: consume background-cognition events and surface them in the live session.
+
+        The cognition core publishes threats / approval requests / swarm completions
+        to the process-wide event bus; this consumer decides what Sir actually hears:
+        - 'important'/'urgent' events are spoken via inject_runtime_event (which
+          queues them for redelivery if the Live session drops mid-send);
+        - 'info' events are logged only — background work stays visible in the
+          console without interrupting conversation;
+        - rate limiting (10s urgent / 45s important) prevents a burst of findings
+          from talking over Sir.
+        """
+        bus = getattr(getattr(self, "cognition", None), "event_bus", None)
+        if not bus:
+            return
+
+        async def _handle(event):
+            if event.priority == "info":
+                print(f"[FRIDAY] [COGNITION EVENT] (info) {event.topic}: {event.summary}")
+                return
+            now = time.monotonic()
+            min_gap = 10.0 if event.priority == "urgent" else 45.0
+            if now - self._last_cognitive_event_ts < min_gap:
+                print(f"[FRIDAY] [COGNITION EVENT] rate-limited ({event.priority}): {event.summary}")
+                return
+            self._last_cognitive_event_ts = now
+            await self.inject_runtime_event(event.summary, event.priority)
+
+        await bus.drain(_handle)
 
     def stop(self):
         self.stop_event.set()
@@ -3235,6 +3271,7 @@ class AudioLoop:
                     tg.create_task(self.initiative_loop())
                     tg.create_task(self.maintenance_loop())
                     tg.create_task(self._send_live_video())
+                    tg.create_task(self.drain_cognitive_events())  # P4.1: brain -> voice bridge
 
                     # Handle Startup vs Reconnect Logic
                     if not is_reconnect:

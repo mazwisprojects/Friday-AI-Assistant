@@ -15,6 +15,7 @@ Modules:
     decision_engine - Autonomous decision making
     knowledge_graph - Structured knowledge with relationships
     emotional_intelligence - Emotion detection and response
+    event_bus - Background cognition -> live session bridge
     core - Integration layer connecting all systems
 """
 
@@ -30,6 +31,7 @@ from .decision_engine import DecisionEngine, Decision, Evaluation
 from .action_registry import ActionRegistry, ActionSpec
 from .knowledge_graph import KnowledgeGraph, QueryResult, Entity, Relationship
 from .emotional_intelligence import EmotionalIntelligence, EmotionalState
+from .event_bus import CognitiveEvent, CognitiveEventBus, get_bus
 
 __all__ = [
     "FridayCognition",
@@ -53,4 +55,7 @@ __all__ = [
     "EmotionalState",
     "ActionRegistry",
     "ActionSpec",
+    "CognitiveEvent",
+    "CognitiveEventBus",
+    "get_bus",
 ]

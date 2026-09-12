@@ -100,7 +100,7 @@ class EmotionDetector:
                 'excited|grateful|urgent|neutral", "intensity": 0.0-1.0, '
                 '"secondary": "<secondary emotion or empty>", "confidence": 0.0-1.0}'
             )
-            response = await asyncio.to_thread(generate_response, prompt, "lite")
+            response = await asyncio.to_thread(generate_response, prompt, "background")
             if not getattr(response, "ok", False):
                 return None
             match = re.search(r"\{.*\}", (response.text or "").strip(), re.DOTALL)

@@ -1,5 +1,8 @@
 {
     "face_auth_enabled": false,
+    "model_routing": {
+        "background": ["gemini-3.1-pro-preview", "gemini-2.5-pro", "gemini-3.6-flash", "gemini-2.5-flash"]
+    },
     "tool_permissions": {
         "generate_cad": false,
         "run_web_agent": false,
@@ -83,6 +86,6 @@
         "dest": "",
         "interval_hours": 6,
         "keep": 10,
-        "last_backup": 1789093187.867513
+        "last_backup": 1789179834.1989198
     }
 }

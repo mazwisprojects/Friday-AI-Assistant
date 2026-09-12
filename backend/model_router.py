@@ -28,6 +28,10 @@ DEFAULT_CHAINS = {
     "flash": ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"],
     "lite": [FACT_GEMINI_MODEL, "gemini-2.0-flash-lite"],
     "cad": [CAD_GEMINI_MODEL, "gemini-2.5-pro"],
+    # P4.3: background cognition (emotion refinement, lesson derivation, future
+    # nightly rollups) — pro-led for deeper reasoning, flash fallback when pro
+    # models are cooling. Override in settings.json['model_routing']['background'].
+    "background": [CAD_GEMINI_MODEL, "gemini-2.5-pro", "gemini-3.6-flash", "gemini-2.5-flash"],
 }
 
 def _load_health() -> dict:

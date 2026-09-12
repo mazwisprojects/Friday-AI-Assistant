@@ -15,6 +15,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .event_bus import CognitiveEvent
+
 logger = logging.getLogger(__name__)
 
 
@@ -144,9 +146,10 @@ class AgentSwarm:
     complex tasks run through actual background agents instead of shells.
     """
 
-    def __init__(self):
+    def __init__(self, event_bus=None):
         self.coordinator = SwarmCoordinator()
         self._initialize_agents()
+        self.event_bus = event_bus  # P4.1: publishes completions for the live bridge
         self.dispatcher = None
         try:
             from actions import agent_dispatcher as _ad
@@ -206,6 +209,23 @@ class AgentSwarm:
         output = await self.coordinator.synthesize(results)
         if delegated:
             output["delegated"] = delegated
+
+        # P4.1: completions reach the live bridge as 'info' (logged, not spoken —
+        # the session consumer decides what's worth interrupting Sir for).
+        if self.event_bus is not None:
+            try:
+                self.event_bus.publish(CognitiveEvent(
+                    topic="swarm_result",
+                    summary=f"Swarm task complete: {task_description[:100]}",
+                    priority="info",
+                    payload={
+                        "success_count": output.get("success_count", 0),
+                        "delegated": bool(output.get("delegated")),
+                    },
+                    dedupe_key=f"swarm:{task_description[:60]}",
+                ))
+            except Exception:
+                logger.debug("Swarm event publish failed", exc_info=True)
         return output
 
     def _select_agent(self, task: Task) -> Optional[BaseAgent]:

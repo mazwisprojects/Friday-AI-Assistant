@@ -97,9 +97,10 @@ class MistakeJournal:
         self.mistakes.append(mistake)
         return mistake
 
-    def derive_lesson(self, mistake: Mistake) -> str:
+    async def derive_lesson(self, mistake: Mistake) -> str:
         """Ask the LLM for a durable lesson from a mistake; heuristic fallback."""
         try:
+            import asyncio
             from model_router import generate_response
             prompt = (
                 "Derive ONE short, durable lesson from this failure so the same "
@@ -108,7 +109,7 @@ class MistakeJournal:
                 f"Context: {mistake.context[:300]}\n\n"
                 'Return ONLY JSON: {"lesson": "..."}'
             )
-            response = generate_response(prompt, "lite")
+            response = await asyncio.to_thread(generate_response, prompt, "background")
             if getattr(response, "ok", False):
                 import json as _json, re as _re
                 match = _re.search(r"\{.*\}", (response.text or ""), _re.DOTALL)
