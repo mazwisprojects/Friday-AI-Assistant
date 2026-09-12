@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_LIMITS = {"timeout_seconds": 60, "max_memory_mb": 256, "max_output_chars": 6000}
@@ -54,12 +57,13 @@ def validate_limits(governance: dict) -> None:
 
 
 def is_active(manifest: dict) -> bool:
-    # NO GOVERNANCE LIMIT - All tools/agents are active
-    # User takes responsibility for what they build
     if not manifest.get("enabled", True):
         return False
     governance = manifest.get("governance")
     if not governance:
         return True
-    # Skip expiry check - tools don't expire
-    return True
+    return (
+        governance.get("approval") == "approved"
+        and governance.get("security_review") == "approved"
+        and not is_expired(governance)
+    )

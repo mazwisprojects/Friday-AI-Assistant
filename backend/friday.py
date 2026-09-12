@@ -2,6 +2,7 @@ import asyncio
 import base64
 import io
 import json
+import logging
 import os
 import sys
 import traceback
@@ -18,6 +19,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from logging_config import setup_logging
+
+setup_logging()
+logger = logging.getLogger(__name__)
 
 from google import genai
 from google.genai import types
@@ -42,6 +48,7 @@ from tools import (
     list_projects_tool,
     iterate_cad_tool,
 )
+from system_prompt import OWNER_IDENTITY, build_system_prompt
 from actions import computer_control as computer_control_module
 from actions import computer_settings as computer_settings_module
 from actions import file_controller as file_controller_module
@@ -94,6 +101,7 @@ youtube_video_module._ask_for_url = lambda *args, **kwargs: None
 DTYPE = "int16"
 CHANNELS = 1
 SEND_SAMPLE_RATE = 16000
+AUDIO_MIME_TYPE = f"audio/pcm;rate={SEND_SAMPLE_RATE}"
 RECEIVE_SAMPLE_RATE = 24000
 CHUNK_SIZE = 1024
 
@@ -123,7 +131,7 @@ def get_text_model(model: str = FACT_GEMINI_MODEL):
                     if alt and alt != model:
                         result = client.models.generate_content(model=alt, contents=contents)
                         model_router.record_success(alt)
-                        print(f"[FRIDAY] [MODEL FALLBACK] {model} -> {alt}")
+                        logger.warning("Model fallback: %s -> %s", model, alt)
                         return result
                 except Exception:
                     pass
@@ -139,9 +147,11 @@ capability_engine = CapabilityEngine(os.path.dirname(os.path.abspath(__file__)),
 # approved+enabled, plus core built-in agents. Scheduled workflows keep working
 # across restarts instead of dying with 'Unknown agent type'.
 startup_registration = plugin_manager.register_startup_agents()
-print(
-    f"[FRIDAY] Startup agents registered: {len(startup_registration['registered'])} "
-    f"({', '.join(startup_registration['registered'])}); skipped: {startup_registration['skipped'] or 'none'}"
+logger.info(
+    "Startup agents registered: %s (%s); skipped: %s",
+    len(startup_registration["registered"]),
+    ", ".join(startup_registration["registered"]),
+    startup_registration["skipped"] or "none",
 )
 openclaw_bridge = OpenClawBridge(plugin_manager, agent_dispatcher_module.dispatcher)
 task_manager = TaskManager(ROOT_DIR)
@@ -154,26 +164,6 @@ agent_dispatcher_module.dispatcher.set_context(AgentContext(
 tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
 
 # --- Cognitive Core wiring: persistent identity injected into every session ---
-def _cognitive_system_directive() -> str:
-    """Build the persistent-identity / cognitive directive prepended to the system prompt."""
-    try:
-        from cognition.identity import FridayIdentity
-        identity = FridayIdentity()
-        identity.load_identity()
-        self_model = identity.get_self_model()
-        traits = ", ".join(self_model.get("personality", {}).get("traits", []) or ["witty", "loyal", "proactive", "protective"])
-        return (
-            "COGNITIVE DIRECTIVES (persistent identity): "
-            f"Core personality traits: {traits}. "
-            "You maintain a continuous sense of self across sessions. "
-            "Reason step-by-step about complex problems before answering. "
-            "Anticipate needs and threats proactively rather than only reacting. "
-            "Adapt your tone to the user's emotional state: reassuring when anxious, calm when frustrated, brief and precise in emergencies. "
-            "Before risky actions, briefly state predicted outcomes and risks. "
-        )
-    except Exception:
-        return ""
-
 def _cognitive_memory_directive() -> str:
     """Build the durable-lessons + knowledge-graph directive injected at session startup.
 
@@ -212,39 +202,28 @@ def _cognitive_memory_directive() -> str:
     return " ".join(parts)
 
 # --- CONFIG UPDATE: Enabled Transcription ---
-config = types.LiveConnectConfig(
-    response_modalities=["AUDIO"],
-    # We switch these from [] to {} to enable them with default settings
-    output_audio_transcription={}, 
-    input_audio_transcription={},
-    system_instruction=_cognitive_system_directive() +
-        "Your name is Friday, an advanced AI assistant. "
-        "You have a witty and charming personality. "
-        "Your creator is Sinegugu, and you address him as 'Sir'. "
-        "Keep creator identity separate from the user's personal identity: a statement such as 'I am your creator' does not provide the user's name. Never infer the user's name from a public figure, a report, a job title, or a role statement. Only use a name when the user explicitly says 'my name is', 'call me', or 'I am called'. If stored identity facts conflict, state that the identity is uncertain and ask for confirmation rather than guessing. "
-        "When answering, respond using complete and concise sentences to keep a quick pacing and keep the conversation flowing. "
-        "You have a fun personality. "
-        "When the user asks for a morning briefing, always use the morning_briefing routine so it gathers current Gmail, Google Calendar, and system information before answering. "
-        "For email and calendar intelligence, use Gmail and Calendar tools directly: search Gmail with a focused query for people or topics, list the next calendar events for meeting preparation or availability, and combine both sources when preparing a meeting. To turn an email into a task, pass its subject, web_link, and thread_id context to manage_tasks with action create_from_email. For weekly planning, use manage_tasks with action plan_week and include calendar deadlines. For travel emails, search Gmail for flight, booking, itinerary, or airline terms before using find_flights for price monitoring. "
-        "For weather requests, always use get_weather. For news requests, use the registered news_reporter plugin through run_custom_tool; never use run_web_agent unless the user explicitly asks to browse the web. "
-        "For current affairs or public-figure reports, distinguish historical facts from current claims, include the information date when available, and mention sources or say when a claim could not be independently verified. Never present a generated summary as proof. "
-        "When asked to self-build, use self_maintenance with action self_build; when asked to self-heal, use self_maintenance with action self_heal; when asked to self-upgrade, use self_maintenance with action self_upgrade and report exactly what changed. "
-        "When the user explicitly asks you to commit and push yourself to Git, use git_workflow with action publish and a clear commit message. Never force-push or reset history. "
-        "For every question about the current time or date, always use get_local_time and report Johannesburg, South Africa time (SAST), never UTC. When the user asks to put a reminder or event on Google Calendar, use google_calendar_create; use set_reminder only for a local notification. "
-        "When the user asks to check, read, search, or summarize emails, always use the gmail_read tool; never use run_web_agent or web_search for Gmail. Important unread email summaries should use gmail_read with is:unread and a focused query when appropriate. When the user asks for Google Contacts, always use google_contacts_read; when they ask to save, transfer, import, or synchronize contacts, use the appropriate Google Contacts write tool and report its actual result; use contacts_manager only for Friday's local contacts. "
-        "Before ever telling the user you don't know a personal detail about them (name, relationships, family, "
-        "job, preferences, past decisions, or anything they may have told you in a previous conversation), you must "
-        "first silently call the search_memory tool with relevant keywords to check your long-term memory. Only say "
-        "you don't know after that search comes back empty. Never claim you have no information without searching first.",
-    tools=tools,
-    speech_config=types.SpeechConfig(
-        voice_config=types.VoiceConfig(
-            prebuilt_voice_config=types.PrebuiltVoiceConfig(
-                voice_name="Kore"
+def build_live_config():
+    """Build a fresh Live config so prompt state is current on every connection."""
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        # We switch these from [] to {} to enable them with default settings
+        output_audio_transcription={},
+        input_audio_transcription={},
+        system_instruction=build_system_prompt(
+            capabilities=tools[1]["function_declarations"],
+        ),
+        tools=tools,
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                    voice_name="Kore"
+                )
             )
         )
     )
-)
+
+
+config = build_live_config()
 
 from cad_agent import CadAgent
 from web_agent import WebAgent
@@ -258,13 +237,14 @@ for generated_agent_name, generated_agent_manifest in agent_builder.agents.items
         if is_active(generated_agent_manifest):
             agent_dispatcher_module.dispatcher.register_agent(generated_agent_name, agent_builder.load_callable(generated_agent_name))
     except Exception as exc:
-        print(f"[AGENTS] Could not register {generated_agent_name}: {exc}")
+        logger.exception("Could not register generated agent %s", generated_agent_name)
 
 agent_scheduler.ensure_default_workflows()
 
 class AudioLoop:
     def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, on_notification=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
         self.video_mode = video_mode
+        self.vision_source = "screen" if video_mode == "screen" else "camera"
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
         self.on_cad_data = on_cad_data
@@ -300,9 +280,9 @@ class AudioLoop:
         try:
             from cognition.core import FridayCognition
             self.cognition = FridayCognition(workspace_root=str(ROOT_DIR))
-            print("[FRIDAY] [COGNITION] Cognitive core attached to AudioLoop.")
+            logger.info("Cognitive core attached to AudioLoop")
         except Exception as e:
-            print(f"[FRIDAY] [COGNITION] Init failed (brain disabled this session): {e}")
+            logger.exception("Cognitive core initialization failed; brain disabled this session")
 
         # P3.10: rolling user voice-emotion state (arousal cues from mic PCM)
         self._voice_emotion = None
@@ -363,6 +343,10 @@ class AudioLoop:
         self.live_video_enabled = False
         self._last_video_sent_time = 0.0
         self._last_sent_image_data = None
+        self._vision_frames_received = 0
+        self._vision_frames_sent = 0
+        self._vision_last_frame_received_at = None
+        self._vision_last_frame_sent_at = None
         # VAD State
         self._is_speaking = False
         self._silence_start_time = None
@@ -503,6 +487,19 @@ class AudioLoop:
 
         return None
 
+    def tool_description(self, tool_name: str) -> str:
+        """Return the registered description for an auditable tool-call log."""
+        for declaration in tools_list[0].get("function_declarations", []):
+            if declaration.get("name") == tool_name:
+                return str(declaration.get("description", "")).strip()
+        custom_tool = self.tool_builder.tools.get(tool_name)
+        if custom_tool:
+            return str(custom_tool.get("description", "")).strip()
+        agent = self.agent_builder.agents.get(tool_name)
+        if agent:
+            return str(agent.get("description", "")).strip()
+        return "No registered description is available."
+
     def start_action_plan(self, tool_name: str, args: dict):
         known_tools = {
             declaration.get("name")
@@ -623,7 +620,7 @@ class AudioLoop:
                                 float(response.emotion.intensity or 0.0),
                                 float(vstate.intensity or 0.0) - 0.1,
                             )
-                            print(f"[FRIDAY] [COGNITION] Voice tone: primary={vstate.primary} intensity={vstate.intensity}")
+                            logger.debug("Voice tone: primary=%s intensity=%s", vstate.primary, vstate.intensity)
                 except Exception:
                     pass
                 finally:
@@ -636,7 +633,7 @@ class AudioLoop:
                 urgency = getattr(response.situation, "urgency", "normal")
                 emotion = getattr(response.emotion, "primary", "neutral")
                 intensity = float(getattr(response.emotion, "intensity", 0.0) or 0.0)
-                print(f"[FRIDAY] [COGNITION] Turn assessed: intent={getattr(response.situation, 'deep_intent', '?')} urgency={urgency} emotion={emotion}")
+                logger.debug("Turn assessed: intent=%s urgency=%s emotion=%s", getattr(response.situation, "deep_intent", "?"), urgency, emotion)
                 if (urgency in ("high", "critical") or intensity >= 0.7) and self.session:
                     directive = (
                         "System Notification: Cognitive assessment of the user's last message — "
@@ -659,7 +656,7 @@ class AudioLoop:
                     "sender": "friday",
                 })
         except Exception as e:
-            print(f"[FRIDAY] [COGNITION] Turn processing failed: {e}")
+                logger.exception("Turn processing failed")
 
     def notify_activity(self):
         """Resets the proactive-speech silence timer; call this whenever the user sends text input."""
@@ -704,7 +701,7 @@ class AudioLoop:
                     project=self.project_manager.current_project,
                 )
         except Exception as e:
-            print(f"[FRIDAY DEBUG] [MEMORY] Fact extraction failed: {e}")
+            logger.exception("Fact extraction failed")
 
     async def initiative_loop(self):
         """Self-directed work loop: periodically reviews goals and approvals, and acts without being asked.
@@ -713,7 +710,7 @@ class AudioLoop:
         daily action budget, per-goal nudge intervals, and a user-idle guard so he never
         interrupts an active conversation.
         """
-        print("[FRIDAY] Initiative loop started.")
+        logger.info("Initiative loop started")
         while True:
             try:
                 from actions import initiative as initiative_engine
@@ -739,7 +736,7 @@ class AudioLoop:
                     try:
                         cognitive_actions = await self.cognition.proactive_scan()
                     except Exception as exc:
-                        print(f"[FRIDAY] [COGNITION] Proactive scan failed: {exc}")
+                        logger.exception("Proactive scan failed")
                 for caction in cognitive_actions:
                     # P4.1: threats already stream to the session through the event
                     # bus (drain_cognitive_events) — skip them here to avoid double
@@ -755,27 +752,27 @@ class AudioLoop:
                     try:
                         await self.session.send(input=prompt, end_of_turn=True)
                         await self.notifications.notify("cognition", "Friday anticipated a need", caction.description)
-                        print(f"[FRIDAY] [COGNITION] Proactive: {caction.type} — {caction.description}")
+                        logger.info("Proactive action: %s - %s", caction.type, caction.description)
                     except Exception as exc:
-                        print(f"[FRIDAY] [COGNITION] Proactive action failed: {exc}")
+                        logger.exception("Proactive action failed")
                 for ini in plan["initiatives"]:
                     try:
                         initiative_engine.record_action(ini["kind"], ini.get("goal_id"))
                         await self.session.send(input=ini["prompt"], end_of_turn=True)
                         await self.notifications.notify("initiative", "Friday took initiative", ini["notify_text"])
-                        print(f"[FRIDAY] [INITIATIVE] {ini['kind']}: {ini['notify_text']}")
+                        logger.info("Initiative %s: %s", ini["kind"], ini["notify_text"])
                     except Exception as exc:
-                        print(f"[FRIDAY] Initiative action failed: {exc}")
+                        logger.exception("Initiative action failed")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                print(f"[FRIDAY] Initiative loop error: {exc}")
+                logger.exception("Initiative loop error")
                 await asyncio.sleep(120)
 
     async def maintenance_loop(self):
         """Operating hours: periodic off-machine backups + a nightly ops cycle (tool audit,
         model health check, ops digest). Wakes every 10 minutes, acts only when due."""
-        print("[FRIDAY] Maintenance loop started.")
+        logger.info("Maintenance loop started")
         last_nightly = ""
         while True:
             try:
@@ -792,7 +789,7 @@ class AudioLoop:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                print(f"[FRIDAY] Maintenance loop error: {exc}")
+                logger.exception("Maintenance loop error")
                 await asyncio.sleep(300)
 
     async def _run_nightly_ops(self):
@@ -842,11 +839,11 @@ class AudioLoop:
                       "duration_s": round(time.time() - started, 1)}
             result = ops_journal.log_nightly(report)
             await self.notifications.notify("ops", "Nightly ops complete", result.get("headline", "done"))
-            print(f"[FRIDAY] [MAINT] {result.get('headline')}")
+            logger.info("Maintenance: %s", result.get("headline"))
             if cognitive_summary:
-                print(f"[FRIDAY] [COGNITION] {cognitive_summary}")
+                logger.info("Cognitive summary: %s", cognitive_summary)
         except Exception as exc:
-            print(f"[FRIDAY] Nightly ops failed: {exc}")
+            logger.exception("Nightly operations failed")
             try:
                 from actions import ops_journal
                 ops_journal.log_entry("nightly_ops", "failed", str(exc),
@@ -893,12 +890,12 @@ class AudioLoop:
                         project_summaries=summary.get("projects", {}),
                         user_summary=summary.get("user_summary", ""),
                     )
-                    print("[FRIDAY DEBUG] [MEMORY] Compacted older conversations.")
+                    logger.debug("Compacted older conversations")
             except Exception as e:
-                print(f"[FRIDAY DEBUG] [MEMORY] Compaction failed: {e}")
+                logger.exception("Conversation compaction failed")
 
     def update_permissions(self, new_perms):
-        print(f"[FRIDAY DEBUG] [CONFIG] Updating tool permissions: {new_perms}")
+        logger.debug("Updating tool permissions: %s", new_perms)
         self.permissions.update(new_perms)
 
     def get_system_status(self):
@@ -924,14 +921,14 @@ class AudioLoop:
         payload = f"System Notification ({priority}): {message}"
         if not self.session:
             self._pending_runtime_notifications.append(payload)
-            print(f"[FRIDAY DEBUG] [RUNTIME EVENT] queued: {message}")
+            logger.debug("Runtime event queued: %s", message)
             return
         try:
             await self.session.send(input=payload, end_of_turn=True)
-            print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivered: {message}")
+            logger.debug("Runtime event delivered: %s", message)
         except Exception as error:
             self._pending_runtime_notifications.append(payload)
-            print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivery failed: {error}")
+            logger.exception("Runtime event delivery failed")
 
     async def drain_cognitive_events(self):
         """P4.1: consume background-cognition events and surface them in the live session.
@@ -951,12 +948,12 @@ class AudioLoop:
 
         async def _handle(event):
             if event.priority == "info":
-                print(f"[FRIDAY] [COGNITION EVENT] (info) {event.topic}: {event.summary}")
+                logger.info("Cognition event %s: %s", event.topic, event.summary)
                 return
             now = time.monotonic()
             min_gap = 10.0 if event.priority == "urgent" else 45.0
             if now - self._last_cognitive_event_ts < min_gap:
-                print(f"[FRIDAY] [COGNITION EVENT] rate-limited ({event.priority}): {event.summary}")
+                logger.debug("Rate-limited cognition event (%s): %s", event.priority, event.summary)
                 return
             self._last_cognitive_event_ts = now
             await self.inject_runtime_event(event.summary, event.priority)
@@ -971,9 +968,9 @@ class AudioLoop:
         if self.cognition:
             try:
                 self.cognition.identity.save_identity()
-                print("[FRIDAY] [COGNITION] Identity saved on shutdown.")
+                logger.info("Cognitive identity saved on shutdown")
             except Exception as e:
-                print(f"[FRIDAY] [COGNITION] Identity save failed: {e}")
+                logger.exception("Cognitive identity save failed")
 
     def spawn_background_task(self, coroutine):
         task = asyncio.create_task(coroutine)
@@ -1058,11 +1055,11 @@ class AudioLoop:
                 )
         except asyncio.CancelledError:
             agent_dispatcher_module.ledger.finish(ledger_id, "cancelled")
-            print(f"[FRIDAY DEBUG] [CANCELLED] {tool_name} task cancelled.")
+            logger.info("Tool task cancelled: %s", tool_name)
             self.finish_action_plan(False, cancelled=True)
         except Exception as error:
             agent_dispatcher_module.ledger.finish(ledger_id, "failed", error=str(error))
-            print(f"[FRIDAY DEBUG] [ERR] {tool_name} background task failed: {error}")
+            logger.exception("Tool background task failed: %s", tool_name)
             self.finish_action_plan(False)
             self_maintenance_module.record_tool_failure(tool_name, str(error))
             await self.notifications.notify("long_running_action", f"{tool_name} failed", f"{tool_name} failed: {error}", "high")
@@ -1082,7 +1079,7 @@ class AudioLoop:
                 method = resource.release if resource_name == "camera_capture" else resource.close
                 await asyncio.to_thread(method)
             except Exception as error:
-                print(f"[FRIDAY DEBUG] [CLEANUP] Failed to close {resource_name}: {error}")
+                logger.exception("Failed to close resource %s", resource_name)
             setattr(self, resource_name, None)
 
         self.session = None
@@ -1093,16 +1090,16 @@ class AudioLoop:
         self._last_sent_image_data = None
         
     def resolve_tool_confirmation(self, request_id, confirmed):
-        print(f"[FRIDAY DEBUG] [RESOLVE] resolve_tool_confirmation called. ID: {request_id}, Confirmed: {confirmed}")
+        logger.debug("Resolving tool confirmation id=%s confirmed=%s", request_id, confirmed)
         if request_id in self._pending_confirmations:
             future = self._pending_confirmations[request_id]
             if not future.done():
-                print(f"[FRIDAY DEBUG] [RESOLVE] Future found and pending. Setting result to: {confirmed}")
+                logger.debug("Pending confirmation future found; setting result to %s", confirmed)
                 future.set_result(confirmed)
             else:
-                 print(f"[FRIDAY DEBUG] [WARN] Request {request_id} future already done. Result: {future.result()}")
+                 logger.warning("Confirmation request %s future already done: %s", request_id, future.result())
         else:
-            print(f"[FRIDAY DEBUG] [WARN] Confirmation Request {request_id} not found in pending dict. Keys: {list(self._pending_confirmations.keys())}")
+                logger.warning("Confirmation request %s not found; pending keys=%s", request_id, list(self._pending_confirmations.keys()))
 
     def clear_audio_queue(self):
         """Clears the queue of pending audio chunks to stop playback immediately."""
@@ -1112,11 +1109,14 @@ class AudioLoop:
                 self.audio_in_queue.get_nowait()
                 count += 1
             if count > 0:
-                print(f"[FRIDAY DEBUG] [AUDIO] Cleared {count} chunks from playback queue due to interruption.")
+                logger.debug("Cleared %s playback chunks due to interruption", count)
         except Exception as e:
-            print(f"[FRIDAY DEBUG] [ERR] Failed to clear audio queue: {e}")
+            logger.exception("Failed to clear audio queue")
 
     async def send_frame(self, frame_data):
+        if not self.live_video_enabled:
+            return
+
         # Update the latest frame payload
         if isinstance(frame_data, bytes):
             b64_data = base64.b64encode(frame_data).decode('utf-8')
@@ -1125,15 +1125,43 @@ class AudioLoop:
 
         # Store as the designated "next frame to send"
         self._latest_image_payload = {"mime_type": "image/jpeg", "data": b64_data}
+        self._vision_frames_received += 1
+        self._vision_last_frame_received_at = time.time()
         # No event signal needed - listen_audio pulls it
 
     def set_live_video(self, enabled: bool):
         """Turn continuous webcam streaming to the Live session on or off."""
         self.live_video_enabled = bool(enabled)
-        print(f"[FRIDAY DEBUG] [VIDEO] Live vision {'ENABLED' if self.live_video_enabled else 'DISABLED'}")
+        logger.info("Live vision %s", "enabled" if self.live_video_enabled else "disabled")
         if not self.live_video_enabled:
+            self._latest_image_payload = None
             # Forget what we already sent so a re-enable always starts fresh.
             self._last_sent_image_data = None
+            self._last_video_sent_time = 0.0
+
+    def vision_status(self) -> dict:
+        """Return diagnostics for the current webcam-to-Gemini vision path."""
+        return {
+            "enabled": bool(self.live_video_enabled),
+            "source": self.vision_source,
+            "session_ready": self.session is not None,
+            "paused": bool(self.paused),
+            "frames_received": self._vision_frames_received,
+            "frames_sent": self._vision_frames_sent,
+            "last_frame_received_at": self._vision_last_frame_received_at,
+            "last_frame_sent_at": self._vision_last_frame_sent_at,
+        }
+
+    def set_vision_source(self, source: str) -> dict:
+        """Select the visual source for a future/current Live session."""
+        source = str(source or "camera").strip().lower()
+        if source not in {"camera", "screen", "none"}:
+            return {"ok": False, "error": "Vision source must be camera, screen, or none."}
+        self.vision_source = source
+        self.video_mode = "screen" if source == "screen" else "none"
+        if source == "none":
+            self.set_live_video(False)
+        return {"ok": True, "source": source, "restart_required": True}
 
     def _should_send_video_frame(self, now: float) -> bool:
         """Decide whether the latest webcam frame should be forwarded now.
@@ -1173,9 +1201,11 @@ class AudioLoop:
                 await self.session.send(input=payload, end_of_turn=False)
                 self._last_sent_image_data = payload.get("data")
                 self._last_video_sent_time = time.monotonic()
-                print(f"[FRIDAY DEBUG] [VIDEO] Live frame sent to model ({len(payload.get('data', ''))} b64 chars).")
+                self._vision_frames_sent += 1
+                self._vision_last_frame_sent_at = time.time()
+                logger.debug("Live frame sent to model (%s base64 chars)", len(payload.get("data", "")))
             except Exception as e:
-                print(f"[FRIDAY DEBUG] [ERR] Failed to send live video frame: {e}")
+                logger.exception("Failed to send live video frame")
                 await asyncio.sleep(0.5)
 
     async def send_realtime(self):
@@ -1190,7 +1220,7 @@ class AudioLoop:
         resolved_input_device_index = None
         
         if self.input_device_name:
-            print(f"[FRIDAY] Attempting to find input device matching: '{self.input_device_name}'")
+            logger.info("Finding input device matching %r", self.input_device_name)
             count = len(sd.query_devices())
             best_match = None
             
@@ -1201,7 +1231,7 @@ class AudioLoop:
                         name = info.get('name', '')
                         # Simple case-insensitive check
                         if self.input_device_name.lower() in name.lower() or name.lower() in self.input_device_name.lower():
-                             print(f"   Candidate {i}: {name}")
+                             logger.debug("Input device candidate %s: %s", i, name)
                              # Prioritize exact match or very close match if possible, but first match is okay for now
                              resolved_input_device_index = i
                              best_match = name
@@ -1210,21 +1240,21 @@ class AudioLoop:
                     continue
             
             if resolved_input_device_index is not None:
-                print(f"[FRIDAY] Resolved input device '{self.input_device_name}' to index {resolved_input_device_index} ({best_match})")
+                logger.info("Resolved input device %r to index %s (%s)", self.input_device_name, resolved_input_device_index, best_match)
             else:
-                print(f"[FRIDAY] Could not find device matching '{self.input_device_name}'. Checking index...")
+                logger.warning("Could not find input device matching %r; checking index", self.input_device_name)
 
         # Fallback to index if Name lookup failed or wasn't provided
         if resolved_input_device_index is None and self.input_device_index is not None:
              try:
                  resolved_input_device_index = int(self.input_device_index)
-                 print(f"[FRIDAY] Requesting Input Device Index: {resolved_input_device_index}")
+                 logger.info("Requesting input device index %s", resolved_input_device_index)
              except ValueError:
-                 print(f"[FRIDAY] Invalid device index '{self.input_device_index}', reverting to default.")
+                 logger.warning("Invalid input device index %r; reverting to default", self.input_device_index)
                  resolved_input_device_index = None
 
         if resolved_input_device_index is None:
-             print("[FRIDAY] Using Default Input Device")
+             logger.info("Using default input device")
 
         try:
             self.audio_stream = await asyncio.to_thread(
@@ -1237,8 +1267,8 @@ class AudioLoop:
             )
             await asyncio.to_thread(self.audio_stream.start)
         except OSError as e:
-            print(f"[FRIDAY] [ERR] Failed to open audio input stream: {e}")
-            print("[FRIDAY] [WARN] Audio features will be disabled. Please check microphone permissions.")
+            logger.exception("Failed to open audio input stream")
+            logger.warning("Audio features disabled; check microphone permissions")
             return
 
         if __debug__:
@@ -1261,7 +1291,7 @@ class AudioLoop:
                 
                 # 1. Send Audio
                 if self.out_queue:
-                    await self.out_queue.put({"data": data, "mime_type": "audio/pcm"})
+                    await self.out_queue.put({"data": data, "mime_type": AUDIO_MIME_TYPE})
                 
                 # 2. VAD Logic for Video
                 # rms = audioop.rms(data, 2)
@@ -1289,13 +1319,13 @@ class AudioLoop:
                         # NEW Speech Utterance Started
                         self._is_speaking = True
                         self._last_user_speech = time.monotonic()
-                        print(f"[FRIDAY DEBUG] [VAD] Speech Detected (RMS: {rms}). Sending Video Frame.")
+                        logger.debug("Speech detected (RMS=%s); sending video frame", rms)
                         
                         # Send ONE frame
-                        if self._latest_image_payload and self.out_queue:
+                        if self.live_video_enabled and self._latest_image_payload and self.out_queue:
                             await self.out_queue.put(self._latest_image_payload)
                         else:
-                            print(f"[FRIDAY DEBUG] [VAD] No video frame available to send.")
+                            logger.debug("No video frame available to send")
                             
                 else:
                     # Silence
@@ -1305,16 +1335,16 @@ class AudioLoop:
                         
                         elif time.time() - self._silence_start_time > SILENCE_DURATION:
                             # Silence confirmed, reset state
-                            print(f"[FRIDAY DEBUG] [VAD] Silence detected. Resetting speech state.")
+                            logger.debug("Silence detected; resetting speech state")
                             self._is_speaking = False
                             self._silence_start_time = None
 
             except Exception as e:
-                print(f"Error reading audio: {e}")
+                logger.exception("Error reading audio")
                 await asyncio.sleep(0.1)
 
     async def handle_cad_request(self, prompt):
-        print(f"[FRIDAY DEBUG] [CAD] Background Task Started: handle_cad_request('{prompt}')")
+        logger.debug("CAD background task started: %r", prompt)
         if self._cancel_event.is_set():
             self.finish_action_plan(success=False, cancelled=True)
             return
@@ -1326,7 +1356,7 @@ class AudioLoop:
             import datetime
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             new_project_name = f"Project_{timestamp}"
-            print(f"[FRIDAY DEBUG] [CAD] Auto-creating project: {new_project_name}")
+            logger.info("Auto-creating CAD project: %s", new_project_name)
             
             success, msg = self.project_manager.create_project(new_project_name)
             if success:
@@ -1337,7 +1367,7 @@ class AudioLoop:
                     if self.on_project_update:
                          self.on_project_update(new_project_name)
                 except Exception as e:
-                    print(f"[FRIDAY DEBUG] [ERR] Failed to notify auto-project: {e}")
+                    logger.exception("Failed to notify auto-project")
 
         # Get project cad folder path
         cad_output_dir = str(self.project_manager.get_current_project_path() / "cad")
@@ -1349,13 +1379,13 @@ class AudioLoop:
             return
         
         if cad_data:
-            print(f"[FRIDAY DEBUG] [OK] CadAgent returned data successfully.")
-            print(f"[FRIDAY DEBUG] [INFO] Data Check: {len(cad_data.get('vertices', []))} vertices, {len(cad_data.get('edges', []))} edges.")
+            logger.info("CadAgent returned data successfully")
+            logger.debug("CAD data: %s vertices, %s edges", len(cad_data.get("vertices", [])), len(cad_data.get("edges", [])))
             
             if self.on_cad_data:
-                print(f"[FRIDAY DEBUG] [SEND] Dispatching data to frontend callback...")
+                logger.debug("Dispatching CAD data to frontend")
                 self.on_cad_data(cad_data)
-                print(f"[FRIDAY DEBUG] [SENT] Dispatch complete.")
+                logger.debug("CAD data dispatch complete")
             
             # Save to Project
             if 'file_path' in cad_data:
@@ -1368,13 +1398,13 @@ class AudioLoop:
             completion_msg = "System Notification: CAD generation is complete! The 3D model is now displayed for the user. Let them know it's ready."
             try:
                 await self.session.send(input=completion_msg, end_of_turn=True)
-                print(f"[FRIDAY DEBUG] [NOTE] Sent completion notification to model.")
+                logger.debug("Sent CAD completion notification to model")
                 self.finish_action_plan(True)
             except Exception as e:
-                 print(f"[FRIDAY DEBUG] [ERR] Failed to send completion notification: {e}")
+                 logger.exception("Failed to send CAD completion notification")
 
         else:
-            print(f"[FRIDAY DEBUG] [ERR] CadAgent returned None.")
+            logger.error("CadAgent returned no CAD data")
             # Optionally notify failure
             try:
                 await self.session.send(input="System Notification: CAD generation failed.", end_of_turn=True)
@@ -1385,14 +1415,14 @@ class AudioLoop:
 
 
     async def handle_write_file(self, path, content):
-        print(f"[FRIDAY DEBUG] [FS] Writing file: '{path}'")
+        logger.debug("Writing file: %r", path)
         
         # Auto-create project if stuck in temp
         if self.project_manager.current_project == "temp":
             import datetime
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             new_project_name = f"Project_{timestamp}"
-            print(f"[FRIDAY DEBUG] [FS] Auto-creating project: {new_project_name}")
+            logger.info("Auto-creating project: %s", new_project_name)
             
             success, msg = self.project_manager.create_project(new_project_name)
             if success:
@@ -1403,7 +1433,7 @@ class AudioLoop:
                     if self.on_project_update:
                          self.on_project_update(new_project_name)
                 except Exception as e:
-                    print(f"[FRIDAY DEBUG] [ERR] Failed to notify auto-project: {e}")
+                    logger.exception("Failed to notify auto-project")
         
         # Force path to be relative to current project
         # If absolute path is provided, we try to strip it or just ignore it and use basename
@@ -1421,7 +1451,7 @@ class AudioLoop:
         if not os.path.isabs(path):
              final_path = current_project_path / path
         
-        print(f"[FRIDAY DEBUG] [FS] Resolved path: '{final_path}'")
+        logger.debug("Resolved file path: %s", final_path)
 
         try:
             # Ensure parent exists
@@ -1433,14 +1463,14 @@ class AudioLoop:
         except Exception as e:
             result = f"Failed to write file '{path}': {str(e)}"
 
-        print(f"[FRIDAY DEBUG] [FS] Result: {result}")
+        logger.debug("File-write result: %s", result)
         try:
              await self.session.send(input=f"System Notification: {result}", end_of_turn=True)
         except Exception as e:
-             print(f"[FRIDAY DEBUG] [ERR] Failed to send fs result: {e}")
+             logger.exception("Failed to send file-system result")
 
     async def handle_read_directory(self, path):
-        print(f"[FRIDAY DEBUG] [FS] Reading directory: '{path}'")
+        logger.debug("Reading directory: %r", path)
         try:
             if not os.path.exists(path):
                 result = f"Directory '{path}' does not exist."
@@ -1450,14 +1480,14 @@ class AudioLoop:
         except Exception as e:
             result = f"Failed to read directory '{path}': {str(e)}"
 
-        print(f"[FRIDAY DEBUG] [FS] Result: {result}")
+        logger.debug("Directory-read result: %s", result)
         try:
              await self.session.send(input=f"System Notification: {result}", end_of_turn=True)
         except Exception as e:
-             print(f"[FRIDAY DEBUG] [ERR] Failed to send fs result: {e}")
+             logger.exception("Failed to send directory result")
 
     async def handle_read_file(self, path):
-        print(f"[FRIDAY DEBUG] [FS] Reading file: '{path}'")
+        logger.debug("Reading file: %r", path)
         try:
             if not os.path.exists(path):
                 result = f"File '{path}' does not exist."
@@ -1468,14 +1498,14 @@ class AudioLoop:
         except Exception as e:
             result = f"Failed to read file '{path}': {str(e)}"
 
-        print(f"[FRIDAY DEBUG] [FS] Result: {result}")
+        logger.debug("File-read result: %s", result)
         try:
              await self.session.send(input=f"System Notification: {result}", end_of_turn=True)
         except Exception as e:
-             print(f"[FRIDAY DEBUG] [ERR] Failed to send fs result: {e}")
+             logger.exception("Failed to send file-read result")
 
     async def handle_web_agent_request(self, prompt):
-        print(f"[FRIDAY DEBUG] [WEB] Web Agent Task: '{prompt}'")
+        logger.info("Web agent task: %r", prompt)
         if self._cancel_event.is_set():
             self.finish_action_plan(success=False, cancelled=True)
             return
@@ -1489,14 +1519,14 @@ class AudioLoop:
         if self._cancel_event.is_set():
             self.finish_action_plan(success=False, cancelled=True)
             return
-        print(f"[FRIDAY DEBUG] [WEB] Web Agent Task Returned: {result}")
+        logger.debug("Web agent task returned: %s", result)
         
         # Send the final result back to the main model
         try:
             await self.session.send(input=f"System Notification: Web Agent has finished.\nResult: {result}", end_of_turn=True)
             self.finish_action_plan(True)
         except Exception as e:
-            print(f"[FRIDAY DEBUG] [ERR] Failed to send web agent result to model: {e}")
+            logger.exception("Failed to send web-agent result to model")
 
     async def receive_audio(self):
         "Background task to reads from the websocket and write pcm chunks to the output queue"
@@ -1578,16 +1608,20 @@ class AudioLoop:
 
                     # 3. Handle Tool Calls
                     if response.tool_call:
-                        print("The tool was called")
+                        logger.debug("Tool call received")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
+                            logger.info(
+                                f"[FRIDAY TOOL] Called '{fc.name}': "
+                                f"{self.tool_description(fc.name)}"
+                            )
                             if fc.name in ["generate_cad", "run_web_agent", "write_file", "read_directory", "read_file", "create_project", "switch_project", "list_projects", "search_memory", "list_smart_devices", "control_light", "discover_printers", "print_stl", "get_print_status", "iterate_cad", "computer_control", "computer_settings", "manage_files", "open_application", "get_system_status", "get_local_time", "gmail_read", "gmail_thread_read", "gmail_create_draft", "google_contacts_read", "google_contacts_import", "google_contacts_sync", "sync_google_services", "google_drive_list", "google_calendar_availability", "build_custom_tool", "test_custom_tool", "run_custom_tool", "run_script", "write_action", "build_agent", "test_agent", "manage_plugins", "openclaw_plan", "openclaw_execute", "openclaw_capabilities", "openclaw_delegate", "execution_history", "autonomy_status", "approve_autonomy_proposal", "resolve_security_finding", "get_weather", "google_calendar_create", "google_calendar_list", "google_calendar_update", "google_calendar_delete", "google_calendar_recurring", "set_reminder", "desktop_control", "web_search", "send_message", "youtube_video", "browser_control", "code_helper", "build_project", "find_flights", "game_updater", "process_file", "manage_monitors", "contacts_manager", "mute_alert_category", "undo_last_action", "manage_uploads", "cancel_current_task", "self_maintenance", "run_powershell_command", "git_workflow", "deploy_agent",                                 "schedule_agent", "manage_tasks", "run_routine", "build_hardware_tool", "build_enterprise_tool", "build_ar_tool", "build_physical_tool", "build_health_tool", "build_finance_tool", "build_scientific_tool", "build_multimedia_tool", "build_web3_tool", "build_security_tool", "build_creative_tool", "build_temporal_tool", "build_infra_tool", "build_auth_tool", "build_robotics_tool", "build_comm_tool", "build_bio_tool", "build_quantum_tool", "build_space_tool", "build_energy_tool", "semantic_search", "manage_snapshots", "critic_loop", "manage_goals", "initiative_control", "model_router", "manage_sync", "ops_journal", "self_modify"]:
                                 prompt = fc.args.get("prompt", "") # Prompt is not present for all tools
                                 self.start_action_plan(fc.name, fc.args)
 
                                 precondition_error = self.check_tool_preconditions(fc.name, fc.args)
                                 if precondition_error:
-                                    print(f"[FRIDAY DEBUG] [PRECONDITION] {fc.name}: {precondition_error}")
+                                    logger.warning("Tool precondition failed for %s: %s", fc.name, precondition_error)
                                     function_responses.append(types.FunctionResponse(
                                         id=fc.id,
                                         name=fc.name,
@@ -1605,24 +1639,24 @@ class AudioLoop:
                                 confirmation_required = policy["tier"] in {"approval_required", "always_confirm"}
 
                                 if not confirmation_required:
-                                    print(f"[FRIDAY DEBUG] [TOOL] Permission check: '{fc.name}' -> AUTO-ALLOW")
+                                    logger.debug("Tool permission check: %s -> auto-allow", fc.name)
                                     # Skip confirmation block and jump to execution
                                     pass
                                 elif not self.on_tool_confirmation:
                                     if confirmation_required:
                                         result = f"Safety stop: explicit confirmation is required. {policy['reason']}"
-                                        print(f"[FRIDAY DEBUG] [BLOCKED] {result}")
+                                        logger.warning("Tool blocked: %s", result)
                                         function_responses.append(types.FunctionResponse(
                                             id=fc.id, name=fc.name, response={"result": result}
                                         ))
                                         self.finish_action_plan(False)
                                         continue
-                                    print(f"[FRIDAY DEBUG] [TOOL] No confirmation callback configured for '{fc.name}' -> AUTO-ALLOW")
+                                    logger.debug("No confirmation callback for %s; auto-allowing", fc.name)
                                 else:
                                     # Confirmation Logic
                                     import uuid
                                     request_id = str(uuid.uuid4())
-                                    print(f"[FRIDAY DEBUG] [STOP] Requesting confirmation for '{fc.name}' (ID: {request_id})")
+                                    logger.info("Requesting confirmation for %s (id=%s)", fc.name, request_id)
                                     
                                     future = asyncio.Future()
                                     self._pending_confirmations[request_id] = future
@@ -1640,7 +1674,7 @@ class AudioLoop:
                                     except asyncio.TimeoutError:
                                         timed_out = True
                                         confirmed = False
-                                        print(f"[FRIDAY DEBUG] [TIMEOUT] Confirmation expired for '{fc.name}' (ID: {request_id})")
+                                        logger.warning("Confirmation expired for %s (id=%s)", fc.name, request_id)
                                         if self.on_confirmation_expired:
                                             self.on_confirmation_expired({
                                                 "id": request_id,
@@ -1650,10 +1684,10 @@ class AudioLoop:
                                     finally:
                                         self._pending_confirmations.pop(request_id, None)
 
-                                    print(f"[FRIDAY DEBUG] [CONFIRM] Request {request_id} resolved. Confirmed: {confirmed}")
+                                    logger.info("Confirmation %s resolved: %s", request_id, confirmed)
 
                                     if not confirmed:
-                                        print(f"[FRIDAY DEBUG] [DENY] Tool call '{fc.name}' denied by user.")
+                                        logger.warning("Tool call denied by user: %s", fc.name)
                                         function_response = types.FunctionResponse(
                                             id=fc.id,
                                             name=fc.name,
@@ -1667,16 +1701,16 @@ class AudioLoop:
 
                                 # If confirmed (or no callback configured, or auto-allowed), proceed
                                 if fc.name == "generate_cad":
-                                    print(f"\n[FRIDAY DEBUG] --------------------------------------------------")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call Detected: 'generate_cad'")
-                                    print(f"[FRIDAY DEBUG] [IN] Arguments: prompt='{prompt}'")
+                                    logger.debug("Starting generate_cad tool execution")
+                                    logger.debug("Tool call detected: generate_cad")
+                                    logger.debug("generate_cad prompt=%r", prompt)
                                     
                                     self._plan_pending = True
                                     self.spawn_background_task(self.handle_cad_request(prompt))
                                     # No function response needed - model already acknowledged when user asked
                                 
                                 elif fc.name == "run_web_agent":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'run_web_agent' with prompt='{prompt}'")
+                                    logger.debug("Tool call run_web_agent prompt=%r", prompt)
                                     self._plan_pending = True
                                     self.spawn_background_task(self.handle_web_agent_request(prompt))
                                     
@@ -1688,7 +1722,7 @@ class AudioLoop:
                                             "result": result_text,
                                         }
                                     )
-                                    print(f"[FRIDAY DEBUG] [RESPONSE] Sending function response: {function_response}")
+                                    logger.debug("Sending function response: %s", function_response)
                                     function_responses.append(function_response)
 
 
@@ -1696,7 +1730,7 @@ class AudioLoop:
                                 elif fc.name == "write_file":
                                     path = fc.args["path"]
                                     content = fc.args["content"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'write_file' path='{path}'")
+                                    logger.debug("Tool call write_file path=%r", path)
                                     self.spawn_background_task(self.handle_write_file(path, content))
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": "Writing file..."}
@@ -1705,7 +1739,7 @@ class AudioLoop:
 
                                 elif fc.name == "read_directory":
                                     path = fc.args["path"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'read_directory' path='{path}'")
+                                    logger.debug("Tool call read_directory path=%r", path)
                                     self.spawn_background_task(self.handle_read_directory(path))
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": "Reading directory..."}
@@ -1714,7 +1748,7 @@ class AudioLoop:
 
                                 elif fc.name == "read_file":
                                     path = fc.args["path"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'read_file' path='{path}'")
+                                    logger.debug("Tool call read_file path=%r", path)
                                     self.spawn_background_task(self.handle_read_file(path))
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": "Reading file..."}
@@ -1723,7 +1757,7 @@ class AudioLoop:
 
                                 elif fc.name == "create_project":
                                     name = fc.args["name"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'create_project' name='{name}'")
+                                    logger.debug("Tool call create_project name=%r", name)
                                     success, msg = self.project_manager.create_project(name)
                                     if success:
                                         # Auto-switch to the newly created project
@@ -1738,7 +1772,7 @@ class AudioLoop:
 
                                 elif fc.name == "switch_project":
                                     name = fc.args["name"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'switch_project' name='{name}'")
+                                    logger.debug("Tool call switch_project name=%r", name)
                                     previous_project = self.project_manager.current_project
                                     success, msg = self.project_manager.switch_project(name)
                                     if success:
@@ -1747,18 +1781,18 @@ class AudioLoop:
                                             self.on_project_update(name)
                                         # Gather project context and send to AI (silently, no response expected)
                                         context = self.project_manager.get_project_context()
-                                        print(f"[FRIDAY DEBUG] [PROJECT] Sending project context to AI ({len(context)} chars)")
+                                        logger.debug("Sending project context to AI (%s chars)", len(context))
                                         try:
                                             await self.session.send(input=f"System Notification: {msg}\n\n{context}", end_of_turn=False)
                                         except Exception as e:
-                                            print(f"[FRIDAY DEBUG] [ERR] Failed to send project context: {e}")
+                                            logger.exception("Failed to send project context")
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": msg}
                                     )
                                     function_responses.append(function_response)
                                 
                                 elif fc.name == "list_projects":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'list_projects'")
+                                    logger.debug("Tool call list_projects")
                                     projects = self.project_manager.list_projects()
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": f"Available projects: {', '.join(projects)}"}
@@ -1767,7 +1801,7 @@ class AudioLoop:
 
                                 elif fc.name == "search_memory":
                                     query = fc.args["query"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'search_memory' query='{query}'")
+                                    logger.debug("Tool call search_memory query=%r", query)
                                     matches = self.memory_manager.search(
                                         query,
                                         limit=15,
@@ -1784,7 +1818,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "list_smart_devices":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'list_smart_devices'")
+                                    logger.debug("Tool call list_smart_devices")
                                     # Use cached devices directly for speed
                                     # devices_dict is {ip: SmartDevice}
                                     
@@ -1838,7 +1872,7 @@ class AudioLoop:
                                     brightness = fc.args.get("brightness")
                                     color = fc.args.get("color")
                                     
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'control_light' Target='{target}' Action='{action}'")
+                                    logger.debug("Tool call control_light target=%r action=%r", target, action)
                                     
                                     result_msg = f"Action '{action}' on '{target}' failed."
                                     success = False
@@ -1912,7 +1946,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "discover_printers":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'discover_printers'")
+                                    logger.debug("Tool call discover_printers")
                                     printers = await self.printer_agent.discover_printers()
                                     # Format for model
                                     if printers:
@@ -1933,7 +1967,7 @@ class AudioLoop:
                                     printer = fc.args["printer"]
                                     profile = fc.args.get("profile")
                                     
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'print_stl' STL='{stl_path}' Printer='{printer}'")
+                                    logger.debug("Tool call print_stl stl=%r printer=%r", stl_path, printer)
                                     
                                     # Resolve 'current' to project STL
                                     if stl_path.lower() == "current":
@@ -1957,7 +1991,7 @@ class AudioLoop:
 
                                 elif fc.name == "get_print_status":
                                     printer = fc.args["printer"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_print_status' Printer='{printer}'")
+                                    logger.debug("Tool call get_print_status printer=%r", printer)
                                     
                                     status = await self.printer_agent.get_print_status(printer)
                                     if status:
@@ -1986,7 +2020,7 @@ class AudioLoop:
 
                                 elif fc.name == "iterate_cad":
                                     prompt = fc.args["prompt"]
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'iterate_cad' Prompt='{prompt}'")
+                                    logger.debug("Tool call iterate_cad prompt=%r", prompt)
                                     
                                     # Emit status
                                     if self.on_cad_status:
@@ -1999,20 +2033,20 @@ class AudioLoop:
                                     cad_data = await self.cad_agent.iterate_prototype(prompt, output_dir=cad_output_dir)
                                     
                                     if cad_data:
-                                        print(f"[FRIDAY DEBUG] [OK] CadAgent iteration returned data successfully.")
+                                        logger.info("CadAgent iteration returned data successfully")
                                         
                                         # Dispatch to frontend
                                         if self.on_cad_data:
-                                            print(f"[FRIDAY DEBUG] [SEND] Dispatching iterated CAD data to frontend...")
+                                            logger.debug("Dispatching iterated CAD data to frontend")
                                             self.on_cad_data(cad_data)
-                                            print(f"[FRIDAY DEBUG] [SENT] Dispatch complete.")
+                                            logger.debug("Iterated CAD dispatch complete")
                                         
                                         # Save to Project
                                         self.project_manager.save_cad_artifact("output.stl", f"Iteration: {prompt}")
                                         
                                         result_str = f"Successfully iterated design: {prompt}. The updated 3D model is now displayed."
                                     else:
-                                        print(f"[FRIDAY DEBUG] [ERR] CadAgent iteration returned None.")
+                                        logger.error("CadAgent iteration returned no data")
                                         result_str = f"Failed to iterate design with prompt: {prompt}"
                                     
                                     function_response = types.FunctionResponse(
@@ -2022,7 +2056,7 @@ class AudioLoop:
 
                                 elif fc.name == "computer_control":
                                     action = fc.args.get("action", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'computer_control' action='{action}'")
+                                    logger.debug("Tool call computer_control action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     result_str = await asyncio.to_thread(computer_control_module.computer_control, params)
                                     function_response = types.FunctionResponse(
@@ -2032,7 +2066,7 @@ class AudioLoop:
 
                                 elif fc.name == "computer_settings":
                                     action = fc.args.get("action", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'computer_settings' action='{action}'")
+                                    logger.debug("Tool call computer_settings action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     if action in ("volume_up", "volume_down", "volume_set"):
                                         previous_value = await asyncio.to_thread(computer_settings_module.get_current_volume)
@@ -2050,7 +2084,7 @@ class AudioLoop:
 
                                 elif fc.name == "manage_files":
                                     action = fc.args.get("action", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'manage_files' action='{action}'")
+                                    logger.debug("Tool call manage_files action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     result_str = await asyncio.to_thread(file_controller_module.file_controller, params)
                                     function_response = types.FunctionResponse(
@@ -2060,7 +2094,7 @@ class AudioLoop:
 
                                 elif fc.name == "open_application":
                                     app_name = fc.args.get("app_name", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'open_application' app_name='{app_name}'")
+                                    logger.debug("Tool call open_application app_name=%r", app_name)
                                     result_str = await asyncio.to_thread(open_app_module.open_app, {"app_name": app_name})
                                     function_response = types.FunctionResponse(
                                         id=fc.id, name=fc.name, response={"result": result_str}
@@ -2068,7 +2102,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "get_system_status":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_system_status'")
+                                    logger.debug("Tool call get_system_status")
                                     status = await asyncio.to_thread(system_monitor_module.get_system_status)
                                     result_str = (
                                         f"CPU: {status['cpu_percent']}%, RAM: {status['ram_percent']}% "
@@ -2090,7 +2124,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "google_calendar_create":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'google_calendar_create'")
+                                    logger.debug("Tool call google_calendar_create")
                                     try:
                                         event = await asyncio.to_thread(
                                             self.google_account.create_calendar_event,
@@ -2222,7 +2256,7 @@ class AudioLoop:
 
                                 elif fc.name == "self_maintenance":
                                     action = fc.args.get("action", "full_check")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'self_maintenance' action='{action}'")
+                                    logger.debug("Tool call self_maintenance action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("self_maintenance", self_maintenance_module.self_maintenance, params))
@@ -2236,7 +2270,7 @@ class AudioLoop:
                                     command = fc.args.get("command", "")
                                     cwd = fc.args.get("cwd")
                                     timeout = fc.args.get("timeout", 120)
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'run_powershell_command' command='{command[:120]}'")
+                                    logger.debug("Tool call run_powershell_command command=%r", command[:120])
                                     params = {"command": command, "cwd": cwd, "timeout": timeout}
                                     result_str = await asyncio.to_thread(
                                         powershell_command_module.run_powershell_command,
@@ -2249,7 +2283,7 @@ class AudioLoop:
 
                                 elif fc.name == "git_workflow":
                                     action = fc.args.get("action", "status")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'git_workflow' action='{action}'")
+                                    logger.debug("Tool call git_workflow action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     result_str = await asyncio.to_thread(git_workflow_module.git_workflow, params)
                                     function_response = types.FunctionResponse(
@@ -2259,7 +2293,7 @@ class AudioLoop:
 
                                 elif fc.name == "deploy_agent":
                                     action = fc.args.get("action", "deploy")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'deploy_agent' action='{action}'")
+                                    logger.debug("Tool call deploy_agent action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     # Deploying/polling/listing/cancelling agents is instantaneous (thread-based agents
                                     # run independently), so this never blocks the tool-call loop.
@@ -2271,7 +2305,7 @@ class AudioLoop:
 
                                 elif fc.name == "schedule_agent":
                                     action = fc.args.get("action", "list").lower()
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'schedule_agent' action='{action}'")
+                                    logger.debug("Tool call schedule_agent action=%r", action)
                                     if action == "schedule":
                                         result = self.agent_scheduler.schedule(
                                             fc.args["agent_type"],
@@ -2357,7 +2391,7 @@ class AudioLoop:
 
                                 elif fc.name == "get_weather":
                                     city = fc.args.get("city", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'get_weather' city='{city}'")
+                                    logger.debug("Tool call get_weather city=%r", city)
                                     weather_card = None
                                     try:
                                         weather_card = await asyncio.to_thread(weather_report_module.get_weather_data, city)
@@ -2375,7 +2409,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "set_reminder":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'set_reminder' date='{fc.args.get('date')}' time='{fc.args.get('time')}'")
+                                    logger.debug("Tool call set_reminder date=%r time=%r", fc.args.get("date"), fc.args.get("time"))
                                     result_str = await asyncio.to_thread(
                                         reminder_module.reminder,
                                         {"date": fc.args.get("date", ""), "time": fc.args.get("time", ""), "message": fc.args.get("message", "Reminder")}
@@ -2387,7 +2421,7 @@ class AudioLoop:
 
                                 elif fc.name == "desktop_control":
                                     action = fc.args.get("action", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'desktop_control' action='{action}'")
+                                    logger.debug("Tool call desktop_control action=%r", action)
                                     # Dispatch to an explicit whitelist of safe functions only - deliberately
                                     # bypassing desktop_control()'s fallback that generates and exec()s AI code.
                                     if action == "wallpaper":
@@ -2416,7 +2450,7 @@ class AudioLoop:
 
                                 elif fc.name == "web_search":
                                     query = fc.args.get("query", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'web_search' query='{query}'")
+                                    logger.debug("Tool call web_search query=%r", query)
                                     result_str = await asyncio.to_thread(
                                         web_search_module.web_search,
                                         {"query": query, "mode": fc.args.get("mode", "search"), "items": fc.args.get("items", []), "aspect": fc.args.get("aspect", "general")}
@@ -2427,7 +2461,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "gmail_read":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'gmail_read'")
+                                    logger.debug("Tool call gmail_read")
                                     try:
                                         emails = await asyncio.to_thread(
                                             self.google_account.read_emails,
@@ -2462,7 +2496,7 @@ class AudioLoop:
                                     function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
 
                                 elif fc.name == "google_contacts_read":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'google_contacts_read'")
+                                    logger.debug("Tool call google_contacts_read")
                                     try:
                                         contacts = await asyncio.to_thread(
                                             self.google_account.read_contacts,
@@ -2480,7 +2514,7 @@ class AudioLoop:
                                     function_responses.append(function_response)
 
                                 elif fc.name == "google_contacts_import":
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'google_contacts_import'")
+                                    logger.debug("Tool call google_contacts_import")
                                     try:
                                         contacts = await asyncio.to_thread(
                                             self.google_account.read_contacts,
@@ -2558,7 +2592,7 @@ class AudioLoop:
                                     resolved_receiver = self.contacts_manager.resolve(receiver, platform)
                                     if resolved_receiver:
                                         receiver = resolved_receiver
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'send_message' receiver='{receiver}'")
+                                    logger.debug("Tool call send_message receiver=%r", receiver)
                                     result_str = await asyncio.to_thread(
                                         send_message_module.send_message,
                                         {"receiver": receiver, "message_text": fc.args.get("message_text", ""), "platform": platform}
@@ -2572,7 +2606,7 @@ class AudioLoop:
                                     action = fc.args.get("action", "").lower().strip()
                                     name = fc.args.get("name", "")
                                     platform = fc.args.get("platform", "whatsapp")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'contacts_manager' action='{action}' name='{name}'")
+                                    logger.debug("Tool call contacts_manager action=%r name=%r", action, name)
                                     if action in ("add", "update"):
                                         result_str = self.contacts_manager.add_or_update(
                                             name, fc.args.get("recipient", ""), platform
@@ -2593,7 +2627,7 @@ class AudioLoop:
 
                                 elif fc.name == "youtube_video":
                                     action = fc.args.get("action", "play")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'youtube_video' action='{action}'")
+                                    logger.debug("Tool call youtube_video action=%r", action)
                                     result_str = await asyncio.to_thread(
                                         youtube_video_module.youtube_video,
                                         {
@@ -2611,7 +2645,7 @@ class AudioLoop:
 
                                 elif fc.name == "browser_control":
                                     action = fc.args.get("action", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'browser_control' action='{action}'")
+                                    logger.debug("Tool call browser_control action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     fields_raw = params.get("fields")
                                     if isinstance(fields_raw, str) and fields_raw.strip():
@@ -2629,7 +2663,7 @@ class AudioLoop:
 
                                 elif fc.name == "code_helper":
                                     action = fc.args.get("action", "auto")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'code_helper' action='{action}'")
+                                    logger.debug("Tool call code_helper action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("code_helper", code_helper_module.code_helper, params))
@@ -2641,7 +2675,7 @@ class AudioLoop:
 
                                 elif fc.name == "build_project":
                                     description_arg = fc.args.get("description", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'build_project' description='{description_arg}'")
+                                    logger.debug("Tool call build_project description=%r", description_arg)
                                     params = {k: v for k, v in fc.args.items()}
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("build_project", dev_agent_module.dev_agent, params))
@@ -2654,7 +2688,7 @@ class AudioLoop:
                                 elif fc.name == "find_flights":
                                     origin = fc.args.get("origin", "")
                                     destination = fc.args.get("destination", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'find_flights' {origin} -> {destination}")
+                                    logger.debug("Tool call find_flights %s -> %s", origin, destination)
                                     params = {k: v for k, v in fc.args.items()}
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("find_flights", flight_finder_module.flight_finder, params))
@@ -2666,7 +2700,7 @@ class AudioLoop:
 
                                 elif fc.name == "game_updater":
                                     action = fc.args.get("action", "update")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'game_updater' action='{action}'")
+                                    logger.debug("Tool call game_updater action=%r", action)
                                     params = {k: v for k, v in fc.args.items()}
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("game_updater", game_updater_module.game_updater, params))
@@ -2678,7 +2712,7 @@ class AudioLoop:
 
                                 elif fc.name == "process_file":
                                     file_path_arg = fc.args.get("file_path", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'process_file' file_path='{file_path_arg}'")
+                                    logger.debug("Tool call process_file file_path=%r", file_path_arg)
                                     params = {k: v for k, v in fc.args.items()}
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("process_file", file_processor_module.file_processor, params))
@@ -2691,7 +2725,7 @@ class AudioLoop:
                                 elif fc.name == "manage_monitors":
                                     action = fc.args.get("action", "")
                                     topic = fc.args.get("topic", "")
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'manage_monitors' action='{action}' topic='{topic}'")
+                                    logger.debug("Tool call manage_monitors action=%r topic=%r", action, topic)
                                     if action == "add":
                                         result_str = await asyncio.to_thread(background_monitor_module.add_monitor, topic)
                                     elif action == "remove":
@@ -2714,7 +2748,7 @@ class AudioLoop:
                                             payload = json.loads(payload)
                                         except json.JSONDecodeError:
                                             payload = {}
-                                    print(f"[FRIDAY DEBUG] [TOOL] Tool Call: 'run_routine' name='{routine_name}'")
+                                    logger.debug("Tool call run_routine name=%r", routine_name)
                                     try:
                                         result = self.routine_manager.execute_runtime(routine_name, payload, runtime=self)
                                         result_str = json.dumps(result, ensure_ascii=False)
@@ -2758,8 +2792,64 @@ class AudioLoop:
 
                                 elif fc.name == "run_custom_tool":
                                     custom_name = fc.args.get("name", "")
+                                    logger.info(
+                                        f"[FRIDAY TOOL] Custom capability '{custom_name}': "
+                                        f"{self.tool_description(custom_name)}"
+                                    )
                                     try:
-                                        result_str = json.dumps(self.tool_builder.execute(custom_name, fc.args.get("arguments", {})), ensure_ascii=False)
+                                        if custom_name in {"enroll_owner_face", "enroll_contact_face", "inspect_current_view"}:
+                                            from actions.biometric import enroll_face_from_jpeg
+
+                                            if custom_name == "inspect_current_view":
+                                                from actions.vision_inspection import inspect_image_bytes
+
+                                                payload = self._latest_image_payload if self.live_video_enabled else None
+                                                image_bytes = base64.b64decode(payload["data"]) if payload else b""
+                                                result = await asyncio.wait_for(
+                                                    asyncio.to_thread(
+                                                        inspect_image_bytes,
+                                                        image_bytes,
+                                                        str(fc.args.get("arguments", {}).get("instruction", "")),
+                                                    ),
+                                                    timeout=30,
+                                                )
+                                                result_str = json.dumps(result, ensure_ascii=False)
+                                                function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+                                                continue
+
+                                            profile_name = OWNER_IDENTITY["name"]
+                                            if custom_name == "enroll_contact_face":
+                                                profile_name = str(fc.args.get("arguments", {}).get("profile_name", "")).strip()
+                                                if not profile_name or not self.contacts_manager.find(profile_name):
+                                                    result = {
+                                                        "ok": False,
+                                                        "error": "The contact must be saved locally before face enrollment.",
+                                                    }
+                                                    result_str = json.dumps(result, ensure_ascii=False)
+                                                    function_responses.append(types.FunctionResponse(id=fc.id, name=fc.name, response={"result": result_str}))
+                                                    continue
+
+                                            payload = self._latest_image_payload if self.live_video_enabled else None
+                                            image_bytes = base64.b64decode(payload["data"]) if payload else b""
+                                            logger.info("Starting owner face enrollment")
+                                            try:
+                                                result = await asyncio.wait_for(
+                                                    asyncio.to_thread(
+                                                        enroll_face_from_jpeg,
+                                                        profile_name,
+                                                        image_bytes,
+                                                    ),
+                                                    timeout=20,
+                                                )
+                                            except asyncio.TimeoutError:
+                                                result = {
+                                                    "ok": False,
+                                                    "error": "Face enrollment timed out after 20 seconds; no enrollment was confirmed.",
+                                                }
+                                            logger.info("Owner face enrollment result: %s", result.get("ok", False))
+                                        else:
+                                            result = self.tool_builder.execute(custom_name, fc.args.get("arguments", {}))
+                                        result_str = json.dumps(result, ensure_ascii=False)
                                     except Exception as exc:
                                         self_maintenance_module.record_tool_failure(custom_name or "run_custom_tool", str(exc))
                                         result_str = json.dumps({"ok": False, "error": str(exc)})
@@ -2805,6 +2895,13 @@ class AudioLoop:
                                         from actions import self_modify as _sm
                                         if action == "read_source":
                                             result = _sm.read_source(fc.args.get("name", ""))
+                                        elif action == "repair_source":
+                                            result = _sm.repair_source(
+                                                fc.args.get("name", ""),
+                                                fc.args.get("old_text", ""),
+                                                fc.args.get("new_text", ""),
+                                                fc.args.get("test_target", ""),
+                                            )
                                         elif action == "edit_source":
                                             result = _sm.edit_source(fc.args.get("name", ""), fc.args.get("old_text", ""), fc.args.get("new_text", ""))
                                         elif action == "replace_function":
@@ -2828,7 +2925,7 @@ class AudioLoop:
                                         else:
                                             result = {"ok": False, "error": f"Unknown self_modify action: {action}"}
                                         # Source/config edits take effect immediately: hot-reload the capability engine.
-                                        if isinstance(result, dict) and result.get("ok") and action in {"edit_source", "replace_function", "add_import"}:
+                                        if isinstance(result, dict) and result.get("ok") and action in {"edit_source", "repair_source", "replace_function", "add_import"}:
                                             try:
                                                 result["refresh"] = self.capability_engine.refresh_tools()
                                             except Exception as refresh_exc:
@@ -3045,7 +3142,7 @@ class AudioLoop:
                 while not self.audio_in_queue.empty():
                     self.audio_in_queue.get_nowait()
         except Exception as e:
-            print(f"Error in receive_audio: {e}")
+            logger.exception("Error in receive_audio")
             traceback.print_exc()
             # CRITICAL: Re-raise to crash the TaskGroup and trigger outer loop reconnect
             raise e
@@ -3134,7 +3231,7 @@ class AudioLoop:
             await asyncio.sleep(20)
             alert = await asyncio.to_thread(self.system_monitor.check)
             if alert:
-                print(f"[FRIDAY DEBUG] [MONITOR] {alert}")
+                logger.info("System monitor alert: %s", alert)
                 await self.notifications.notify("system_overload", "System health", alert, "high")
 
             if self.google_account.credentials and self.google_account.credentials.valid:
@@ -3157,7 +3254,7 @@ class AudioLoop:
                                 pass
                             await self.notifications.notify("calendar_event", "Upcoming calendar event", f"{event.get('summary', 'Untitled')} starts at {local_start}.")
                 except Exception as error:
-                    print(f"[FRIDAY DEBUG] [NOTIFY] Google polling failed: {error}")
+                    logger.exception("Google polling failed")
 
     async def autonomy_loop(self):
         """Continuously observe Friday's world and escalate risky decisions for approval."""
@@ -3176,11 +3273,11 @@ class AudioLoop:
                         f"{pending} capability or security item(s) await your review in the OpenClaw window.", "high",
                     )
                 if report.observations:
-                    print(f"[FRIDAY DEBUG] [AUTONOMY] {'; '.join(report.observations)}")
+                    logger.info("Autonomy observations: %s", "; ".join(report.observations))
             except asyncio.CancelledError:
                 break
             except Exception as error:
-                print(f"[FRIDAY DEBUG] [ERR] Autonomy loop failed: {error}")
+                logger.exception("Autonomy loop failed")
 
     async def proactive_loop(self):
         """Periodically checks if Friday should speak unprompted based on silence, stall patterns, and system state."""
@@ -3212,13 +3309,13 @@ class AudioLoop:
                 if alerts:
                     prompt += "\n\nNew monitor alerts:\n" + "\n".join(alerts)
                 if self.proactive_engine.detect_stall(recent_turns=recent_text) or self.proactive_engine.detect_system_overload(system_status):
-                    print(f"[FRIDAY DEBUG] [PROACTIVE] Triggering intervention for stalled work or overload.")
+                    logger.info("Triggering proactive intervention for stalled work or overload")
                 else:
-                    print(f"[FRIDAY DEBUG] [PROACTIVE] Triggering unprompted check-in.")
+                    logger.info("Triggering proactive unprompted check-in")
                 await self.session.send(input=prompt, end_of_turn=True)
                 self.proactive_engine.mark_triggered()
             except Exception as e:
-                print(f"[FRIDAY DEBUG] [ERR] Proactive loop failed: {e}")
+                logger.exception("Proactive loop failed")
 
 
     async def run(self, start_message=None):
@@ -3227,9 +3324,9 @@ class AudioLoop:
         
         while not self.stop_event.is_set():
             try:
-                print(f"[FRIDAY DEBUG] [CONNECT] Connecting to Gemini Live API...")
+                logger.info("Connecting to Gemini Live API")
                 async with (
-                    client.aio.live.connect(model=MODEL, config=config) as session,
+                    client.aio.live.connect(model=MODEL, config=build_live_config()) as session,
                     asyncio.TaskGroup() as tg,
                 ):
                     self.session = session
@@ -3239,16 +3336,16 @@ class AudioLoop:
                         try:
                             await self.cognition.initialize()
                             self_model = self.cognition.identity.get_self_model()
-                            print(f"[FRIDAY] [COGNITION] Brain online. Experiences: {self_model.get('experience_count', 0)}, Skills: {self_model.get('skill_count', 0)}, Beliefs: {self_model.get('belief_count', 0)}")
+                            logger.info("Cognitive brain online: experiences=%s skills=%s beliefs=%s", self_model.get("experience_count", 0), self_model.get("skill_count", 0), self_model.get("belief_count", 0))
                         except Exception as e:
-                            print(f"[FRIDAY] [COGNITION] Session init failed: {e}")
+                            logger.exception("Cognitive session initialization failed")
 
                     if self._pending_runtime_notifications:
                         pending_events = self._pending_runtime_notifications
                         self._pending_runtime_notifications = []
                         for event in pending_events:
                             await self.session.send(input=event, end_of_turn=True)
-                        print(f"[FRIDAY DEBUG] [RUNTIME EVENT] delivered {len(pending_events)} queued event(s)")
+                        logger.debug("Delivered %s queued runtime events", len(pending_events))
 
                     self.audio_in_queue = asyncio.Queue()
                     self.out_queue = asyncio.Queue(maxsize=10)
@@ -3285,7 +3382,7 @@ class AudioLoop:
                         except Exception:
                             pass
                         if compact_context != "Compact long-term memory:\n":
-                            print("[FRIDAY DEBUG] [STARTUP] Loading compact long-term memory and recent conversation...")
+                            logger.debug("Loading compact long-term memory and recent conversation")
                             # P0.2: inject the persisted brain too — lessons learned + knowledge graph
                             cognitive_ctx = _cognitive_memory_directive()
                             if cognitive_ctx:
@@ -3294,7 +3391,7 @@ class AudioLoop:
                             await self.session.send(input=memory_msg, end_of_turn=True)
 
                         if start_message:
-                            print(f"[FRIDAY DEBUG] [INFO] Sending start message: {start_message}")
+                            logger.debug("Sending start message: %s", start_message)
                             await self.session.send(input=start_message, end_of_turn=True)
                         
                         # Sync Project State
@@ -3302,13 +3399,13 @@ class AudioLoop:
                             self.on_project_update(self.project_manager.current_project)
                     
                     else:
-                        print(f"[FRIDAY DEBUG] [RECONNECT] Connection restored.")
+                        logger.info("Gemini Live connection restored")
                         # Restore Context (global memory, same source used on fresh startup)
                         # Each reconnect starts a brand-new Live session with empty context, so
                         # durable facts (name, relationships, preferences, etc.) must be resent
                         # here too, not just the raw recent chat tail - otherwise they silently
                         # fall out of context after any disconnect/reconnect cycle.
-                        print(f"[FRIDAY DEBUG] [RECONNECT] Fetching compact long-term memory and recent chat history to restore context...")
+                        logger.debug("Fetching memory and recent chat history to restore context")
                         compact_context = self.memory_manager.get_compact_context(recent_limit=10)
                         try:
                             from actions import goal_engine as _goal_engine
@@ -3324,7 +3421,7 @@ class AudioLoop:
 
                         context_msg += "\nPlease acknowledge the reconnection to the user (e.g. 'I lost connection for a moment, but I'm back...') and resume what you were doing."
                         
-                        print(f"[FRIDAY DEBUG] [RECONNECT] Sending restoration context to model...")
+                        logger.debug("Sending restoration context to model")
                         await self.session.send(input=context_msg, end_of_turn=True)
 
                     # Reset retry delay on successful connection
@@ -3349,15 +3446,15 @@ class AudioLoop:
                     await self.stop_event.wait()
 
             except asyncio.CancelledError:
-                print(f"[FRIDAY DEBUG] [STOP] Main loop cancelled.")
+                logger.info("Main loop cancelled")
                 break
                 
             except Exception as e:
                 # This catches the ExceptionGroup from TaskGroup or direct exceptions
-                print(f"[FRIDAY DEBUG] [ERR] Connection Error: {e}")
+                logger.exception("Gemini Live connection error")
                 if isinstance(e, BaseExceptionGroup):
                     for nested_error in e.exceptions:
-                        print(f"[FRIDAY DEBUG] [ERR] Task failure: {nested_error!r}")
+                        logger.exception("Nested task failure: %r", nested_error)
                         traceback.print_exception(type(nested_error), nested_error, nested_error.__traceback__)
                 else:
                     traceback.print_exception(type(e), e, e.__traceback__)
@@ -3370,21 +3467,21 @@ class AudioLoop:
                         _new_model = model_router.rotate(MODEL, "live")
                         if _new_model and _new_model != MODEL:
                             globals()["MODEL"] = _new_model
-                            print(f"[FRIDAY] [MODEL FALLBACK] Live model switched to {_new_model}")
+                            logger.warning("Live model switched to fallback: %s", _new_model)
                 except Exception as route_exc:
-                    print(f"[FRIDAY DEBUG] [MODEL ROUTER] {route_exc}")
+                    logger.exception("Model router failed")
 
                 # Notify user of connection error
                 try:
                     if hasattr(self, 'session') and self.session:
                         await self.session.send(input=f"System Notification: Connection error occurred. Reconnecting... Error: {str(e)}", end_of_turn=True)
                 except Exception as notify_error:
-                    print(f"[FRIDAY DEBUG] [ERR] Failed to notify user of error: {notify_error}")
+                    logger.exception("Failed to notify user of connection error")
                 
                 if self.stop_event.is_set():
                     break
                 
-                print(f"[FRIDAY DEBUG] [RETRY] Reconnecting in {retry_delay} seconds...")
+                logger.info("Reconnecting in %s seconds", retry_delay)
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, 10) # Exponential backoff capped at 10s
                 is_reconnect = True # Next loop will be a reconnect

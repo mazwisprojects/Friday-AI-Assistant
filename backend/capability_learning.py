@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import ast
+import logging
 import json
 import time
 from collections import Counter
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class CapabilityLearning:

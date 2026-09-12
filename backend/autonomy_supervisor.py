@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,14 +48,17 @@ class AutonomySupervisor:
         result = self.pipeline.run_cycle() if self.pipeline and time.monotonic() - self._last_audit >= 900 else (self.learning.inspect() if self.learning else {})
         if self.pipeline:
             self._last_audit = time.monotonic()
-        if result["proposals"]:
-            report.approvals_needed.extend(result["proposals"])
-            report.observations.append(f"{len(result['proposals'])} capability proposal(s) await review")
-        if result["security"]:
-            report.approvals_needed.extend(result["security"])
-            report.observations.append(f"{len(result['security'])} security regression finding(s) need review")
-        if result["expired"]:
-            report.observations.append(f"{len(result['expired'])} capability lease(s) expired")
+        proposals = result.get("proposals", [])
+        security = result.get("security", result.get("security_findings", []))
+        expired = result.get("expired", [])
+        if proposals:
+            report.approvals_needed.extend(proposals)
+            report.observations.append(f"{len(proposals)} capability proposal(s) await review")
+        if security:
+            report.approvals_needed.extend(security)
+            report.observations.append(f"{len(security)} security regression finding(s) need review")
+        if expired:
+            report.observations.append(f"{len(expired)} capability lease(s) expired")
 
     def _observe_tasks(self, report: SupervisorReport) -> None:
         overdue = self.task_manager.overdue()

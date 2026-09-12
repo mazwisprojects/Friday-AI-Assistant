@@ -94,7 +94,7 @@ def _execute_generated_code(code: str, player=None) -> str:
         exec(compile(code, "<jarvis_desktop>", "exec"), sandbox)
         return "\n".join(output_lines) if output_lines else "Done."
     except Exception as e:
-        print(f"[Desktop] Exec error: {e}\nCode:\n{code[:300]}")
+        logger.exception("Desktop code execution failed; code=%s", code[:300])
         return f"Execution error: {e}"
 
 
@@ -459,7 +459,7 @@ def desktop_control(
             if not actual_task:
                 return "Please describe what you want to do on the desktop."
 
-            print(f"[Desktop] Asking Gemini: {actual_task}")
+            logger.info("Asking Gemini for desktop task: %s", actual_task)
             if player:
                 player.write_log("[Desktop] Generating action...")
 
@@ -473,5 +473,5 @@ def desktop_control(
             return "No action or task specified."
 
     except Exception as e:
-        print(f"[Desktop] Error: {e}")
+        logger.exception("Desktop action failed")
         return f"Desktop control error: {e}"

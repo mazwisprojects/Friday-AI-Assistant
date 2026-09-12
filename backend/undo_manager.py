@@ -1,8 +1,11 @@
 import json
+import logging
 import shutil
 import threading
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class UndoManager:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 
 class NotificationManager:
@@ -47,4 +50,4 @@ class NotificationManager:
                 timeout=10,
             )
         except Exception as exc:
-            print(f"[NOTIFY] Desktop notification unavailable: {exc}")
+            logger.warning("Desktop notification unavailable: %s", exc)

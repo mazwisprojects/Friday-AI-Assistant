@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import ast
 import importlib.util
 import json
@@ -11,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from plugin_governance import is_active, normalize_governance, validate_limits
 from agent_sandbox import validate_source
+
+logger = logging.getLogger(__name__)
 
 
 class AgentBuilder:
@@ -29,7 +33,7 @@ class AgentBuilder:
             data = json.loads(self.registry_path.read_text(encoding="utf-8"))
             self.agents = data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"[AGENTS] Could not load custom agents: {exc}")
+            logger.exception("Could not load custom agents")
 
     def discover_modules(self) -> None:
         if not self.agents_dir.exists():
@@ -56,7 +60,7 @@ class AgentBuilder:
                 self.agents.setdefault(manifest["name"], manifest)
                 changed = True
             except (OSError, SyntaxError, ValueError, MemoryError) as exc:
-                print(f"[AGENTS] Skipping invalid agent {path.name}: {exc}")
+                logger.exception("Skipping invalid agent %s", path.name)
         if changed:
             self._save()
 

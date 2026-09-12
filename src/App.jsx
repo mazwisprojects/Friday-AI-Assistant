@@ -43,6 +43,12 @@ const OpenClawWindow = lazy(() => import('./components/OpenClawWindow'));
 
 const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:8000');
 
+// Legacy action windows still access the shared client through window.socket.
+// Keep that compatibility bridge until all windows consume SocketContext directly.
+if (typeof window !== 'undefined') {
+    window.socket = socket;
+}
+
 function App() {
     // Auth State
     const [isAuthenticated, setIsAuthenticated] = useState(() => {
@@ -69,6 +75,12 @@ function App() {
     const uiState = useUIState();
 
     const [messages, setMessages] = useState([]);
+    const [visionStatus, setVisionStatus] = useState({
+        enabled: false,
+        session_ready: false,
+        frames_received: 0,
+        frames_sent: 0,
+    });
     const [notificationCount, setNotificationCount] = useState(0);
     const [weatherCard, setWeatherCard] = useState(null);
     const [googleServiceCard, setGoogleServiceCard] = useState(null);
@@ -221,6 +233,7 @@ function App() {
     const videoIntervalRef = useRef(null);
     const lastFrameTimeRef = useRef(0);
     const frameCountRef = useRef(0);
+    const lastFrameSentAtRef = useRef(0);
     const lastVideoTimeRef = useRef(-1);
 
     // Ref to track video state for the loop (avoids closure staleness)
@@ -370,6 +383,10 @@ function App() {
             setSocketConnected(true);
             socket.emit('get_settings');
             socket.emit('get_task_cards');
+            socket.emit('get_vision_status');
+            if (isVideoOnRef.current) {
+                socket.emit('set_live_video', { enabled: true });
+            }
         });
         socket.on('disconnect', () => {
             setStatus('Disconnected');
@@ -380,8 +397,18 @@ function App() {
             // Update status bar based on backend messages
             if (data.msg === 'F.R.I.D.A.Y Started') {
                 setStatus('Model Connected');
+                if (isVideoOnRef.current) {
+                    socket.emit('set_live_video', { enabled: true });
+                }
             } else if (data.msg === 'F.R.I.D.A.Y Stopped') {
                 setStatus('Connected');
+            }
+        });
+        socket.on('video_status', (data) => {
+            setVisionStatus(data || {});
+            const enabled = Boolean(data?.enabled);
+            if (!enabled && isVideoOnRef.current) {
+                console.warn('Backend did not accept live vision.');
             }
         });
         socket.on('unified_notification', (notification) => {
@@ -872,8 +899,9 @@ function App() {
         // 2. Send Frame to Backend (Throttled & Resized)
         // Only send if connected
         if (isConnected) {
-            // Simple throttle: every 5th frame roughly
-            if (frameCountRef.current % 5 === 0) {
+            // Match the backend/Gemini vision cadence instead of uploading 12 fps.
+            if (performance.now() - lastFrameSentAtRef.current >= 1000) {
+                lastFrameSentAtRef.current = performance.now();
 
                 // Use dedicated transmission canvas for resizing
                 const transCanvas = transmissionCanvasRef.current;
@@ -1146,6 +1174,7 @@ function App() {
     const stopVideo = () => {
         // Stop live vision streaming to the model
         socket.emit('set_live_video', { enabled: false });
+        lastFrameSentAtRef.current = 0;
         if (videoRef.current && videoRef.current.srcObject) {
             videoRef.current.srcObject.getTracks().forEach(track => track.stop());
             videoRef.current.srcObject = null;
@@ -1635,6 +1664,10 @@ function App() {
                     <span><b className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'ONLINE' : 'OFFLINE'}</b> / {status.toUpperCase()}</span>
                     <span>MIC // {isMuted ? 'MUTED' : 'LIVE'}</span>
                     <span>CAM // {isVideoOn ? 'ACTIVE' : 'STANDBY'}</span>
+                    <span>VISION // {visionStatus.enabled ? 'ACCEPTED' : 'OFF'}</span>
+                    <span>SOURCE // {(visionStatus.source || 'camera').toUpperCase()}</span>
+                    <span>SESSION // {visionStatus.session_ready ? 'READY' : 'WAITING'}</span>
+                    <span>FRAMES // {visionStatus.frames_sent || 0}/{visionStatus.frames_received || 0}</span>
                     <span>CPU // {Math.round(systemStats.cpu_percent || 0)}%</span>
                     <span>RAM // {Math.round(systemStats.ram_percent || 0)}%</span>
                     <span>UP // {systemStats.uptime || '0h 0m'}</span>

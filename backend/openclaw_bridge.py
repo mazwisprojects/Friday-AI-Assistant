@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import socket
@@ -12,6 +13,8 @@ from typing import Any
 
 from google import genai
 from tools import tools_list
+
+logger = logging.getLogger(__name__)
 
 HEALTH_CACHE_SECONDS = 30
 
@@ -163,10 +166,10 @@ class OpenClawBridge:
                     payload = json.loads(result.stdout)
                     if payload.get("ok") is not False:
                         return payload.get("result", {}).get("text") or payload.get("text") or "{}"
-                print(f"[OPENCLAW] attempt {attempt}/2 failed: {(result.stderr or result.stdout).strip()[:300]}")
+                logger.warning("OpenClaw attempt %s/2 failed: %s", attempt, (result.stderr or result.stdout).strip()[:300])
             except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
-                print(f"[OPENCLAW] attempt {attempt}/2 unavailable: {exc}")
-        print("[OPENCLAW] bounded retries exhausted; using Gemini fallback")
+                logger.warning("OpenClaw attempt %s/2 unavailable: %s", attempt, exc)
+        logger.warning("OpenClaw retries exhausted; using Gemini fallback")
         return None
 
     def mark_unreachable(self) -> None:

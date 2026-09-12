@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionLedger:
@@ -54,7 +57,14 @@ class ExecutionLedger:
             entries = self._load()
             for entry in entries:
                 if entry.get("id") == entry_id:
-                    entry.update({"status": status, "finished_at": time.time(), "result_summary": str(result)[-4000:] if result is not None else "", "error": error})
+                    finished_at = time.time()
+                    entry.update({
+                        "status": status,
+                        "finished_at": finished_at,
+                        "duration_ms": round(max(0.0, finished_at - entry.get("started_at", finished_at)) * 1000, 2),
+                        "result_summary": str(result)[-4000:] if result is not None else "",
+                        "error": error,
+                    })
                     break
             self._save(entries)
 

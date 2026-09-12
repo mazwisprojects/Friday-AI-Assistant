@@ -1,4 +1,5 @@
 import os
+import logging
 import json
 import asyncio
 from datetime import datetime
@@ -8,6 +9,8 @@ from dotenv import load_dotenv
 from config import CAD_GEMINI_MODEL
 from pydantic import BaseModel, Field
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -68,7 +71,7 @@ export_stl(result_part, 'output.stl')
             prompt: User's description of the model to generate.
             output_dir: Directory to save the script and STL. If None, uses temp dir.
         """
-        print(f"[CadAgent DEBUG] [START] Generation started for: '{prompt}'")
+        logger.info("CAD generation started for %r", prompt)
         
         try:
             # Use provided output_dir or fall back to temp
@@ -88,7 +91,7 @@ export_stl(result_part, 'output.stl')
             current_prompt = f"You are a build123d expert. Write a generic python script to create a 3D model of: {prompt}. Ensure you export to 'output.stl'. Unscaled."
             
             for attempt in range(max_retries):
-                print(f"[CadAgent DEBUG] Attempt {attempt + 1}/{max_retries}")
+                logger.debug("CAD generation attempt %s/%s", attempt + 1, max_retries)
                 
                 # Emit status update
                 if self.on_status:
@@ -125,7 +128,7 @@ export_stl(result_part, 'output.stl')
                                 raw_content += part.text
                 
                 if not raw_content:
-                    print("[CadAgent DEBUG] [ERR] Empty response from model.")
+                    logger.error("CAD model returned an empty response")
                     return None
 
                 # 2. Extract Code Block
@@ -135,11 +138,11 @@ export_stl(result_part, 'output.stl')
                     code = code_match.group(1).strip()
                 else:
                     # Fallback: assume entire text is code if no blocks, or fail
-                    print("[CadAgent DEBUG] [WARN] No ```python block found. Trying heuristic...")
+                    logger.warning("No Python code block found in CAD response; trying heuristic")
                     if "import build123d" in raw_content:
                         code = raw_content
                     else:
-                        print("[CadAgent DEBUG] [ERR] Could not extract python code.")
+                        logger.error("Could not extract Python code from CAD response")
                         return None
                 
                 # 3. Save to Local File in cad_outputs folder
@@ -151,7 +154,7 @@ export_stl(result_part, 'output.stl')
                     code_with_path = code.replace("output.stl", safe_output_path)
                     f.write(code_with_path)
                     
-                print(f"[CadAgent DEBUG] [EXEC] Running local script: {script_path}")
+                logger.debug("Running CAD script locally: %s", script_path)
                 
                 # 4. Execute Locally
                 import subprocess
@@ -167,7 +170,7 @@ export_stl(result_part, 'output.stl')
                     )
                     stdout, stderr = proc.stdout, proc.stderr
                 except Exception as e:
-                     print(f"[CadAgent DEBUG] [ERR] Subprocess run failed: {e}")
+                     logger.exception("CAD subprocess failed")
                      proc = type('obj', (object,), {'returncode': 1})
                      stdout = ""
                      stderr = str(e)
@@ -177,7 +180,7 @@ export_stl(result_part, 'output.stl')
                     # Extract a concise error message for display
                     error_lines = error_msg.strip().split('\n')
                     short_error = error_lines[-1][:100] if error_lines else "Unknown error"
-                    print(f"[CadAgent DEBUG] [ERR] Script Execution Failed:\n{error_msg}")
+                    logger.error("CAD script execution failed: %s", error_msg)
                     
                     # Emit retry status with error
                     if self.on_status:

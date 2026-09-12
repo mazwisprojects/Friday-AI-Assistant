@@ -1,8 +1,11 @@
 import json
+import logging
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 try:
     import pyautogui
@@ -110,7 +113,7 @@ def _open_app(app_name: str) -> bool:
             return launched
 
     except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open {app_name}: {e}")
+        logger.warning("Could not open %s: %s", app_name, e)
         return False
 
 
@@ -121,7 +124,7 @@ def _open_browser_url(url: str) -> bool:
         time.sleep(4.0) 
         return True
     except Exception as e:
-        print(f"[SendMessage] ⚠️ Could not open browser: {e}")
+        logger.warning("Could not open browser: %s", e)
         return False
 
 def _search_in_app(query: str) -> None:
@@ -249,7 +252,7 @@ def send_message(
         return "PyAutoGUI is not installed — cannot control the desktop."
 
     preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
-    print(f"[SendMessage] 📨 {platform} → {receiver}: {preview}")
+    logger.info("Sending message via %s to %s: %s", platform, receiver, preview)
     if player:
         player.write_log(f"[msg] {platform} → {receiver}")
 
@@ -262,7 +265,7 @@ def send_message(
             f"Check that {platform} is installed and signed in, or ask me to try {platform} Web."
         )
 
-    print(f"[SendMessage] {'✅' if 'sent' in result.lower() else '❌'} {result}")
+    logger.info("Message result: %s", result)
     if player:
         player.write_log(f"[msg] {result}")
 

@@ -1,8 +1,11 @@
 import os
+import logging
 import json
 import shutil
 import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 class ProjectManager:
     def __init__(self, workspace_root: str):
@@ -17,7 +20,7 @@ class ProjectManager:
         # Clear temp project on startup if it exists
         temp_path = self.projects_dir / "temp"
         if temp_path.exists():
-            print("[ProjectManager] Clearing temp project...")
+            logger.info("Clearing temp project")
             shutil.rmtree(temp_path)
             
         # Ensure temp project receives fresh creation
@@ -33,7 +36,7 @@ class ProjectManager:
             project_path.mkdir()
             (project_path / "cad").mkdir()
             (project_path / "browser").mkdir()
-            print(f"[ProjectManager] Created project: {safe_name}")
+            logger.info("Created project: %s", safe_name)
             return True, f"Project '{safe_name}' created."
         return False, f"Project '{safe_name}' already exists."
 
@@ -44,7 +47,7 @@ class ProjectManager:
         
         if project_path.exists():
             self.current_project = safe_name
-            print(f"[ProjectManager] Switched to project: {safe_name}")
+            logger.info("Switched to project: %s", safe_name)
             return True, f"Switched to project '{safe_name}'."
         return False, f"Project '{safe_name}' does not exist."
 

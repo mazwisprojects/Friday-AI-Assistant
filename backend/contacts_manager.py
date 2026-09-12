@@ -1,6 +1,10 @@
 import json
+import logging
 import threading
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class ContactsManager:
@@ -25,7 +29,16 @@ class ContactsManager:
         temporary_file = self.contacts_file.with_suffix(".tmp")
         with temporary_file.open("w", encoding="utf-8") as file:
             json.dump(contacts, file, indent=2, ensure_ascii=False)
-        temporary_file.replace(self.contacts_file)
+        for attempt in range(3):
+            try:
+                temporary_file.replace(self.contacts_file)
+                return
+            except PermissionError:
+                if attempt == 2:
+                    self.contacts_file.write_text(json.dumps(contacts, indent=2, ensure_ascii=False), encoding="utf-8")
+                    temporary_file.unlink(missing_ok=True)
+                else:
+                    time.sleep(0.05 * (attempt + 1))
 
     @staticmethod
     def _key(name: str) -> str:

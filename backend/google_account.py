@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -9,6 +10,8 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+
+logger = logging.getLogger(__name__)
 
 
 class GoogleAccount:
@@ -39,7 +42,7 @@ class GoogleAccount:
             credentials = Credentials.from_authorized_user_file(str(self.token_path), self.SCOPES)
             granted_scopes = set(credentials.scopes or [])
             if not set(self.SCOPES).issubset(granted_scopes):
-                print("[GOOGLE] Stored token needs renewed permissions.")
+                logger.warning("Stored Google token needs renewed permissions")
                 return
             if credentials.expired and credentials.refresh_token:
                 credentials.refresh(Request())
@@ -47,7 +50,7 @@ class GoogleAccount:
             if credentials.valid:
                 self.credentials = credentials
         except Exception as exc:
-            print(f"[GOOGLE] Could not load local token: {exc}")
+            logger.exception("Could not load local Google token")
 
     def connect(self) -> dict:
         if not self.client_secret_path.exists():

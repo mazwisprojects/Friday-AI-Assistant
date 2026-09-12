@@ -1,5 +1,6 @@
 #computer_control.py
 import io
+import logging
 import json
 import os
 import platform
@@ -15,6 +16,8 @@ else:
 import time
 import random
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Import centralized config
 import sys

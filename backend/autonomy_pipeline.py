@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class AutonomyPipeline:
@@ -75,7 +78,7 @@ class AutonomyPipeline:
         try:
             marker(name, status)
         except Exception as error:
-            print(f"[AUTONOMY] Learning status sync failed for '{name}': {error}")
+            logger.warning("Learning status sync failed for %r: %s", name, error)
 
     def resolve_security(self, finding_path: str, finding_value: str) -> dict:
         """Record a human review decision for a security finding and clear the pipeline block.

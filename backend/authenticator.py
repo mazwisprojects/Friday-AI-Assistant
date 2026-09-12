@@ -1,3 +1,4 @@
+import logging
 import mediapipe as mp
 from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision
@@ -7,6 +8,9 @@ import os
 import base64
 import numpy as np
 import urllib.request
+import json
+
+logger = logging.getLogger(__name__)
 
 class FaceAuthenticator:
     # MediaPipe Face Landmarker model URL
@@ -26,26 +30,29 @@ class FaceAuthenticator:
         self.authenticated = False
         self.running = False
         self.reference_landmarks = None
+        self.reference_gallery = []
+        self.last_similarity = 0.0
         self.landmarker = None
 
         self._ensure_model()
         self._init_landmarker()
         self._load_reference()
+        self._load_owner_gallery()
 
     def _ensure_model(self):
         """Download the MediaPipe Face Landmarker model if not present."""
         if not os.path.exists(self.MODEL_PATH):
-            print(f"[AUTH] Downloading Face Landmarker model...")
+            logger.info("Downloading Face Landmarker model")
             try:
                 urllib.request.urlretrieve(self.MODEL_URL, self.MODEL_PATH)
-                print(f"[AUTH] [OK] Model downloaded to {self.MODEL_PATH}")
+                logger.info("Face Landmarker model downloaded to %s", self.MODEL_PATH)
             except Exception as e:
-                print(f"[AUTH] [ERR] Failed to download model: {e}")
+                logger.exception("Failed to download Face Landmarker model")
 
     def _init_landmarker(self):
         """Initialize the MediaPipe Face Landmarker."""
         if not os.path.exists(self.MODEL_PATH):
-            print("[AUTH] [ERR] Face Landmarker model not found. Cannot initialize.")
+            logger.error("Face Landmarker model not found; cannot initialize")
             return
         
         try:
@@ -57,9 +64,9 @@ class FaceAuthenticator:
                 num_faces=1
             )
             self.landmarker = vision.FaceLandmarker.create_from_options(options)
-            print("[AUTH] [OK] Face Landmarker initialized.")
+            logger.info("Face Landmarker initialized")
         except Exception as e:
-            print(f"[AUTH] [ERR] Failed to initialize Face Landmarker: {e}")
+            logger.exception("Failed to initialize Face Landmarker")
 
     def _extract_landmarks(self, image_rgb):
         """
@@ -80,7 +87,7 @@ class FaceAuthenticator:
                 return coords.flatten()
             return None
         except Exception as e:
-            print(f"[AUTH] [ERR] Landmark extraction failed: {e}")
+            logger.exception("Landmark extraction failed")
             return None
 
     def _compare_landmarks(self, landmarks1, landmarks2, threshold=0.15):
@@ -104,8 +111,33 @@ class FaceAuthenticator:
         # Threshold check (similarity should be close to 1 for a match)
         is_match = similarity > (1 - threshold)
         if is_match:
-            print(f"[AUTH] Face match! Similarity: {similarity:.4f}")
+            logger.info("Face match; similarity=%0.4f", similarity)
         return is_match
+
+    def _load_owner_gallery(self):
+        """Load persisted owner embeddings without exposing biometric data."""
+        state_path = os.path.join(os.path.dirname(__file__), "long_term_memory", "biometric_profiles.json")
+        try:
+            data = json.loads(open(state_path, encoding="utf-8").read())
+            record = data.get("faces", {}).get("Sinegugu Mazwi") or data.get("faces", {}).get("owner", {})
+            vectors = record.get("vectors", []) or ([record["vector"]] if record.get("vector") else [])
+            self.reference_gallery = [np.asarray(vector, dtype=np.float32) for vector in vectors if vector]
+            if self.reference_gallery:
+                print(f"[AUTH] [OK] Loaded {len(self.reference_gallery)} saved owner face reference(s).")
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            print(f"[AUTH] [WARN] Could not load owner face gallery: {exc}")
+
+    def _best_similarity(self, current_landmarks):
+        references = self.reference_gallery or ([self.reference_landmarks] if self.reference_landmarks is not None else [])
+        similarities = []
+        for reference in references:
+            if reference is None or len(reference) != len(current_landmarks):
+                continue
+            norm_current = np.linalg.norm(current_landmarks)
+            norm_reference = np.linalg.norm(reference)
+            if norm_current and norm_reference:
+                similarities.append(float(np.dot(reference, current_landmarks) / (norm_reference * norm_current)))
+        return max(similarities, default=0.0)
 
     def _load_reference(self):
         if not os.path.exists(self.reference_image_path):
@@ -138,7 +170,7 @@ class FaceAuthenticator:
                 await self.on_status_change(True)
             return
 
-        if self.reference_landmarks is None:
+        if self.reference_landmarks is None and not self.reference_gallery:
              print("[AUTH] [ERR] Cannot start auth loop: No reference landmarks.")
              return
 
@@ -200,9 +232,10 @@ class FaceAuthenticator:
             if process_this_frame:
                 current_landmarks = self._extract_landmarks(rgb_frame)
                 
-                if self._compare_landmarks(self.reference_landmarks, current_landmarks):
+                self.last_similarity = self._best_similarity(current_landmarks) if current_landmarks is not None else 0.0
+                if current_landmarks is not None and self.last_similarity > 0.85:
                     self.authenticated = True
-                    print("[AUTH] [OPEN] FACE RECOGNIZED! Access Granted.")
+                    print(f"[AUTH] [OPEN] OWNER FACE RECOGNIZED! Similarity: {self.last_similarity:.4f}")
                     if self.on_status_change:
                         asyncio.run_coroutine_threadsafe(self.on_status_change(True), loop)
                     self.running = False

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import json
+import hmac
 import logging
 import os
 import sys
@@ -9,10 +10,14 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-# Fix for asyncio subprocess support on Windows
-# MUST BE SET BEFORE OTHER IMPORTS
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+from logging_config import setup_logging
+
+# Configure logging before importing the application modules so their loggers
+# and any import-time failures use the same handlers.
+setup_logging()
+
+# Modern Windows Python uses the Proactor event-loop policy by default, which
+# supports asyncio subprocesses without calling the deprecated policy API.
 
 import socketio
 import uvicorn
@@ -52,6 +57,7 @@ allowed_origins = [
     # Socket.IO clients from mobile apps may not send a standard Origin header
     '*',
 ]
+SERVER_TOKEN = os.getenv("FRIDAY_SERVER_TOKEN", "").strip()
 sio = socketio.AsyncServer(
     async_mode='asgi',
     cors_allowed_origins=allowed_origins,
@@ -71,7 +77,7 @@ import signal
 
 # --- SHUTDOWN HANDLER ---
 def signal_handler(sig, frame):
-    print(f"\n[SERVER] Caught signal {sig}. Exiting gracefully...")
+    logger.info("Caught signal %s. Exiting gracefully...", sig)
     # Clean up audio loop
     if audio_loop:
         try:
@@ -222,9 +228,13 @@ def load_settings():
                             SETTINGS["tool_permissions"].update(v)
                         else:
                             SETTINGS[k] = v
-            print(f"Loaded settings: {SETTINGS}")
+                    # Older persisted settings treated CAD generation as enabled
+                    # when a permissions block existed without that key.
+                    if isinstance(loaded.get("tool_permissions"), dict) and "generate_cad" not in loaded["tool_permissions"]:
+                        SETTINGS["tool_permissions"]["generate_cad"] = True
+            logger.info("Loaded settings")
         except Exception as e:
-            print(f"Error loading settings: {e}")
+            logger.exception("Error loading settings")
     return SETTINGS
 
 def save_settings(settings=None):
@@ -234,9 +244,9 @@ def save_settings(settings=None):
     try:
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(SETTINGS, f, indent=4)
-        print("Settings saved.")
+        logger.info("Settings saved")
     except Exception as e:
-        print(f"Error saving settings: {e}")
+        logger.exception("Error saving settings")
     return SETTINGS
 
 # Load on startup
@@ -251,17 +261,16 @@ kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
 @app.on_event("startup")
 async def startup_event():
     import sys
-    print(f"[SERVER DEBUG] Startup Event Triggered")
-    print(f"[SERVER DEBUG] Python Version: {sys.version}")
+    logger.info("Startup event triggered; Python version: %s", sys.version)
     try:
         loop = asyncio.get_running_loop()
-        print(f"[SERVER DEBUG] Running Loop: {type(loop)}")
+        logger.debug("Running loop: %s", type(loop))
         policy = asyncio.get_event_loop_policy()
-        print(f"[SERVER DEBUG] Current Policy: {type(policy)}")
+        logger.debug("Current event loop policy: %s", type(policy))
     except Exception as e:
-        print(f"[SERVER DEBUG] Error checking loop: {e}")
+        logger.exception("Error checking event loop")
 
-    print("[SERVER] Startup: Initializing Kasa Agent...")
+    logger.info("Initializing Kasa Agent")
     await kasa_agent.initialize()
 
 @app.get("/status")
@@ -298,15 +307,20 @@ async def delete_contact(sid, data):
     await sio.emit('contacts_status', {'msg': result}, room=sid)
 
 @sio.event
-async def connect(sid, environ):
-    print(f"Client connected: {sid}")
+async def connect(sid, environ, auth=None):
+    if SERVER_TOKEN:
+        provided_token = str((auth or {}).get("token", ""))
+        if not provided_token or not hmac.compare_digest(provided_token, SERVER_TOKEN):
+            logger.warning("Rejected unauthenticated client: %s", sid)
+            return False
+    logger.info("Client connected: %s", sid)
     await sio.emit('status', {'msg': 'Connected to F.R.I.D.A.Y Backend'}, room=sid)
 
     global authenticator
     
     # Callback for Auth Status
     async def on_auth_status(is_auth):
-        print(f"[SERVER] Auth status change: {is_auth}")
+        logger.info("Auth status change: %s", is_auth)
         await sio.emit('auth_status', {'authenticated': is_auth})
 
     # Callback for Auth Camera Frames
@@ -316,7 +330,7 @@ async def connect(sid, environ):
     # Initialize Authenticator if not already done
     if authenticator is None:
         authenticator = FaceAuthenticator(
-            reference_image_path="reference.jpg",
+            reference_image_path=str(Path(__file__).with_name("reference.jpg")),
             on_status_change=on_auth_status,
             on_frame=on_auth_frame
         )
@@ -332,14 +346,14 @@ async def connect(sid, environ):
             asyncio.create_task(authenticator.start_authentication_loop())
         else:
             # Bypass Auth
-            print("Face Auth Disabled. Auto-authenticating.")
+            logger.info("Face auth disabled; auto-authenticating")
             # We don't change authenticator state to true to avoid confusion if re-enabled? 
             # Or we should just tell client it's auth'd.
             await sio.emit('auth_status', {'authenticated': True})
 
 @sio.event
 async def disconnect(sid):
-    print(f"Client disconnected: {sid}")
+    logger.info("Client disconnected: %s", sid)
     if audio_loop:
         audio_loop.cancel_pending_confirmations()
 
@@ -351,13 +365,13 @@ async def start_audio(sid, data=None):
     # Only block if auth is ENABLED and not authenticated
     if SETTINGS.get("face_auth_enabled", False):
         if authenticator and not authenticator.authenticated:
-            print("Blocked start_audio: Not authenticated.")
+            logger.warning("Blocked start_audio: client is not authenticated")
             await sio.emit('error', {'msg': 'Authentication Required'})
             if audio_loop:
                 audio_loop.cancel_pending_confirmations()
             return
 
-    print("Starting Audio Loop...")
+    logger.info("Starting audio loop")
     
     device_index = None
     device_name = None
@@ -367,16 +381,16 @@ async def start_audio(sid, data=None):
         if 'device_name' in data:
             device_name = data['device_name']
             
-    print(f"Using input device: Name='{device_name}', Index={device_index}")
+    logger.info("Using input device: name=%r, index=%s", device_name, device_index)
     
     if audio_loop:
         if loop_task and (loop_task.done() or loop_task.cancelled()):
-             print("Audio loop task appeared finished/cancelled. Clearing and restarting...")
+             logger.warning("Audio loop task finished or was cancelled; restarting")
              audio_loop.cancel_pending_confirmations()
              audio_loop = None
              loop_task = None
         else:
-             print("Audio loop already running. Re-connecting client to session.")
+             logger.info("Audio loop already running; reconnecting client to session")
              await sio.emit('status', {'msg': 'F.R.I.D.A.Y Already Running'})
              return
 
@@ -390,12 +404,12 @@ async def start_audio(sid, data=None):
     # Callback to send CAL data to frontend
     def on_cad_data(data):
         info = f"{len(data.get('vertices', []))} vertices" if 'vertices' in data else f"{len(data.get('data', ''))} bytes (STL)"
-        print(f"Sending CAD data to frontend: {info}")
+        logger.debug("Sending CAD data to frontend: %s", info)
         asyncio.create_task(sio.emit('cad_data', data))
 
     # Callback to send Browser data to frontend
     def on_web_data(data):
-        print(f"Sending Browser data to frontend: {len(data.get('log', ''))} chars logs")
+        logger.debug("Sending browser data to frontend: %s log chars", len(data.get("log", "")))
         asyncio.create_task(sio.emit('browser_frame', data))
         
     # Callback to send Transcription data to frontend
@@ -406,11 +420,11 @@ async def start_audio(sid, data=None):
     # Callback to send Confirmation Request to frontend
     def on_tool_confirmation(data):
         # data = {"id": "uuid", "tool": "tool_name", "args": {...}}
-        print(f"Requesting confirmation for tool: {data.get('tool')}")
+        logger.info("Requesting confirmation for tool: %s", data.get("tool"))
         asyncio.create_task(sio.emit('tool_confirmation_request', data))
 
     def on_confirmation_expired(data):
-        print(f"Confirmation expired for tool: {data.get('tool')}")
+        logger.warning("Confirmation expired for tool: %s", data.get("tool"))
         asyncio.create_task(sio.emit('confirmation_expired', data, room=sid))
 
     # Callback to send CAD status to frontend
@@ -419,11 +433,11 @@ async def start_audio(sid, data=None):
         # - a string like "generating" (from friday.py handle_cad_request)
         # - a dict with {status, attempt, max_attempts, error} (from CadAgent)
         if isinstance(status, dict):
-            print(f"Sending CAD Status: {status.get('status')} (attempt {status.get('attempt')}/{status.get('max_attempts')})")
+            logger.debug("Sending CAD status: %s (attempt %s/%s)", status.get("status"), status.get("attempt"), status.get("max_attempts"))
             asyncio.create_task(sio.emit('cad_status', status))
         else:
             # Legacy: simple string
-            print(f"Sending CAD Status: {status}")
+            logger.debug("Sending CAD status: %s", status)
             asyncio.create_task(sio.emit('cad_status', {'status': status}))
 
     # Callback to send CAD thoughts to frontend (streaming)
@@ -432,7 +446,7 @@ async def start_audio(sid, data=None):
 
     # Callback to send Project Update to frontend
     def on_project_update(project_name):
-        print(f"Sending Project Update: {project_name}")
+        logger.info("Sending project update: %s", project_name)
         asyncio.create_task(sio.emit('project_update', {'project': project_name}))
 
     # Callback to send Device Update to frontend
@@ -440,7 +454,7 @@ async def start_audio(sid, data=None):
 
     def on_device_update(devices):
         # devices is a list of dicts
-        print(f"Sending Kasa Device Update: {len(devices)} devices")
+        logger.debug("Sending Kasa device update: %s devices", len(devices))
         asyncio.create_task(sio.emit('kasa_devices', devices))
         for device in devices:
             device_id = device.get("ip") or device.get("alias")
@@ -453,7 +467,7 @@ async def start_audio(sid, data=None):
 
     # Callback to send Error to frontend
     def on_error(msg):
-        print(f"Sending Error to frontend: {msg}")
+        logger.error("Sending error to frontend: %s", msg)
         asyncio.create_task(sio.emit('error', {'msg': msg}))
 
     def on_plan_update(plan):
@@ -468,7 +482,7 @@ async def start_audio(sid, data=None):
 
     # Initialize FRIDAY
     try:
-        print(f"Initializing AudioLoop with device_index={device_index}")
+        logger.info("Initializing AudioLoop with device_index=%s", device_index)
         audio_loop = friday.AudioLoop(
             video_mode="none", 
             on_audio_data=on_audio_data,
@@ -491,7 +505,7 @@ async def start_audio(sid, data=None):
             input_device_name=device_name,
             kasa_agent=kasa_agent
         )
-        print("AudioLoop initialized successfully.")
+        logger.info("AudioLoop initialized successfully")
 
         audio_loop.memory_manager.upload_retention_days = max(1, int(SETTINGS.get("upload_retention_days", 30)))
         audio_loop.memory_manager.max_upload_storage_bytes = int(SETTINGS.get("max_upload_storage_mb", 1024)) * 1024 * 1024
@@ -507,10 +521,10 @@ async def start_audio(sid, data=None):
         
         # Check initial mute state
         if data and data.get('muted', False):
-            print("Starting with Audio Paused")
+            logger.info("Starting with audio paused")
             audio_loop.set_paused(True)
 
-        print("Creating asyncio task for AudioLoop.run()")
+        logger.info("Creating asyncio task for AudioLoop.run()")
         loop_task = asyncio.create_task(audio_loop.run())
         
         # Add a done callback to catch silent failures in the loop
@@ -518,14 +532,14 @@ async def start_audio(sid, data=None):
             try:
                 task.result()
             except asyncio.CancelledError:
-                print("Audio Loop Cancelled")
+                logger.info("Audio loop cancelled")
             except Exception as e:
-                print(f"Audio Loop Crashed: {e}")
+                logger.exception("Audio loop crashed")
                 # You could emit 'error' here if you have context
         
         loop_task.add_done_callback(handle_loop_exit)
         
-        print("Emitting 'F.R.I.D.A.Y Started'")
+        logger.info("Emitting F.R.I.D.A.Y started status")
         await sio.emit('status', {'msg': 'F.R.I.D.A.Y Started'})
         
         # Send initial dashboard data
@@ -549,7 +563,7 @@ async def start_audio(sid, data=None):
         # Load saved printers
         saved_printers = SETTINGS.get("printers", [])
         if saved_printers and audio_loop.printer_agent:
-            print(f"[SERVER] Loading {len(saved_printers)} saved printers...")
+            logger.info("Loading %s saved printers", len(saved_printers))
             for p in saved_printers:
                 audio_loop.printer_agent.add_printer_manually(
                     name=p.get("name", p["host"]),
@@ -564,7 +578,7 @@ async def start_audio(sid, data=None):
         asyncio.create_task(monitor_tasks_loop())
         
     except Exception as e:
-        print(f"CRITICAL ERROR STARTING FRIDAY: {e}")
+        logger.exception("Critical error starting F.R.I.D.A.Y")
         import traceback
         traceback.print_exc()
         await sio.emit('error', {'msg': f"Failed to start: {str(e)}"})
@@ -573,7 +587,7 @@ async def start_audio(sid, data=None):
 
 async def monitor_printers_loop():
     """Background task to query printer status periodically."""
-    print("[SERVER] Starting Printer Monitor Loop")
+    logger.info("Starting printer monitor loop")
     previous_states = {}
     while audio_loop and audio_loop.printer_agent:
         try:
@@ -606,14 +620,14 @@ async def monitor_printers_loop():
                             previous_states[printer_id] = state
                         
         except asyncio.CancelledError:
-            print("[SERVER] Printer Monitor Cancelled")
+            logger.info("Printer monitor cancelled")
             break
         except Exception as e:
-            print(f"[SERVER] Monitor Loop Error: {e}")
+            logger.exception("Printer monitor loop error")
 
 async def monitor_tasks_loop():
     """Push task cards and alert once when an open task becomes overdue."""
-    print("[SERVER] Starting Task Monitor Loop")
+    logger.info("Starting task monitor loop")
     alerted = set()
     while audio_loop:
         try:
@@ -629,7 +643,7 @@ async def monitor_tasks_loop():
         except asyncio.CancelledError:
             break
         except Exception as e:
-            print(f"[SERVER] Task Monitor Error: {e}")
+            logger.exception("Task monitor loop error")
             await asyncio.sleep(60)
             
         await asyncio.sleep(2) # Update every 2 seconds for responsiveness
@@ -639,7 +653,7 @@ async def stop_audio(sid):
     global audio_loop
     if audio_loop:
         audio_loop.stop() 
-        print("Stopping Audio Loop")
+        logger.info("Stopping audio loop")
         audio_loop = None
         await sio.emit('status', {'msg': 'F.R.I.D.A.Y Stopped'})
 
@@ -648,7 +662,7 @@ async def pause_audio(sid):
     global audio_loop
     if audio_loop:
         audio_loop.set_paused(True)
-        print("Pausing Audio")
+        logger.info("Pausing audio")
         await sio.emit('status', {'msg': 'Audio Paused'})
 
 @sio.event
@@ -656,7 +670,7 @@ async def resume_audio(sid):
     global audio_loop
     if audio_loop:
         audio_loop.set_paused(False)
-        print("Resuming Audio")
+        logger.info("Resuming audio")
         await sio.emit('status', {'msg': 'Audio Resumed'})
 
 @sio.event
@@ -665,40 +679,38 @@ async def confirm_tool(sid, data):
     request_id = data.get('id')
     confirmed = data.get('confirmed', False)
     
-    print(f"[SERVER DEBUG] Received confirmation response for {request_id}: {confirmed}")
+    logger.debug("Received confirmation response for %s: %s", request_id, confirmed)
     
     if audio_loop:
         audio_loop.resolve_tool_confirmation(request_id, confirmed)
     else:
-        print("Audio loop not active, cannot resolve confirmation.")
+        logger.warning("Audio loop not active; cannot resolve confirmation")
 
 @sio.event
 async def shutdown(sid, data=None):
     """Gracefully shutdown the server when the application closes."""
     global audio_loop, loop_task, authenticator
     
-    print("[SERVER] ========================================")
-    print("[SERVER] SHUTDOWN SIGNAL RECEIVED FROM FRONTEND")
-    print("[SERVER] ========================================")
+    logger.info("Shutdown signal received from frontend")
     
     # Stop audio loop
     if audio_loop:
-        print("[SERVER] Stopping Audio Loop...")
+        logger.info("Stopping audio loop")
         audio_loop.stop()
         audio_loop = None
     
     # Cancel the loop task if running
     if loop_task and not loop_task.done():
-        print("[SERVER] Cancelling loop task...")
+        logger.info("Cancelling audio loop task")
         loop_task.cancel()
         loop_task = None
     
     # Stop authenticator if running
     if authenticator:
-        print("[SERVER] Stopping Authenticator...")
+        logger.info("Stopping authenticator")
         authenticator.stop()
     
-    print("[SERVER] Graceful shutdown complete. Terminating process...")
+    logger.info("Graceful shutdown complete; terminating process")
     
     # Force exit immediately - os._exit bypasses cleanup but ensures termination
     os._exit(0)
@@ -706,7 +718,7 @@ async def shutdown(sid, data=None):
 @sio.event
 async def user_input(sid, data):
     text = data.get('text')
-    print(f"[SERVER DEBUG] User input received: '{text}'")
+    logger.debug("User input received: %r", text)
     
     if not await ensure_audio_ready(sid):
         if audio_loop:
@@ -714,7 +726,7 @@ async def user_input(sid, data):
         return
 
     if text:
-        print(f"[SERVER DEBUG] Sending message to model: '{text}'")
+        logger.debug("Sending message to model: %r", text)
         
         # Log User Input to Project History
         if audio_loop and audio_loop.project_manager:
@@ -748,16 +760,16 @@ async def user_input(sid, data):
 
         # Use the same 'send' method that worked for audio, as 'send_realtime_input' and 'send_client_content' seem unstable in this env
         # INJECT VIDEO FRAME IF AVAILABLE (VAD-style logic for Text Input)
-        if audio_loop and audio_loop._latest_image_payload:
-            print(f"[SERVER DEBUG] Piggybacking video frame with text input.")
+        if audio_loop and audio_loop.live_video_enabled and audio_loop._latest_image_payload:
+            logger.debug("Piggybacking video frame with text input")
             try:
                 # Send frame first
                 await audio_loop.session.send(input=audio_loop._latest_image_payload, end_of_turn=False)
             except Exception as e:
-                print(f"[SERVER DEBUG] Failed to send piggyback frame: {e}")
+                logger.exception("Failed to send piggyback frame")
                 
         await audio_loop.session.send(input=text, end_of_turn=True)
-        print(f"[SERVER DEBUG] Message sent to model successfully.")
+        logger.debug("Message sent to model successfully")
 
 import json
 from datetime import datetime
@@ -778,17 +790,55 @@ async def video_frame(sid, data):
 async def set_live_video(sid, data):
     """Enable/disable continuous webcam streaming into the Gemini Live session."""
     enabled = bool((data or {}).get('enabled', False))
-    print(f"[SERVER] Live vision {'enabled' if enabled else 'disabled'} by client.")
+    logger.info("Live vision %s by client", "enabled" if enabled else "disabled")
     if audio_loop:
         audio_loop.set_live_video(enabled)
-    await sio.emit('video_status', {'enabled': enabled and bool(audio_loop)}, room=sid)
+    status = audio_loop.vision_status() if audio_loop else {
+        'enabled': False,
+        'session_ready': False,
+        'paused': False,
+        'frames_received': 0,
+        'frames_sent': 0,
+    }
+    await sio.emit('video_status', status, room=sid)
+
+
+@sio.event
+async def get_vision_status(sid):
+    """Return explicit webcam and Gemini vision diagnostics to the client."""
+    status = audio_loop.vision_status() if audio_loop else {
+        'enabled': False,
+        'session_ready': False,
+        'paused': False,
+        'frames_received': 0,
+        'frames_sent': 0,
+    }
+    await sio.emit('video_status', status, room=sid)
+
+
+@sio.event
+async def set_vision_source(sid, data):
+    """Select camera, screen, or no visual source for the next Live session."""
+    source = (data or {}).get('source', 'camera')
+    if not audio_loop:
+        await sio.emit('video_status', {
+            'enabled': False,
+            'session_ready': False,
+            'source': source,
+            'error': 'Audio session is not running.',
+        }, room=sid)
+        return
+    result = audio_loop.set_vision_source(source)
+    status = audio_loop.vision_status()
+    status.update(result)
+    await sio.emit('video_status', status, room=sid)
 
 @sio.event
 async def save_memory(sid, data):
     try:
         messages = data.get('messages', [])
         if not messages:
-            print("No messages to save.")
+            logger.info("No messages to save")
             if audio_loop:
                 audio_loop.cancel_pending_confirmations()
             return
@@ -817,26 +867,26 @@ async def save_memory(sid, data):
                 sender = msg.get('sender', 'Unknown')
                 text = msg.get('text', '')
                 f.write(f"{sender}: {text}\n")
-        print(f"Conversation saved to {filename}")
+        logger.info("Conversation saved to %s", filename)
         await sio.emit('status', {'msg': 'Memory Saved Successfully'})
 
     except Exception as e:
-        print(f"Error saving memory: {e}")
+        logger.exception("Error saving memory")
         await sio.emit('error', {'msg': f"Failed to save memory: {str(e)}"})
 
 @sio.event
 async def upload_memory(sid, data):
-    print(f"Received memory upload request")
+    logger.info("Received memory upload request")
     try:
         memory_text = data.get('memory', '')
         if not memory_text:
-            print("No memory data provided.")
+            logger.warning("No memory data provided")
             if audio_loop:
                 audio_loop.cancel_pending_confirmations()
             return
 
         if not audio_loop:
-             print("[SERVER DEBUG] [Error] Audio loop is None. Cannot load memory.")
+             logger.error("Audio loop is None; cannot load memory")
              await sio.emit('error', {'msg': "System not ready (Audio Loop inactive)"})
              return
         
@@ -844,15 +894,15 @@ async def upload_memory(sid, data):
              return
 
         # Send to model
-        print("Sending memory context to model...")
+        logger.debug("Sending memory context to model")
         context_msg = f"System Notification: The user has uploaded a long-term memory file. Please load the following context into your understanding. The format is a text log of previous conversations:\n\n{memory_text}"
         
         await audio_loop.session.send(input=context_msg, end_of_turn=True)
-        print("Memory context sent successfully.")
+        logger.debug("Memory context sent successfully")
         await sio.emit('status', {'msg': 'Memory Loaded into Context'})
 
     except Exception as e:
-        print(f"Error uploading memory: {e}")
+        logger.exception("Error uploading memory")
         await sio.emit('error', {'msg': f"Failed to upload memory: {str(e)}"})
 
 @sio.event
@@ -898,7 +948,7 @@ async def process_uploaded_file(sid, data):
                 end_of_turn=False,
             )
     except Exception as e:
-        print(f"Error processing uploaded file: {e}")
+        logger.exception("Error processing uploaded file")
         await sio.emit('file_processing_result', {
             'error': (
                 f"I could not process '{data.get('filename', 'the file')}'. "
@@ -954,11 +1004,11 @@ async def upload_file_for_awareness(sid, data):
             'saved_path': str(saved_path),
         }, room=sid)
     except Exception as e:
-        print(f"Error uploading file for awareness: {e}")
+        logger.exception("Error uploading file for awareness")
         await sio.emit('file_processing_result', {'error': f'File upload failed: {e}'}, room=sid)
 @sio.event
 async def discover_kasa(sid):
-    print(f"Received discover_kasa request")
+    logger.info("Received discover_kasa request")
     try:
         devices = await kasa_agent.discover_devices()
         await sio.emit('kasa_devices', devices)
@@ -980,17 +1030,17 @@ async def discover_kasa(sid):
         # A simple full persistence of current state is safest.
         SETTINGS["kasa_devices"] = saved_devices
         save_settings()
-        print(f"[SERVER] Saved {len(saved_devices)} Kasa devices to settings.")
+        logger.info("Saved %s Kasa devices to settings", len(saved_devices))
         
     except Exception as e:
-        print(f"Error discovering kasa: {e}")
+        logger.exception("Error discovering Kasa devices")
         await sio.emit('error', {'msg': f"Kasa Discovery Failed: {str(e)}"})
 
 @sio.event
 async def iterate_cad(sid, data):
     # data: { prompt: "make it bigger" }
     prompt = data.get('prompt')
-    print(f"Received iterate_cad request: '{prompt}'")
+    logger.info("Received iterate_cad request: %r", prompt)
     
     if not audio_loop or not audio_loop.cad_agent:
         await sio.emit('error', {'msg': "CAD Agent not available"})
@@ -1009,27 +1059,27 @@ async def iterate_cad(sid, data):
         
         if result:
             info = f"{len(result.get('data', ''))} bytes (STL)"
-            print(f"Sending updated CAD data: {info}")
+            logger.debug("Sending updated CAD data: %s", info)
             await sio.emit('cad_data', result)
             # Save to Project
             if 'file_path' in result:
                 saved_path = audio_loop.project_manager.save_cad_artifact(result['file_path'], prompt)
                 if saved_path:
-                    print(f"[SERVER] Saved iterated CAD to {saved_path}")
+                    logger.info("Saved iterated CAD to %s", saved_path)
 
             await sio.emit('status', {'msg': 'Design updated'})
         else:
             await sio.emit('error', {'msg': 'Failed to update design'})
             
     except Exception as e:
-        print(f"Error iterating CAD: {e}")
+        logger.exception("Error iterating CAD")
         await sio.emit('error', {'msg': f"Iteration Error: {str(e)}"})
 
 @sio.event
 async def generate_cad(sid, data):
     # data: { prompt: "make a cube" }
     prompt = data.get('prompt')
-    print(f"Received generate_cad request: '{prompt}'")
+    logger.info("Received generate_cad request: %r", prompt)
     
     if not audio_loop or not audio_loop.cad_agent:
         await sio.emit('error', {'msg': "CAD Agent not available"})
@@ -1047,7 +1097,7 @@ async def generate_cad(sid, data):
         
         if result:
             info = f"{len(result.get('data', ''))} bytes (STL)"
-            print(f"Sending newly generated CAD data: {info}")
+            logger.debug("Sending newly generated CAD data: %s", info)
             await sio.emit('cad_data', result)
 
 
@@ -1055,21 +1105,21 @@ async def generate_cad(sid, data):
             if 'file_path' in result:
                 saved_path = audio_loop.project_manager.save_cad_artifact(result['file_path'], prompt)
                 if saved_path:
-                    print(f"[SERVER] Saved generated CAD to {saved_path}")
+                    logger.info("Saved generated CAD to %s", saved_path)
 
             await sio.emit('status', {'msg': 'Design generated'})
         else:
             await sio.emit('error', {'msg': 'Failed to generate design'})
             
     except Exception as e:
-        print(f"Error generating CAD: {e}")
+        logger.exception("Error generating CAD")
         await sio.emit('error', {'msg': f"Generation Error: {str(e)}"})
 
 @sio.event
 async def prompt_web_agent(sid, data):
     # data: { prompt: "find xyz" }
     prompt = data.get('prompt')
-    print(f"Received web agent prompt: '{prompt}'")
+    logger.info("Received web agent prompt: %r", prompt)
     
     if not audio_loop or not audio_loop.web_agent:
         await sio.emit('error', {'msg': "Web Agent not available"})
@@ -1095,12 +1145,12 @@ async def prompt_web_agent(sid, data):
         await sio.emit('status', {'msg': 'Web Agent finished'})
         
     except Exception as e:
-        print(f"Error running Web Agent: {e}")
+        logger.exception("Error running web agent")
         await sio.emit('error', {'msg': f"Web Agent Error: {str(e)}"})
 
 @sio.event
 async def discover_printers(sid):
-    print("Received discover_printers request")
+    logger.info("Received discover_printers request")
     
     # If audio_loop isn't ready yet, return saved printers from settings
     if not audio_loop or not audio_loop.printer_agent:
@@ -1116,7 +1166,7 @@ async def discover_printers(sid):
                     "printer_type": p.get("type", "unknown"),
                     "camera_url": p.get("camera_url")
                 })
-            print(f"[SERVER] Returning {len(printer_list)} saved printers (audio_loop not ready)")
+            logger.info("Returning %s saved printers; audio loop not ready", len(printer_list))
             await sio.emit('printer_list', printer_list)
             if audio_loop:
                 audio_loop.cancel_pending_confirmations()
@@ -1133,7 +1183,7 @@ async def discover_printers(sid):
         await sio.emit('printer_list', printers)
         await sio.emit('status', {'msg': f"Found {len(printers)} printers"})
     except Exception as e:
-        print(f"Error discovering printers: {e}")
+        logger.exception("Error discovering printers")
         await sio.emit('error', {'msg': f"Printer Discovery Failed: {str(e)}"})
 
 @sio.event
@@ -1151,7 +1201,7 @@ async def add_printer(sid, data):
         host = raw_host
         port = 80
     
-    print(f"Received add_printer request: {host}:{port} ({ptype})")
+    logger.info("Received add_printer request: %s:%s (%s)", host, port, ptype)
     
     if not audio_loop or not audio_loop.printer_agent:
         await sio.emit('error', {'msg': "Printer Agent not available"})
@@ -1185,10 +1235,10 @@ async def add_printer(sid, data):
                 SETTINGS["printers"] = []
             SETTINGS["printers"].append(new_printer_config)
             save_settings()
-            print(f"[SERVER] Saved printer {name} to settings.")
+            logger.info("Saved printer %s to settings", name)
         
         # Probe to confirm/correct type
-        print(f"Probing {host} to confirm type...")
+        logger.debug("Probing %s to confirm printer type", host)
         # Try port 7125 (Moonraker) and 4408 (Fluidd/K1) 
         ports_to_try = [80, 7125, 4408]
         
@@ -1204,7 +1254,7 @@ async def add_printer(sid, data):
         
         if actual_type != "unknown" and actual_type != printer.printer_type:
              printer.printer_type = actual_type
-             print(f"Corrected type to {actual_type.value} on port {printer.port}")
+             logger.info("Corrected printer type to %s on port %s", actual_type.value, printer.port)
              
         # Refresh list for everyone
         printers = [p.to_dict() for p in audio_loop.printer_agent.printers.values()]
@@ -1212,12 +1262,12 @@ async def add_printer(sid, data):
         await sio.emit('status', {'msg': f"Added printer: {name}"})
         
     except Exception as e:
-        print(f"Error adding printer: {e}")
+        logger.exception("Error adding printer")
         await sio.emit('error', {'msg': f"Failed to add printer: {str(e)}"})
 
 @sio.event
 async def print_stl(sid, data):
-    print(f"Received print_stl request: {data}")
+    logger.info("Received print_stl request: %s", data)
     # data: { stl_path: "path/to.stl" | "current", printer: "name_or_ip", profile: "optional" }
     
     if not audio_loop or not audio_loop.printer_agent:
@@ -1243,7 +1293,7 @@ async def print_stl(sid, data):
         current_project_path = None
         if audio_loop and audio_loop.project_manager:
             current_project_path = str(audio_loop.project_manager.get_current_project_path())
-            print(f"[SERVER DEBUG] Using project path: {current_project_path}")
+            logger.debug("Using project path: %s", current_project_path)
 
         # Resolve STL path before slicing so we can preview it
         resolved_stl = audio_loop.printer_agent._resolve_file_path(stl_path, current_project_path)
@@ -1257,14 +1307,14 @@ async def print_stl(sid, data):
                 stl_b64 = base64.b64encode(stl_data).decode('utf-8')
                 stl_filename = os.path.basename(resolved_stl)
                 
-                print(f"[SERVER] Opening STL in CAD module: {stl_filename}")
+                logger.info("Opening STL in CAD module: %s", stl_filename)
                 await sio.emit('cad_data', {
                     'format': 'stl',
                     'data': stl_b64,
                     'filename': stl_filename
                 })
             except Exception as e:
-                print(f"[SERVER] Warning: Could not preview STL: {e}")
+                logger.warning("Could not preview STL: %s", e)
         
         # Progress Callback
         async def on_slicing_progress(percent, message):
@@ -1288,13 +1338,13 @@ async def print_stl(sid, data):
         await sio.emit('status', {'msg': f"Print Job: {result.get('status', 'unknown')}"})
         
     except Exception as e:
-        print(f"Error printing STL: {e}")
+        logger.exception("Error printing STL")
         await sio.emit('error', {'msg': f"Print Failed: {str(e)}"})
 
 @sio.event
 async def get_slicer_profiles(sid):
     """Get available OrcaSlicer profiles for manual selection."""
-    print("Received get_slicer_profiles request")
+    logger.info("Received get_slicer_profiles request")
     if not audio_loop or not audio_loop.printer_agent:
         await sio.emit('error', {'msg': "Printer Agent not available"})
         if audio_loop:
@@ -1305,7 +1355,7 @@ async def get_slicer_profiles(sid):
         profiles = audio_loop.printer_agent.get_available_profiles()
         await sio.emit('slicer_profiles', profiles)
     except Exception as e:
-        print(f"Error getting slicer profiles: {e}")
+        logger.exception("Error getting slicer profiles")
         await sio.emit('error', {'msg': f"Failed to get profiles: {str(e)}"})
 
 @sio.event
@@ -1313,7 +1363,7 @@ async def control_kasa(sid, data):
     # data: { ip, action: "on"|"off"|"brightness"|"color", value: ... }
     ip = data.get('ip')
     action = data.get('action')
-    print(f"Kasa Control: {ip} -> {action}")
+    logger.info("Kasa control: %s -> %s", ip, action)
     
     try:
         success = False
@@ -1342,7 +1392,7 @@ async def control_kasa(sid, data):
              await sio.emit('error', {'msg': f"Failed to control device {ip}"})
 
     except Exception as e:
-         print(f"Error controlling kasa: {e}")
+         logger.exception("Error controlling Kasa device")
          await sio.emit('error', {'msg': f"Kasa Control Error: {str(e)}"})
 
 @sio.event
@@ -1385,7 +1435,7 @@ async def get_agent_console(sid):
     try:
         executions = agent_dispatcher_module.ledger.list(25)
     except Exception as exc:
-        print(f"Error listing execution ledger: {exc}")
+        logger.exception("Error listing execution ledger")
         executions = []
     await sio.emit('agent_console', {
         'plugins': runtime.plugin_manager.list_plugins() if runtime else [],
@@ -1401,7 +1451,7 @@ async def get_autonomy_status(sid):
     try:
         await sio.emit('autonomy_status', audio_loop.autonomy_pipeline.run_cycle(), room=sid)
     except Exception as exc:
-        print(f"Error running autonomy cycle: {exc}")
+        logger.exception("Error running autonomy cycle")
         await sio.emit('autonomy_status', {'proposals': [], 'security_findings': [], 'phases': {}, 'error': str(exc)}, room=sid)
 
 @sio.event
@@ -1472,7 +1522,7 @@ async def connect_google_account(sid):
             audio_loop.google_account = google_account
         await sio.emit('google_account_status', account_status, room=sid)
     except Exception as exc:
-        print(f"[GOOGLE] Connection failed: {exc}")
+        logger.exception("Google connection failed")
         await sio.emit('google_account_status', {'connected': False, 'error': str(exc)}, room=sid)
 
 @sio.event
@@ -1489,7 +1539,7 @@ async def disconnect_google_account(sid):
 @sio.event
 async def update_settings(sid, data):
     # Generic update
-    print(f"Updating settings: {data}")
+    logger.info("Updating settings: %s", data)
     
     # Handle specific keys if needed
     if "tool_permissions" in data:
@@ -1521,7 +1571,7 @@ async def update_settings(sid, data):
 
     if "camera_flipped" in data:
         SETTINGS["camera_flipped"] = data["camera_flipped"]
-        print(f"[SERVER] Camera flip set to: {data['camera_flipped']}")
+        logger.info("Camera flip set to: %s", data["camera_flipped"])
 
     if "system_alerts_enabled" in data:
         SETTINGS["system_alerts_enabled"] = bool(data["system_alerts_enabled"])
@@ -1533,7 +1583,7 @@ async def update_settings(sid, data):
             from actions import initiative as _initiative_mod
             SETTINGS["initiative"] = _initiative_mod.write_settings(data["initiative"]).get("config", SETTINGS.get("initiative", {}))
         except Exception as exc:
-            print(f"[SERVER] Initiative settings update failed: {exc}")
+            logger.exception("Initiative settings update failed")
 
     if "quiet_mode" in data:
         SETTINGS["quiet_mode"] = bool(data["quiet_mode"])
@@ -1563,7 +1613,7 @@ async def get_tool_permissions(sid):
 
 @sio.event
 async def update_tool_permissions(sid, data):
-    print(f"Updating permissions (legacy event): {data}")
+    logger.info("Updating permissions through legacy event: %s", data)
     SETTINGS["tool_permissions"].update(data)
     save_settings()
     
@@ -1584,7 +1634,7 @@ async def get_system_monitor(sid):
         # Also emit to dashboard for real-time updates
         await sio.emit('dashboard_system_update', data)
     except Exception as e:
-        print(f"Error getting system monitor data: {e}")
+        logger.exception("Error getting system monitor data")
 
 @sio.event
 async def get_weather(sid, data):
@@ -1603,7 +1653,7 @@ async def get_weather(sid, data):
             'forecast': []
         })
     except Exception as e:
-        print(f"Error getting weather: {e}")
+        logger.exception("Error getting weather")
 
 @sio.event
 async def get_reminders(sid):
@@ -1612,7 +1662,7 @@ async def get_reminders(sid):
         # Placeholder - would need actual reminder storage
         await sio.emit('reminders_list', [])
     except Exception as e:
-        print(f"Error getting reminders: {e}")
+        logger.exception("Error getting reminders")
 
 @sio.event
 async def add_reminder(sid, data):
@@ -1622,7 +1672,7 @@ async def add_reminder(sid, data):
         result = reminder(data)
         await sio.emit('status', {'msg': result})
     except Exception as e:
-        print(f"Error adding reminder: {e}")
+        logger.exception("Error adding reminder")
 
 @sio.event
 async def delete_reminder(sid, data):
@@ -1631,7 +1681,7 @@ async def delete_reminder(sid, data):
         # Placeholder - would need actual deletion logic
         await sio.emit('status', {'msg': 'Reminder deleted'})
     except Exception as e:
-        print(f"Error deleting reminder: {e}")
+        logger.exception("Error deleting reminder")
 
 @sio.event
 async def search_flights(sid, data):
@@ -1641,7 +1691,7 @@ async def search_flights(sid, data):
         result = flight_finder(data)
         await sio.emit('flight_results', [])
     except Exception as e:
-        print(f"Error searching flights: {e}")
+        logger.exception("Error searching flights")
 
 @sio.event
 async def read_directory(sid, data):
@@ -1651,7 +1701,7 @@ async def read_directory(sid, data):
         # Placeholder - would need actual directory reading
         await sio.emit('directory_contents', {'path': path, 'items': []})
     except Exception as e:
-        print(f"Error reading directory: {e}")
+        logger.exception("Error reading directory")
 
 @sio.event
 async def search_files(sid, data):
@@ -1660,7 +1710,7 @@ async def search_files(sid, data):
         # Placeholder - would need actual file search
         await sio.emit('directory_contents', {'path': data.get('path'), 'items': []})
     except Exception as e:
-        print(f"Error searching files: {e}")
+        logger.exception("Error searching files")
 
 @sio.event
 async def start_recording(sid):
@@ -1668,7 +1718,7 @@ async def start_recording(sid):
     try:
         await sio.emit('recording_status', {'recording': True})
     except Exception as e:
-        print(f"Error starting recording: {e}")
+        logger.exception("Error starting recording")
 
 @sio.event
 async def stop_recording(sid):
@@ -1676,7 +1726,7 @@ async def stop_recording(sid):
     try:
         await sio.emit('recording_status', {'recording': False})
     except Exception as e:
-        print(f"Error stopping recording: {e}")
+        logger.exception("Error stopping recording")
 
 @sio.event
 async def play_recording(sid):
@@ -1684,7 +1734,7 @@ async def play_recording(sid):
     try:
         await sio.emit('status', {'msg': 'Playing recording'})
     except Exception as e:
-        print(f"Error playing recording: {e}")
+        logger.exception("Error playing recording")
 
 @sio.event
 async def clear_recording(sid):
@@ -1692,7 +1742,7 @@ async def clear_recording(sid):
     try:
         await sio.emit('status', {'msg': 'Recording cleared'})
     except Exception as e:
-        print(f"Error clearing recording: {e}")
+        logger.exception("Error clearing recording")
 
 @sio.event
 async def web_search(sid, data):
@@ -1703,7 +1753,7 @@ async def web_search(sid, data):
         result = web_search_action({'query': query})
         await sio.emit('search_results', {'results': []})
     except Exception as e:
-        print(f"Error performing web search: {e}")
+        logger.exception("Error performing web search")
 
 @sio.event
 async def get_search_history(sid):
@@ -1711,7 +1761,7 @@ async def get_search_history(sid):
     try:
         await sio.emit('search_history', [])
     except Exception as e:
-        print(f"Error getting search history: {e}")
+        logger.exception("Error getting search history")
 
 @sio.event
 async def youtube_search(sid, data):
@@ -1722,7 +1772,7 @@ async def youtube_search(sid, data):
         result = youtube_action({'query': query})
         await sio.emit('youtube_results', [])
     except Exception as e:
-        print(f"Error searching YouTube: {e}")
+        logger.exception("Error searching YouTube")
 
 @sio.event
 async def get_playlist(sid):
@@ -1730,7 +1780,7 @@ async def get_playlist(sid):
     try:
         await sio.emit('playlist_updated', [])
     except Exception as e:
-        print(f"Error getting playlist: {e}")
+        logger.exception("Error getting playlist")
 
 @sio.event
 async def play_youtube(sid, data):
@@ -1738,7 +1788,7 @@ async def play_youtube(sid, data):
     try:
         await sio.emit('status', {'msg': 'Playing video'})
     except Exception as e:
-        print(f"Error playing video: {e}")
+        logger.exception("Error playing video")
 
 @sio.event
 async def add_to_playlist(sid, data):
@@ -1746,7 +1796,7 @@ async def add_to_playlist(sid, data):
     try:
         await sio.emit('status', {'msg': 'Added to playlist'})
     except Exception as e:
-        print(f"Error adding to playlist: {e}")
+        logger.exception("Error adding to playlist")
 
 @sio.event
 async def remove_from_playlist(sid, data):
@@ -1754,7 +1804,7 @@ async def remove_from_playlist(sid, data):
     try:
         await sio.emit('status', {'msg': 'Removed from playlist'})
     except Exception as e:
-        print(f"Error removing from playlist: {e}")
+        logger.exception("Error removing from playlist")
 
 @sio.event
 async def run_code(sid, data):
@@ -1766,7 +1816,7 @@ async def run_code(sid, data):
         result = code_helper_action({'code': code, 'language': language})
         await sio.emit('code_output', result)
     except Exception as e:
-        print(f"Error running code: {e}")
+        logger.exception("Error running code")
 
 @sio.event
 async def save_code(sid, data):
@@ -1774,7 +1824,7 @@ async def save_code(sid, data):
     try:
         await sio.emit('status', {'msg': 'Code saved'})
     except Exception as e:
-        print(f"Error saving code: {e}")
+        logger.exception("Error saving code")
 
 @sio.event
 async def get_code_snippets(sid):
@@ -1782,7 +1832,7 @@ async def get_code_snippets(sid):
     try:
         await sio.emit('code_snippets', [])
     except Exception as e:
-        print(f"Error getting code snippets: {e}")
+        logger.exception("Error getting code snippets")
 
 @sio.event
 async def get_process_list(sid):
@@ -1797,7 +1847,7 @@ async def get_process_list(sid):
                 continue
         await sio.emit('process_list', sorted(processes, key=lambda item: item.get('memory_percent') or 0, reverse=True)[:100], room=sid)
     except Exception as e:
-        print(f"Error getting process list: {e}")
+        logger.exception("Error getting process list")
 
 @sio.event
 async def kill_process(sid, data):
@@ -1806,7 +1856,7 @@ async def kill_process(sid, data):
         pid = data.get('pid')
         await sio.emit('status', {'msg': f'Process {pid} killed'})
     except Exception as e:
-        print(f"Error killing process: {e}")
+        logger.exception("Error killing process")
 
 @sio.event
 async def get_desktops(sid):
@@ -1814,7 +1864,7 @@ async def get_desktops(sid):
     try:
         await sio.emit('desktop_list', [])
     except Exception as e:
-        print(f"Error getting desktops: {e}")
+        logger.exception("Error getting desktops")
 
 @sio.event
 async def switch_desktop(sid, data):
@@ -1823,7 +1873,7 @@ async def switch_desktop(sid, data):
         desktop = data.get('desktop')
         await sio.emit('status', {'msg': f'Switched to desktop {desktop}'})
     except Exception as e:
-        print(f"Error switching desktop: {e}")
+        logger.exception("Error switching desktop")
 
 @sio.event
 async def add_desktop(sid):
@@ -1831,7 +1881,7 @@ async def add_desktop(sid):
     try:
         await sio.emit('status', {'msg': 'Desktop added'})
     except Exception as e:
-        print(f"Error adding desktop: {e}")
+        logger.exception("Error adding desktop")
 
 @sio.event
 async def set_wallpaper(sid):
@@ -1839,7 +1889,7 @@ async def set_wallpaper(sid):
     try:
         await sio.emit('status', {'msg': 'Wallpaper set'})
     except Exception as e:
-        print(f"Error setting wallpaper: {e}")
+        logger.exception("Error setting wallpaper")
 
 @sio.event
 async def send_message(sid, data):
@@ -1868,7 +1918,7 @@ async def send_message(sid, data):
         result = send_message_action({'receiver': receiver, 'message_text': message, 'platform': platform})
         await sio.emit('status', {'msg': result}, room=sid)
     except Exception as e:
-        print(f"Error sending message: {e}")
+        logger.exception("Error sending message")
         await sio.emit('status', {'msg': f"Error sending message: {e}"}, room=sid)
 
 @sio.event
@@ -1879,7 +1929,7 @@ async def get_game_library(sid):
         result = game_updater_action({'action': 'list'})
         await sio.emit('game_library', [])
     except Exception as e:
-        print(f"Error getting game library: {e}")
+        logger.exception("Error getting game library")
 
 @sio.event
 async def check_game_updates(sid):
@@ -1887,7 +1937,7 @@ async def check_game_updates(sid):
     try:
         await sio.emit('game_updates', [])
     except Exception as e:
-        print(f"Error checking game updates: {e}")
+        logger.exception("Error checking game updates")
 
 @sio.event
 async def launch_game(sid, data):
@@ -1896,7 +1946,7 @@ async def launch_game(sid, data):
         game_id = data.get('gameId')
         await sio.emit('status', {'msg': 'Game launched'})
     except Exception as e:
-        print(f"Error launching game: {e}")
+        logger.exception("Error launching game")
 
 @sio.event
 async def update_game(sid, data):
@@ -1905,7 +1955,7 @@ async def update_game(sid, data):
         game_id = data.get('gameId')
         await sio.emit('status', {'msg': 'Game updating'})
     except Exception as e:
-        print(f"Error updating game: {e}")
+        logger.exception("Error updating game")
 
 # Dashboard event handlers
 @sio.event
@@ -1924,7 +1974,7 @@ async def get_dashboard_data(sid, data=None):
         }
         await sio.emit('dashboard_data', dashboard_data)
     except Exception as e:
-        print(f"Error getting dashboard data: {e}")
+        logger.exception("Error getting dashboard data")
 
 @sio.event
 async def task_action(sid, data):
@@ -1946,7 +1996,7 @@ async def task_action(sid, data):
                 pass
         await sio.emit('task_action_response', {'task_id': task_id, 'action': action, 'success': True})
     except Exception as e:
-        print(f"Error handling task action: {e}")
+        logger.exception("Error handling task action")
         await sio.emit('task_action_response', {'task_id': task_id, 'action': action, 'success': False})
 
 @sio.event
@@ -1955,7 +2005,7 @@ async def get_task_cards(sid, data=None):
     try:
         await sio.emit('task_cards', audio_loop.task_manager.list('open') if audio_loop else [])
     except Exception as e:
-        print(f"Error getting task cards: {e}")
+        logger.exception("Error getting task cards")
 
 @sio.event
 async def approval_response(sid, data):
@@ -1968,7 +2018,7 @@ async def approval_response(sid, data):
             audio_loop.resolve_tool_confirmation(approval_id, approved)
         await sio.emit('approval_response_ack', {'approval_id': approval_id, 'approved': approved})
     except Exception as e:
-        print(f"Error handling approval response: {e}")
+        logger.exception("Error handling approval response")
 
 @sio.event
 async def set_quiet_mode(sid, data):
@@ -1981,7 +2031,7 @@ async def set_quiet_mode(sid, data):
         save_settings(settings)
         await sio.emit('quiet_mode_set', {'enabled': enabled})
     except Exception as e:
-        print(f"Error setting quiet mode: {e}")
+        logger.exception("Error setting quiet mode")
 
 @sio.event
 async def set_interrupt_preferences(sid, data):
@@ -1995,7 +2045,7 @@ async def set_interrupt_preferences(sid, data):
         save_settings(settings)
         await sio.emit('interrupt_preferences_set', payload)
     except Exception as e:
-        print(f"Error setting interrupt preferences: {e}")
+        logger.exception("Error setting interrupt preferences")
 
 @sio.event
 async def get_routine_queue(sid):
@@ -2017,7 +2067,7 @@ async def compact_memory(sid):
             global_memory_manager.compact_low_value_facts()
         await sio.emit('memory_compacted', {'success': True, 'summary': build_memory_summary()}, room=sid)
     except Exception as e:
-        print(f"Error compacting memory: {e}")
+        logger.exception("Error compacting memory")
         await sio.emit('memory_compacted', {'success': False, 'error': str(e)}, room=sid)
 
 @sio.event
@@ -2036,7 +2086,7 @@ async def suggestion_action(sid, data):
             raise ValueError('Unsupported suggestion action')
         await sio.emit('suggestion_action_result', {'id': suggestion_id, 'action': action, 'success': True}, room=sid)
     except Exception as e:
-        print(f"Error handling suggestion action: {e}")
+        logger.exception("Error handling suggestion action")
         await sio.emit('suggestion_action_result', {'id': suggestion_id, 'success': False, 'error': str(e)}, room=sid)
 
 @sio.event
@@ -2050,7 +2100,7 @@ async def run_routine(sid, data):
         result = audio_loop.routine_manager.execute_runtime(name, payload.get('payload'), runtime=audio_loop)
         await sio.emit('routine_execution_result', {'name': name, 'success': True, 'result': result}, room=sid)
     except Exception as e:
-        print(f"Error running routine: {e}")
+        logger.exception("Error running routine")
         await sio.emit('routine_execution_result', {'name': name, 'success': False, 'error': str(e)}, room=sid)
 
 # Helper functions for dashboard data
@@ -2126,7 +2176,7 @@ def build_memory_summary():
                 'storage_used': storage_str
             }
     except Exception as e:
-        print(f"Error getting memory summary: {e}")
+        logger.exception("Error getting memory summary")
 
     return {
         'total_facts': 0,
@@ -2181,7 +2231,7 @@ def build_proactive_suggestions():
 
         return suggestions
     except Exception as e:
-        print(f"Error getting proactive suggestions: {e}")
+        logger.exception("Error getting proactive suggestions")
     return []
 
 def list_routine_queue():
@@ -2201,7 +2251,7 @@ def list_routine_queue():
                 for name in audio_loop.routine_manager.routines.keys()
             ]
         except Exception as e:
-            print(f"Error getting routine queue: {e}")
+            logger.exception("Error getting routine queue")
     return []
 
 def get_quiet_mode():
@@ -2314,7 +2364,7 @@ def _reminder_worker():
                     for r in due:
                         asyncio.run_coroutine_threadsafe(_emit_reminder(r), _main_loop)
         except Exception as e:
-            print(f"[Reminders] worker error: {e}")
+                logger.exception("Reminder worker error")
         _time.sleep(15)
 
 async def _emit_reminder(r):
@@ -2436,7 +2486,7 @@ async def get_weather(sid, data):
                         "temp": round(high) if high is not None else 0,
                     })
             except Exception as e:
-                print(f"[Weather] forecast fetch failed: {e}")
+                logger.exception("Weather forecast fetch failed")
             return wx, forecast
 
         wx, forecast = await asyncio.to_thread(_fetch)
@@ -2451,7 +2501,7 @@ async def get_weather(sid, data):
             "forecast": forecast,
         }, room=sid)
     except Exception as e:
-        print(f"Error getting weather: {e}")
+        logger.exception("Error getting weather")
         await sio.emit("weather_data", {"city": (data or {}).get("city") or "", "forecast": [], "error": str(e)}, room=sid)
 
 # ── Reminders (persistent store + notifications) ────────────────────
@@ -2466,7 +2516,7 @@ async def get_reminders(sid):
             _reminder_thread.start()
         await sio.emit("reminders_list", [r for r in _load_store("reminders", []) if not r.get("fired")], room=sid)
     except Exception as e:
-        print(f"Error getting reminders: {e}")
+        logger.exception("Error getting reminders")
         await sio.emit("reminders_list", [], room=sid)
 
 @sio.event
@@ -2495,7 +2545,7 @@ async def add_reminder(sid, data):
         await sio.emit("reminders_list", [r for r in items if not r.get("fired")], room=sid)
         await sio.emit("status", {"msg": f"Reminder set for {target.strftime('%B %d at %I:%M %p')}"}, room=sid)
     except Exception as e:
-        print(f"Error adding reminder: {e}")
+        logger.exception("Error adding reminder")
         await sio.emit("status", {"msg": f"Reminder failed: {e}"}, room=sid)
 
 @sio.event
@@ -2508,7 +2558,7 @@ async def delete_reminder(sid, data):
         await sio.emit("reminders_list", [r for r in remaining if not r.get("fired")], room=sid)
         await sio.emit("status", {"msg": "Reminder deleted"}, room=sid)
     except Exception as e:
-        print(f"Error deleting reminder: {e}")
+        logger.exception("Error deleting reminder")
         await sio.emit("status", {"msg": f"Delete failed: {e}"}, room=sid)
 
 # ── Flights (real search + structured results) ──────────────────────
@@ -2548,7 +2598,7 @@ async def search_flights(sid, data):
         await sio.emit("flight_results", flights, room=sid)
         await sio.emit("status", {"msg": f"Found {len(flights)} flight option(s)"}, room=sid)
     except Exception as e:
-        print(f"Error searching flights: {e}")
+        logger.exception("Error searching flights")
         await sio.emit("flight_results", [], room=sid)
         await sio.emit("status", {"msg": f"Flight search failed: {e}"}, room=sid)
 
@@ -2564,7 +2614,7 @@ async def read_directory(sid, data):
         items, err = _dir_items(p)
         await sio.emit("directory_contents", {"path": str(p), "items": items, "error": err or None}, room=sid)
     except Exception as e:
-        print(f"Error reading directory: {e}")
+        logger.exception("Error reading directory")
         await sio.emit("directory_contents", {"path": (data or {}).get("path", "~"), "items": [], "error": str(e)}, room=sid)
 
 @sio.event
@@ -2596,7 +2646,7 @@ async def search_files(sid, data):
                 break
         await sio.emit("directory_contents", {"path": str(base), "items": matches, "search": True}, room=sid)
     except Exception as e:
-        print(f"Error searching files: {e}")
+        logger.exception("Error searching files")
         await sio.emit("directory_contents", {"path": (data or {}).get("path", "~"), "items": [], "error": str(e)}, room=sid)
 
 @sio.event
@@ -2620,7 +2670,7 @@ async def delete_file(sid, data):
         items, err = _dir_items(parent)
         await sio.emit("directory_contents", {"path": str(parent), "items": items, "error": err or None}, room=sid)
     except Exception as e:
-        print(f"Error deleting file: {e}")
+        logger.exception("Error deleting file")
         await sio.emit("file_operation_result", {"ok": False, "msg": str(e)}, room=sid)
 
 @sio.event
@@ -2632,7 +2682,7 @@ async def download_file(sid, data):
         content = base64.b64encode(target.read_bytes()).decode("ascii")
         await sio.emit("file_download", {"path": str(target), "name": target.name, "data": content}, room=sid)
     except Exception as e:
-        print(f"Error downloading file: {e}")
+        logger.exception("Error downloading file")
         await sio.emit("file_operation_result", {"ok": False, "msg": str(e)}, room=sid)
 
 # ── Web search (real DDG results + persisted history) ───────────────
@@ -2655,7 +2705,7 @@ async def web_search(sid, data):
         await sio.emit("search_history", history[-25:], room=sid)
         await sio.emit("search_results", {"results": results, "query": query}, room=sid)
     except Exception as e:
-        print(f"Error performing web search: {e}")
+        logger.exception("Error performing web search")
         await sio.emit("search_results", {"results": [], "query": (data or {}).get("query", ""), "error": str(e)}, room=sid)
 
 @sio.event
@@ -2663,7 +2713,7 @@ async def get_search_history(sid):
     try:
         await sio.emit("search_history", _load_store("history", []), room=sid)
     except Exception as e:
-        print(f"Error getting search history: {e}")
+        logger.exception("Error getting search history")
         await sio.emit("search_history", [], room=sid)
 
 # ── YouTube (real search + persisted playlist + embed playback) ─────
@@ -2703,7 +2753,7 @@ async def youtube_search(sid, data):
         results = await asyncio.to_thread(_work)
         await sio.emit("youtube_results", results, room=sid)
     except Exception as e:
-        print(f"Error searching YouTube: {e}")
+        logger.exception("Error searching YouTube")
         await sio.emit("youtube_results", [], room=sid)
 
 @sio.event
@@ -2711,7 +2761,7 @@ async def get_playlist(sid):
     try:
         await sio.emit("playlist_updated", _load_store("playlist", []), room=sid)
     except Exception as e:
-        print(f"Error getting playlist: {e}")
+        logger.exception("Error getting playlist")
         await sio.emit("playlist_updated", [], room=sid)
 
 @sio.event
@@ -2727,7 +2777,7 @@ async def play_youtube(sid, data):
             "watch_url": f"https://www.youtube.com/watch?v={video_id}",
         }, room=sid)
     except Exception as e:
-        print(f"Error playing video: {e}")
+        logger.exception("Error playing video")
 
 @sio.event
 async def add_to_playlist(sid, data):
@@ -2747,7 +2797,7 @@ async def add_to_playlist(sid, data):
         await sio.emit("playlist_updated", playlist, room=sid)
         await sio.emit("status", {"msg": "Added to playlist"}, room=sid)
     except Exception as e:
-        print(f"Error adding to playlist: {e}")
+        logger.exception("Error adding to playlist")
 
 @sio.event
 async def remove_from_playlist(sid, data):
@@ -2759,7 +2809,7 @@ async def remove_from_playlist(sid, data):
             _save_store("playlist", playlist)
         await sio.emit("playlist_updated", playlist, room=sid)
     except Exception as e:
-        print(f"Error removing from playlist: {e}")
+        logger.exception("Error removing from playlist")
 
 # ── Code helper (real execution + persisted snippets) ───────────────
 @sio.event
@@ -2792,7 +2842,7 @@ async def run_code(sid, data):
         output = await asyncio.to_thread(_run)
         await sio.emit("code_output", output, room=sid)
     except Exception as e:
-        print(f"Error running code: {e}")
+        logger.exception("Error running code")
         await sio.emit("code_output", f"Run failed: {e}", room=sid)
 
 @sio.event
@@ -2814,7 +2864,7 @@ async def save_code(sid, data):
         await sio.emit("code_snippets", snippets, room=sid)
         await sio.emit("status", {"msg": "Snippet saved"}, room=sid)
     except Exception as e:
-        print(f"Error saving code: {e}")
+        logger.exception("Error saving code")
         await sio.emit("status", {"msg": f"Save failed: {e}"}, room=sid)
 
 @sio.event
@@ -2822,7 +2872,7 @@ async def get_code_snippets(sid):
     try:
         await sio.emit("code_snippets", _load_store("snippets", []), room=sid)
     except Exception as e:
-        print(f"Error getting code snippets: {e}")
+        logger.exception("Error getting code snippets")
         await sio.emit("code_snippets", [], room=sid)
 
 # ── Processes (real kill) ───────────────────────────────────────────
@@ -2839,7 +2889,7 @@ async def kill_process(sid, data):
             proc.kill()
         await sio.emit("status", {"msg": f"Process {pid} terminated"}, room=sid)
     except Exception as e:
-        print(f"Error killing process: {e}")
+        logger.exception("Error killing process")
         await sio.emit("status", {"msg": f"Failed to kill process: {e}"}, room=sid)
 
 # ── Desktops / wallpaper / display settings ─────────────────────────
@@ -2848,7 +2898,7 @@ async def get_desktops(sid):
     try:
         await sio.emit("desktop_list", _load_store("desktops", [{"name": "Desktop 1", "windows": 0}]), room=sid)
     except Exception as e:
-        print(f"Error getting desktops: {e}")
+        logger.exception("Error getting desktops")
         await sio.emit("desktop_list", [], room=sid)
 
 @sio.event
@@ -2860,7 +2910,7 @@ async def add_desktop(sid):
         await sio.emit("desktop_list", desktops, room=sid)
         await sio.emit("status", {"msg": f"Added {desktops[-1]['name']}"}, room=sid)
     except Exception as e:
-        print(f"Error adding desktop: {e}")
+        logger.exception("Error adding desktop")
         await sio.emit("status", {"msg": f"Add desktop failed: {e}"}, room=sid)
 
 def _send_key_combo(*vk_codes):
@@ -2918,7 +2968,7 @@ async def switch_desktop(sid, data):
         else:
             await sio.emit("status", {"msg": f"Desktop {index + 1} not found"}, room=sid)
     except Exception as e:
-        print(f"Error switching desktop: {e}")
+        logger.exception("Error switching desktop")
         await sio.emit("status", {"msg": f"Switch failed: {e}"}, room=sid)
 
 @sio.event
@@ -2942,7 +2992,7 @@ async def set_wallpaper(sid, data):
             msg = f"Wallpaper saved (set it manually): {dest}"
         await sio.emit("status", {"msg": msg}, room=sid)
     except Exception as e:
-        print(f"Error setting wallpaper: {e}")
+        logger.exception("Error setting wallpaper")
         await sio.emit("status", {"msg": f"Wallpaper failed: {e}"}, room=sid)
 
 @sio.event
@@ -2956,7 +3006,7 @@ async def open_display_settings(sid):
             msg = "Opened display settings help"
         await sio.emit("status", {"msg": msg}, room=sid)
     except Exception as e:
-        print(f"Error opening display settings: {e}")
+        logger.exception("Error opening display settings")
         await sio.emit("status", {"msg": f"Could not open display settings: {e}"}, room=sid)
 
 # ── Game library (real Steam library when available) ────────────────
@@ -2972,7 +3022,7 @@ async def get_game_library(sid):
                 if steam_path:
                     return _gu._get_steam_games(steam_path)
             except Exception as e:
-                print(f"[GameLibrary] steam scan failed: {e}")
+                logger.exception("Steam game-library scan failed")
             return []
 
         games = await asyncio.to_thread(_list_games)
@@ -2987,7 +3037,7 @@ async def get_game_library(sid):
                 })
         await sio.emit("game_library", normalized, room=sid)
     except Exception as e:
-        print(f"Error getting game library: {e}")
+        logger.exception("Error getting game library")
         await sio.emit("game_library", [], room=sid)
 
 @sio.event
@@ -2997,7 +3047,7 @@ async def check_game_updates(sid):
         await sio.emit("game_updates", [], room=sid)
         await sio.emit("status", {"msg": "Game update check completed"}, room=sid)
     except Exception as e:
-        print(f"Error checking game updates: {e}")
+        logger.exception("Error checking game updates")
         await sio.emit("game_updates", [], room=sid)
 
 @sio.event
@@ -3009,7 +3059,7 @@ async def launch_game(sid, data):
         result = await asyncio.to_thread(game_updater, {"action": "launch", "game": game_id})
         await sio.emit("status", {"msg": str(result)}, room=sid)
     except Exception as e:
-        print(f"Error launching game: {e}")
+        logger.exception("Error launching game")
         await sio.emit("status", {"msg": f"Launch failed: {e}"}, room=sid)
 
 @sio.event
@@ -3021,7 +3071,7 @@ async def update_game(sid, data):
         result = await asyncio.to_thread(game_updater, {"action": "update", "game": game_id})
         await sio.emit("status", {"msg": str(result)}, room=sid)
     except Exception as e:
-        print(f"Error updating game: {e}")
+        logger.exception("Error updating game")
         await sio.emit("status", {"msg": f"Update failed: {e}"}, room=sid)
 
 # ── Computer control recording (real) ───────────────────────────────
@@ -3044,7 +3094,7 @@ async def start_recording(sid):
         await sio.emit("recording_status", {"recording": True}, room=sid)
         await sio.emit("status", {"msg": "Recording computer actions…"}, room=sid)
     except Exception as e:
-        print(f"Error starting recording: {e}")
+        logger.exception("Error starting recording")
         await sio.emit("recording_status", {"recording": False}, room=sid)
 
 @sio.event
@@ -3058,7 +3108,7 @@ async def stop_recording(sid):
         await sio.emit("recording_status", {"recording": False}, room=sid)
         await sio.emit("status", {"msg": f"Recording saved ({len(_RECSTATE['actions'])} actions)"}, room=sid)
     except Exception as e:
-        print(f"Error stopping recording: {e}")
+        logger.exception("Error stopping recording")
         await sio.emit("recording_status", {"recording": False}, room=sid)
 
 @sio.event
@@ -3071,7 +3121,7 @@ async def play_recording(sid):
         await sio.emit("status", {"msg": "Replaying recording…"}, room=sid)
         threading.Thread(target=_replay_loop, args=(actions,), daemon=True).start()
     except Exception as e:
-        print(f"Error playing recording: {e}")
+        logger.exception("Error playing recording")
         await sio.emit("status", {"msg": f"Replay failed: {e}"}, room=sid)
 
 @sio.event
@@ -3082,7 +3132,7 @@ async def clear_recording(sid):
         await sio.emit("status", {"msg": "Recording cleared"}, room=sid)
         await sio.emit("control_action_cleared", {}, room=sid)
     except Exception as e:
-        print(f"Error clearing recording: {e}")
+        logger.exception("Error clearing recording")
         await sio.emit("status", {"msg": f"Clear failed: {e}"}, room=sid)
 
 if __name__ == "__main__":

@@ -11,7 +11,42 @@ import logging
 import logging.handlers
 import os
 import sys
+import builtins
 from pathlib import Path
+
+
+_ORIGINAL_PRINT = builtins.print
+
+
+def _capture_legacy_prints() -> None:
+    """Route legacy application prints through the configured logger."""
+    if os.getenv("FRIDAY_CAPTURE_PRINTS", "1").lower() in {"0", "false", "no", "off"}:
+        return
+    if getattr(builtins.print, "_friday_logger_bridge", False):
+        return
+
+    def logged_print(*values, **kwargs):
+        # File-directed output is commonly a protocol or a test fixture.
+        if kwargs.get("file") is not None:
+            return _ORIGINAL_PRINT(*values, **kwargs)
+
+        message = kwargs.get("sep", " ").join(str(value) for value in values)
+        if not message:
+            return
+
+        lowered = message.lower()
+        if any(marker in lowered for marker in ("error", "exception", "[err]", "critical")):
+            level = logging.ERROR
+        elif any(marker in lowered for marker in ("warning", "warn", "[warn]", "[!")):
+            level = logging.WARNING
+        elif "debug" in lowered:
+            level = logging.DEBUG
+        else:
+            level = logging.INFO
+        logging.getLogger("legacy.print").log(level, "%s", message)
+
+    logged_print._friday_logger_bridge = True
+    builtins.print = logged_print
 
 
 def setup_logging(
@@ -100,6 +135,16 @@ def setup_logging(
     logging.getLogger("engineio").setLevel(logging.WARNING)
     logging.getLogger("uvicorn").setLevel(logging.WARNING)
     logging.getLogger("google").setLevel(logging.WARNING)
+
+    # Make unexpected failures visible in the same rotating log as normal events.
+    def handle_uncaught_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        root_logger.critical("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+    sys.excepthook = handle_uncaught_exception
+    _capture_legacy_prints()
 
 
 def get_logger(name: str) -> logging.Logger:

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 
 class AgentScheduler:
@@ -33,7 +36,16 @@ class AgentScheduler:
     def _save(self, schedules: list[dict]) -> None:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(schedules, indent=2), encoding="utf-8")
-        temporary.replace(self.path)
+        for attempt in range(3):
+            try:
+                temporary.replace(self.path)
+                return
+            except PermissionError:
+                if attempt == 2:
+                    self.path.write_text(json.dumps(schedules, indent=2), encoding="utf-8")
+                    temporary.unlink(missing_ok=True)
+                else:
+                    time.sleep(0.05 * (attempt + 1))
 
     def schedule(self, agent_type: str, goal: str, interval_seconds: int, repo_path: str = ".", max_retries: int = 3) -> dict:
         if interval_seconds < 30:
@@ -74,7 +86,31 @@ class AgentScheduler:
             else:
                 created.append(self.schedule_weekly(key, agent_type, goal, extra, hour, minute))
         self._migrate_legacy_agent_type("dependency_audit", "project_health_agent", "dependency_audit_agent")
+        self._repair_unknown_agent_schedules()
         return created
+
+    def _repair_unknown_agent_schedules(self) -> None:
+        """Resume schedules disabled while their agent was missing during startup."""
+        registered = set(self.dispatcher.registered_agents())
+        if not registered:
+            return
+        with self._lock:
+            schedules = self._load()
+            changed = False
+            for schedule in schedules:
+                if (
+                    not schedule.get("enabled")
+                    and schedule.get("agent_type") in registered
+                    and str(schedule.get("last_error", "")).startswith("Unknown agent type:")
+                ):
+                    schedule["enabled"] = True
+                    schedule["retry_count"] = 0
+                    schedule["last_status"] = "never_run"
+                    schedule.pop("last_error", None)
+                    schedule["next_run"] = time.time() + max(30, int(schedule.get("interval_seconds", 300)))
+                    changed = True
+            if changed:
+                self._save(schedules)
 
     def _migrate_legacy_agent_type(self, key: str, old_agent_type: str, new_agent_type: str) -> None:
         """Repoint an already-persisted default schedule that was created under a stale agent_type."""

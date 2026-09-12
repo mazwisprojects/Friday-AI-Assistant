@@ -1,4 +1,5 @@
 import os
+import logging
 import time
 import asyncio
 import base64
@@ -6,6 +7,8 @@ from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 from google import genai
 from google.genai import types
+
+logger = logging.getLogger(__name__)
 
 # 1. Load API Key
 load_dotenv()
@@ -42,15 +45,15 @@ class WebAgent:
             call_id = getattr(call, 'id', None)
             fn_name = call.name
             args = call.args
-            print(f"[ACTION] Action: {fn_name} {args}")
+            logger.info("Web action: %s %s", fn_name, args)
 
             # --- SAFETY CHECK ---
             requires_acknowledgement = False
             if "safety_decision" in args:
                  decision = args["safety_decision"]
                  if decision.get("decision") == "require_confirmation":
-                     print(f"   [SAFETY] Safety Alert: {decision.get('explanation')}")
-                     print("   -> Auto-acknowledging to proceed.")
+                     logger.warning("Web action safety alert: %s", decision.get("explanation"))
+                     logger.info("Auto-acknowledging web action safety alert")
                      requires_acknowledgement = True
 
             result_data = {}
@@ -136,13 +139,13 @@ class WebAgent:
                     await self.page.mouse.wheel(dx, dy)
 
                 else:
-                    print(f"[WARN] Warning: Model requested unimplemented function {fn_name}")
+                    logger.warning("Model requested unimplemented function %s", fn_name)
 
                 # Wait a moment for UI to settle
                 await asyncio.sleep(1)
                 
             except Exception as e:
-                print(f"[ERR] Error executing {fn_name}: {e}")
+                logger.exception("Error executing web function %s", fn_name)
                 result_data = {"error": str(e)}
 
             # Add the acknowledgement flag if needed

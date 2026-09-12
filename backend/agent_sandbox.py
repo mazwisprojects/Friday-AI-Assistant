@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import ast
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # NO BLOCKED IMPORTS - Friday can use ANY module

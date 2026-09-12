@@ -1,14 +1,29 @@
 """Self-Modification Layer for FRIDAY — edit tools, agents, configs, memories on the fly."""
 from __future__ import annotations
 import json
+import difflib
+import logging
 import re
+import subprocess
+import sys
+import time
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _BACKEND = Path(__file__).resolve().parent.parent
 _ACTIONS = _BACKEND / "actions"
 _AGENTS = _BACKEND / "agents"
 _MYTOOLS = _BACKEND / "mytools"
 _MEMORY = _BACKEND / "long_term_memory"
+_PROJECT_ROOT = _BACKEND.parent
+_REPAIR_AUDIT = _MEMORY / "repair_audit.jsonl"
+
+
+def _audit_repair(entry: dict) -> None:
+    _MEMORY.mkdir(parents=True, exist_ok=True)
+    with _REPAIR_AUDIT.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
 
 
 def _find_module(name: str) -> Path | None:
@@ -58,6 +73,71 @@ def edit_source(name: str, old_text: str, new_text: str) -> dict:
         pass
     path.write_text(new_code, encoding="utf-8")
     return {"ok": True, "name": name, "message": f"Edited {name}", "snapshot": snapshot}
+
+
+def repair_source(name: str, old_text: str, new_text: str, test_target: str = "") -> dict:
+    """Apply an approved source repair, verify it, and roll it back on failure."""
+    path = _find_module(name)
+    repair_id = f"repair-{int(time.time() * 1000000)}"
+    if not path:
+        return {"ok": False, "repair_id": repair_id, "error": f"Module '{name}' not found"}
+    if not old_text or old_text not in path.read_text(encoding="utf-8"):
+        return {"ok": False, "repair_id": repair_id, "error": f"Text not found in {name}"}
+    if test_target and (Path(test_target).is_absolute() or not test_target.replace("\\", "/").startswith("tests/")):
+        return {"ok": False, "repair_id": repair_id, "error": "test_target must be a relative path under tests/"}
+
+    original = path.read_text(encoding="utf-8")
+    updated = original.replace(old_text, new_text, 1)
+    diff = "".join(difflib.unified_diff(
+        original.splitlines(keepends=True), updated.splitlines(keepends=True),
+        fromfile=str(path), tofile=str(path),
+    ))
+    snapshot = None
+    audit = {"repair_id": repair_id, "name": name, "path": str(path), "test_target": test_target, "status": "proposed", "created_at": time.time()}
+    try:
+        from actions import time_guard
+        snapshot = time_guard.guard(str(path), "repair_source")
+        if not snapshot:
+            audit["status"] = "rejected"
+            audit["error"] = "Could not create mandatory recovery snapshot"
+            _audit_repair(audit)
+            return {"ok": False, "repair_id": repair_id, "error": audit["error"], "diff": diff}
+
+        compile(updated, str(path), "exec")
+        path.write_text(updated, encoding="utf-8")
+        verification = {"ok": True, "compile": True}
+        if test_target:
+            result = subprocess.run(
+                [sys.executable, "-m", "pytest", "-q", test_target],
+                cwd=str(_PROJECT_ROOT), capture_output=True, text=True, timeout=600,
+            )
+            verification.update({"ok": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout[-3000:], "stderr": result.stderr[-3000:]})
+        if not verification["ok"]:
+            restored = time_guard.restore(snapshot["snapshot_id"])
+            audit.update({"status": "rolled_back", "verification": verification, "restore": restored})
+            _audit_repair(audit)
+            return {"ok": False, "repair_id": repair_id, "error": "Verification failed; repair rolled back", "diff": diff, "verification": verification, "restore": restored}
+        audit.update({"status": "applied", "verification": verification, "snapshot": snapshot})
+        _audit_repair(audit)
+        return {
+            "ok": True,
+            "repair_id": repair_id,
+            "diff": diff,
+            "snapshot": snapshot,
+            "verification": verification,
+            "restart_required": path.name in {"friday.py", "server.py"},
+        }
+    except Exception as error:
+        restore = None
+        if snapshot:
+            try:
+                restore = time_guard.restore(snapshot["snapshot_id"])
+            except Exception as restore_error:
+                logger.exception("Repair rollback failed")
+                restore = {"ok": False, "error": str(restore_error)}
+        audit.update({"status": "rolled_back", "error": str(error), "restore": restore})
+        _audit_repair(audit)
+        return {"ok": False, "repair_id": repair_id, "error": str(error), "diff": diff, "restore": restore}
 
 
 def read_source(name: str) -> dict:

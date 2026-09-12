@@ -121,10 +121,15 @@ def stats() -> dict:
 
 _ingest_buffer = []
 _last_flush = time.time()  # module import time — avoids instant flush on the first message
+_buffer_state = _STATE
 
 def ingest_chat(sender: str, text: str, project: str = None) -> dict:
     """Buffered ingestion for the message hot path — flushes every 10 messages or 60 seconds."""
-    global _ingest_buffer, _last_flush
+    global _ingest_buffer, _last_flush, _buffer_state
+    if _buffer_state != _STATE:
+        _ingest_buffer = []
+        _last_flush = time.time()
+        _buffer_state = _STATE
     _ingest_buffer.append({"sender": sender, "text": (text or "")[:1500], "project": project or "global", "t": time.time()})
     if len(_ingest_buffer) >= 10 or (time.time() - _last_flush) > 60:
         return flush()

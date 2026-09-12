@@ -5,9 +5,12 @@ parsing, CAD) has an ordered fallback chain, failure cooldowns with escalation, 
 healthy-model picker. Chains are configurable in settings.json['model_routing'].
 """
 from __future__ import annotations
+import logging
 import json, os, time
 from pathlib import Path
 from types import SimpleNamespace
+
+logger = logging.getLogger(__name__)
 
 _BACKEND = Path(__file__).resolve().parent
 _STATE = _BACKEND / "long_term_memory" / "model_health.json"

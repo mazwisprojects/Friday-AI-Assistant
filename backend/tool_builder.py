@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from plugin_governance import is_active, normalize_governance
 
 
 class ToolBuilder:
@@ -30,7 +31,7 @@ class ToolBuilder:
             data = json.loads(self.registry_path.read_text(encoding="utf-8"))
             self.tools = data if isinstance(data, dict) else {}
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"[TOOLS] Could not load custom tools: {exc}")
+            logger.exception("Could not load custom tools")
 
     def discover_modules(self) -> None:
         if not self.tools_dir.exists():
@@ -64,6 +65,7 @@ class ToolBuilder:
             "parameters": parameters or {},
             "module_path": f"mytools/{module_path.name}",
             "enabled": True,
+            "governance": normalize_governance(kwargs.get("governance")),
             "test_result": test_result,
         }
         self._save()
@@ -77,7 +79,7 @@ class ToolBuilder:
                 cwd=str(self.backend_dir),
                 input="{}",
             )
-            return {"ok": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout[-1000:] if result.stdout else "", "stderr": result.stderr[-1000:] if result.stderr else ""}
+            return {"ok": result.returncode == 0, "smoke_test": result.returncode == 0, "returncode": result.returncode, "stdout": result.stdout[-1000:] if result.stdout else "", "stderr": result.stderr[-1000:] if result.stderr else ""}
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": "Test timed out after 30 seconds"}
         except Exception as e:
@@ -88,6 +90,8 @@ class ToolBuilder:
         tool = self.tools.get(name)
         if not tool:
             return {"ok": False, "error": f"Tool '{name}' not found"}
+        if not is_active(tool):
+            raise PermissionError(f"Tool '{name}' requires approval and security review")
         module_path = self.backend_dir / tool["module_path"]
         if not module_path.exists():
             return {"ok": False, "error": f"Module file not found: {module_path}"}

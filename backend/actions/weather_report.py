@@ -99,7 +99,7 @@ def _weather_code(code) -> str:
 
 
 def _log(message: str, player=None) -> None:
-    print(f"[Weather] {message}")
+    logger.info("%s", message)
     if player:
         try:
             player.write_log(f"FRIDAY: {message}")

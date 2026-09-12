@@ -1,7 +1,10 @@
 import time
+import logging
 import subprocess
 import platform
 import shutil
+
+logger = logging.getLogger(__name__)
 
 try:
     import psutil
@@ -90,7 +93,7 @@ def _launch_windows(app_name: str) -> bool:
             time.sleep(1.5)
             return True
         except Exception as e:
-            print(f"[open_app] subprocess failed: {e}")
+            logger.warning("Application subprocess failed: %s", e)
 
     if ":" in app_name:
         try:
@@ -111,7 +114,7 @@ def _launch_windows(app_name: str) -> bool:
         time.sleep(2.5)
         return True
     except Exception as e:
-        print(f"[open_app] Start Menu search failed: {e}")
+        logger.warning("Start Menu search failed: %s", e)
 
     return False
 
@@ -163,7 +166,7 @@ def _launch_macos(app_name: str) -> bool:
         time.sleep(1.5)
         return True
     except Exception as e:
-        print(f"[open_app] Spotlight failed: {e}")
+        logger.warning("Spotlight search failed: %s", e)
 
     return False
 
@@ -253,7 +256,7 @@ def open_app(
         return f"Unsupported operating system: {_SYSTEM}"
 
     normalized = _normalize(app_name)
-    print(f"[open_app] Launching: '{app_name}' → '{normalized}' ({_SYSTEM})")
+    logger.info("Launching application %r as %r on %s", app_name, normalized, _SYSTEM)
 
     if player:
         player.write_log(f"[open_app] {app_name}")
@@ -274,5 +277,5 @@ def open_app(
             f"You can install it or tell me to try a web alternative."
         )
     except Exception as e:
-        print(f"[open_app] Error: {e}")
+        logger.exception("Application launch failed")
         return f"I could not open {app_name}. The launcher reported: {e}. You can install it or try its web version."
