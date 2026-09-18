@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -34,25 +35,39 @@ class GoogleAccount:
         configured_path = os.getenv("GOOGLE_OAUTH_CLIENT_SECRETS")
         self.client_secret_path = Path(configured_path) if configured_path else self.base_dir / "google_client_secret.json"
         self.credentials: Credentials | None = None
+        self.reauthorization_required = False
+        self.last_error = ""
         self.load_credentials()
 
     def load_credentials(self) -> None:
         self.credentials = None
+        self.reauthorization_required = False
+        self.last_error = ""
         if not self.token_path.exists():
             return
         try:
-            credentials = Credentials.from_authorized_user_file(str(self.token_path), self.SCOPES)
+            # Load the token without injecting newly added scopes into the
+            # refresh request. Existing refresh tokens cannot gain scopes;
+            # connect() must be run again when the scope set changes.
+            credentials = Credentials.from_authorized_user_file(str(self.token_path))
             granted_scopes = set(credentials.scopes or [])
             if not set(self.SCOPES).issubset(granted_scopes):
-                logger.warning("Stored Google token needs renewed permissions")
+                self.reauthorization_required = True
+                self.last_error = "Google permissions changed; reconnect the Google account."
+                logger.warning(self.last_error)
                 return
             if credentials.expired and credentials.refresh_token:
                 credentials.refresh(Request())
                 self._save(credentials)
             if credentials.valid:
                 self.credentials = credentials
+        except RefreshError as exc:
+            self.reauthorization_required = True
+            self.last_error = f"Google authorization must be renewed: {exc}"
+            logger.warning(self.last_error)
         except Exception as exc:
-            logger.exception("Could not load local Google token")
+            self.last_error = str(exc)
+            logger.warning("Could not load local Google token: %s", exc)
 
     def connect(self) -> dict:
         if not self.client_secret_path.exists():
@@ -63,10 +78,14 @@ class GoogleAccount:
         flow = InstalledAppFlow.from_client_secrets_file(str(self.client_secret_path), self.SCOPES)
         self.credentials = flow.run_local_server(host="127.0.0.1", port=0, open_browser=True)
         self._save(self.credentials)
+        self.reauthorization_required = False
+        self.last_error = ""
         return self.status()
 
     def disconnect(self) -> dict:
         self.credentials = None
+        self.reauthorization_required = False
+        self.last_error = ""
         if self.token_path.exists():
             self.token_path.unlink()
         return self.status()
@@ -74,6 +93,8 @@ class GoogleAccount:
     def status(self) -> dict:
         return {
             "connected": bool(self.credentials and self.credentials.valid),
+            "reauthorization_required": self.reauthorization_required,
+            "error": self.last_error,
             "scopes": [
                 "Gmail (read/drafts)",
                 "Calendar (create/read/update/delete)",

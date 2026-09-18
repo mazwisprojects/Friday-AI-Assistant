@@ -20,28 +20,40 @@ class UndoManager:
 
     def record(self, action: str, data: dict) -> None:
         entry = {"timestamp": time.time(), "action": action, "data": data}
-        with self._lock, self.records_file.open("a", encoding="utf-8") as file:
-            file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        try:
+            with self._lock, self.records_file.open("a", encoding="utf-8") as file:
+                file.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError as exc:
+            logger.error("Could not record undo entry for %s: %s", action, exc)
+            raise
 
     def record_file_write(self, path: str) -> None:
         target = Path(path).resolve()
-        if target.exists() and target.is_file():
-            backup = self.backup_dir / f"{int(time.time() * 1000000)}_{target.name}"
-            shutil.copy2(target, backup)
-            self.record("restore_file", {"path": str(target), "backup": str(backup)})
-        else:
-            self.record("delete_file", {"path": str(target)})
+        try:
+            if target.exists() and target.is_file():
+                backup = self.backup_dir / f"{int(time.time() * 1000000)}_{target.name}"
+                shutil.copy2(target, backup)
+                self.record("restore_file", {"path": str(target), "backup": str(backup)})
+            else:
+                self.record("delete_file", {"path": str(target)})
+        except OSError as exc:
+            logger.error("Could not back up %s before writing: %s", target, exc)
+            raise
 
     def record_deleted(self, path: str) -> None:
         target = Path(path).resolve()
         if not target.exists():
             return
-        backup = self.backup_dir / f"{int(time.time() * 1000000)}_{target.name}"
-        if target.is_dir():
-            shutil.copytree(target, backup)
-        else:
-            shutil.copy2(target, backup)
-        self.record("restore_deleted", {"path": str(target), "backup": str(backup)})
+        try:
+            backup = self.backup_dir / f"{int(time.time() * 1000000)}_{target.name}"
+            if target.is_dir():
+                shutil.copytree(target, backup)
+            else:
+                shutil.copy2(target, backup)
+            self.record("restore_deleted", {"path": str(target), "backup": str(backup)})
+        except OSError as exc:
+            logger.error("Could not back up %s before deletion: %s", target, exc)
+            raise
 
     def record_move(self, source: str, destination: str) -> None:
         self.record("move_file", {"source": source, "destination": destination})
@@ -69,7 +81,12 @@ class UndoManager:
             lines = [line for line in self.records_file.read_text(encoding="utf-8").splitlines() if line.strip()]
             if not lines:
                 return "There is no reversible action to undo."
-            record = json.loads(lines[-1])
+            try:
+                record = json.loads(lines[-1])
+            except json.JSONDecodeError as exc:
+                logger.error("Undo history is corrupt; discarding the unreadable entry: %s", exc)
+                self.records_file.write_text("\n".join(lines[:-1]) + ("\n" if len(lines) > 1 else ""), encoding="utf-8")
+                return "The last action could not be read and has been discarded."
             self.records_file.write_text("\n".join(lines[:-1]) + ("\n" if len(lines) > 1 else ""), encoding="utf-8")
 
         action = record.get("action")

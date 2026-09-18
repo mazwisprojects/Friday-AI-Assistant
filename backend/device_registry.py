@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 import threading
 import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceRegistry:
@@ -26,15 +29,20 @@ class DeviceRegistry:
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             if isinstance(state, dict) and isinstance(state.get("devices"), dict):
                 return state
-        except (OSError, json.JSONDecodeError):
-            pass
+            logger.warning("Device registry at %s has an unexpected shape; starting fresh", self.state_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load device registry from %s: %s", self.state_path, exc)
         return {"pairing": None, "devices": {}}
 
     def _save(self) -> None:
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = self.state_path.with_suffix(".tmp")
-        temporary_path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
-        temporary_path.replace(self.state_path)
+        try:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_path = self.state_path.with_suffix(".tmp")
+            temporary_path.write_text(json.dumps(self._state, indent=2), encoding="utf-8")
+            temporary_path.replace(self.state_path)
+        except OSError as exc:
+            logger.error("Could not persist device registry to %s: %s", self.state_path, exc)
+            raise
 
     @staticmethod
     def _hash(value: str) -> str:
@@ -51,6 +59,51 @@ class DeviceRegistry:
             self._save()
             return {"code": code, "expires_at": pairing["expires_at"]}
 
+    def create_pairing_session(self, server_url: str, ttl_seconds: int = 300) -> dict[str, Any]:
+        """Create a one-time QR bootstrap session without exposing server credentials."""
+        with self._lock:
+            session_id = uuid.uuid4().hex
+            secret = secrets.token_urlsafe(32)
+            expires_at = time.time() + max(30, min(int(ttl_seconds), 900))
+            self._state["pairing_session"] = {
+                "session_id": session_id,
+                "secret_hash": self._hash(secret),
+                "server_url": str(server_url).rstrip("/"),
+                "expires_at": expires_at,
+            }
+            self._save()
+            return {
+                "version": 1,
+                "session_id": session_id,
+                "pairing_secret": secret,
+                "server_url": self._state["pairing_session"]["server_url"],
+                "expires_at": expires_at,
+            }
+
+    def consume_pairing_session(self, session_id: str, secret: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Exchange a QR bootstrap secret for a persistent device token exactly once."""
+        with self._lock:
+            session = self._state.get("pairing_session") or {}
+            if (
+                session.get("session_id") != str(session_id)
+                or session.get("expires_at", 0) < time.time()
+                or not secrets.compare_digest(session.get("secret_hash", ""), self._hash(str(secret)))
+            ):
+                raise ValueError("The QR pairing session is invalid or expired.")
+            result = self._pair_unlocked(metadata)
+            self._state.pop("pairing_session", None)
+            self._save()
+            return result
+
+    def is_valid_pairing_session(self, session_id: str, secret: str) -> bool:
+        with self._lock:
+            session = self._state.get("pairing_session") or {}
+            return bool(
+                session.get("session_id") == str(session_id)
+                and session.get("expires_at", 0) >= time.time()
+                and secrets.compare_digest(session.get("secret_hash", ""), self._hash(str(secret)))
+            )
+
     def pair(self, code: str, metadata: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
             pairing = self._state.get("pairing") or {}
@@ -59,25 +112,33 @@ class DeviceRegistry:
             ):
                 raise ValueError("The pairing code is invalid or expired.")
 
-            device_id = str(metadata.get("device_id") or uuid.uuid4().hex)
-            token = secrets.token_urlsafe(32)
-            now = time.time()
-            self._state["devices"][device_id] = {
-                "device_id": device_id,
-                "name": str(metadata.get("name") or device_id),
-                "platform": str(metadata.get("platform") or "unknown"),
-                "model": str(metadata.get("model") or "unknown"),
-                "token_hash": self._hash(token),
-                "paired_at": now,
-                "last_seen": now,
-                "status": "online",
-                "battery": metadata.get("battery"),
-                "network": metadata.get("network"),
-                "location": None,
-            }
+            result = self._pair_unlocked(metadata)
             self._state["pairing"] = None
             self._save()
-            return {"device_id": device_id, "device_token": token, "device": self._public(self._state["devices"][device_id])}
+            return result
+
+    def _pair_unlocked(self, metadata: dict[str, Any]) -> dict[str, Any]:
+        device_id = str(metadata.get("device_id") or uuid.uuid4().hex)
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        self._state["devices"][device_id] = {
+            "device_id": device_id,
+            "name": str(metadata.get("name") or device_id),
+            "platform": str(metadata.get("platform") or "unknown"),
+            "model": str(metadata.get("model") or "unknown"),
+            "token_hash": self._hash(token),
+            "paired_at": now,
+            "last_seen": now,
+            "status": "online",
+            "battery": metadata.get("battery"),
+            "network": metadata.get("network"),
+            "location": None,
+        }
+        return {"device_id": device_id, "device_token": token, "device": self._public(self._state["devices"][device_id])}
+
+    def is_valid_token(self, token: str) -> bool:
+        with self._lock:
+            return bool(token and self._find_by_token(token))
 
     def heartbeat(self, token: str, metadata: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -114,6 +175,21 @@ class DeviceRegistry:
             if removed:
                 self._save()
             return removed
+
+    def refresh_token(self, old_token: str) -> dict[str, Any]:
+        """Rotate a device's token. Returns the new public device info."""
+        import secrets as _secrets
+        with self._lock:
+            device = self._find_by_token(old_token)
+            if not device:
+                raise ValueError("The device token is invalid or revoked.")
+            new_token = _secrets.token_urlsafe(32)
+            device["token_hash"] = self._hash(new_token)
+            device["last_seen"] = time.time()
+            self._save()
+            public = self._public(device)
+            public["device_token"] = new_token  # Return new token once
+            return public
 
     def _find_by_token(self, token: str) -> dict[str, Any] | None:
         token_hash = self._hash(token)

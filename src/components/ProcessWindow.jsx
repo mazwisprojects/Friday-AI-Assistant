@@ -7,9 +7,10 @@ export default function ProcessWindow({ position, onClose, onDrag }) {
 
   useEffect(() => {
     const socket = window.socket;
+    if (!socket) return undefined;
     
     socket.on('process_list', (data) => {
-      setProcesses(data);
+      setProcesses(Array.isArray(data) ? data : []);
     });
     
     socket.emit('get_process_list');
@@ -25,15 +26,17 @@ export default function ProcessWindow({ position, onClose, onDrag }) {
   }, []);
 
   const handleKill = (pid) => {
-    window.socket.emit('kill_process', { pid });
+    window.socket?.emit('kill_process', { pid });
   };
 
   const handleRefresh = () => {
-    window.socket.emit('get_process_list');
+    window.socket?.emit('get_process_list');
   };
 
   const sortedProcesses = [...processes].sort((a, b) => {
-    return b[sortBy] - a[sortBy];
+    if (sortBy === 'name') return String(a.name || '').localeCompare(String(b.name || ''));
+    const key = sortBy === 'cpu' ? 'cpu_percent' : 'memory_percent';
+    return Number(b[key] || 0) - Number(a[key] || 0);
   });
 
   return (
@@ -86,8 +89,8 @@ export default function ProcessWindow({ position, onClose, onDrag }) {
             <div key={proc.pid} className="process-item">
               <span className="pid">{proc.pid}</span>
               <span className="name">{proc.name}</span>
-              <span className="cpu">{proc.cpu.toFixed(1)}%</span>
-              <span className="memory">{(proc.memory / 1024 / 1024).toFixed(1)} MB</span>
+              <span className="cpu">{Number(proc.cpu_percent || proc.cpu || 0).toFixed(1)}%</span>
+              <span className="memory">{Number(proc.memory_percent || proc.memory || 0).toFixed(1)}%</span>
               <button 
                 className="kill-btn"
                 onClick={() => handleKill(proc.pid)}

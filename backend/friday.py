@@ -134,8 +134,8 @@ def get_text_model(model: str = FACT_GEMINI_MODEL):
                         model_router.record_success(alt)
                         logger.warning("Model fallback: %s -> %s", model, alt)
                         return result
-                except Exception:
-                    pass
+                except Exception as fb_exc:
+                    logger.debug("Model fallback attempt failed: %s", fb_exc)
                 raise
 
     return get_text_provider(lambda: GeminiTextModel(), model=model)
@@ -198,13 +198,20 @@ def _cognitive_memory_directive() -> str:
             if entities:
                 names = [e.get("name", "") for e in entities[:40] if e.get("name")]
                 parts.append("PERSISTED KNOWLEDGE: " + ", ".join(names[:40]))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("Cognitive memory directive context unavailable: %s", exc)
     return " ".join(parts)
 
 # --- CONFIG UPDATE: Enabled Transcription ---
 def build_live_config():
-    """Build a fresh Live config so prompt state is current on every connection."""
+    """Build a fresh Live config so prompt state is current on every connection.
+
+    Tool declarations are rebuilt here rather than frozen at import time, so a
+    capability that was built and verified after startup becomes callable as
+    soon as a session connects (this runs on every live connect).
+    """
+    global tools
+    tools = [{'google_search': {}}, {"function_declarations": [] + tools_list[0]['function_declarations'][0:] + custom_tool_builder.declarations()}]
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         # We switch these from [] to {} to enable them with default settings
@@ -243,7 +250,7 @@ for generated_agent_name, generated_agent_manifest in agent_builder.agents.items
 agent_scheduler.ensure_default_workflows()
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, on_notification=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_confirmation_expired=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_alert_settings_update=None, on_plan_update=None, on_notification=None, on_session_restored=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, authenticated=True):
         self.video_mode = video_mode
         self.vision_source = "screen" if video_mode == "screen" else "camera"
         self.on_audio_data = on_audio_data
@@ -261,6 +268,7 @@ class AudioLoop:
         self.on_alert_settings_update = on_alert_settings_update
         self.on_plan_update = on_plan_update
         self.on_notification = on_notification
+        self.on_session_restored = on_session_restored
         self.authenticated = authenticated
         self.input_device_index = input_device_index
         self.input_device_name = input_device_name
@@ -420,6 +428,11 @@ class AudioLoop:
         """Return a user-facing reason when a tool cannot run safely or usefully."""
         if not self.authenticated:
             return "Authentication is required before using tools."
+
+        if tool_name == "build_agent" or (tool_name.startswith("build_") and tool_name.endswith("_tool")):
+            return ("Use plan_capability to draft a versioned plan, then let the user review and approve it. "
+                    "Only the approved-plan implementation stage may register a new capability. "
+                    "Do not bypass this using scripts, file writes, or another agent.")
 
         if tool_name in {"read_file", "write_file"}:
             path = args.get("path", "")
@@ -624,15 +637,15 @@ class AudioLoop:
                                 float(vstate.intensity or 0.0) - 0.1,
                             )
                             logger.debug("Voice tone: primary=%s intensity=%s", vstate.primary, vstate.intensity)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    logger.debug("Voice emotion fusion skipped: %s", exc)
                 finally:
                     # Fresh buffer per turn so tone reflects the current utterance
                     if voice_buf is not None:
                         try:
                             del voice_buf[:]
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Could not reset voice buffer: %s", exc)
                 urgency = getattr(response.situation, "urgency", "normal")
                 emotion = getattr(response.emotion, "primary", "neutral")
                 intensity = float(getattr(response.emotion, "intensity", 0.0) or 0.0)
@@ -820,8 +833,8 @@ class AudioLoop:
             try:
                 from actions import goal_engine
                 active_goals = goal_engine.tick().get("count", 0)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Goal engine tick unavailable during nightly ops: %s", exc)
 
             # P2.7: nightly cognitive consolidation — episodic → durable memory.
             # The brain saves itself, mirrors lessons into semantic memory, and the
@@ -851,8 +864,8 @@ class AudioLoop:
                 from actions import ops_journal
                 ops_journal.log_entry("nightly_ops", "failed", str(exc),
                                       duration_s=round(time.time() - started, 1))
-            except Exception:
-                pass
+            except Exception as log_exc:
+                logger.debug("Could not journal the failed nightly run: %s", log_exc)
 
     async def compact_memory(self):
         """Periodically summarize older conversations into derived startup context."""
@@ -1360,8 +1373,8 @@ class AudioLoop:
                         _max_voice_bytes = 640_000
                         if len(self._voice_emotion_buffer) > _max_voice_bytes:
                             del self._voice_emotion_buffer[:len(self._voice_emotion_buffer) - _max_voice_bytes]
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Voice emotion buffer update skipped: %s", exc)
                     if not self._is_speaking:
                         # NEW Speech Utterance Started
                         self._is_speaking = True
@@ -1455,8 +1468,8 @@ class AudioLoop:
             # Optionally notify failure
             try:
                 await self.session.send(input="System Notification: CAD generation failed.", end_of_turn=True)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Could not notify the session of the CAD failure: %s", exc)
             self.finish_action_plan(False)
 
 
@@ -1658,6 +1671,18 @@ class AudioLoop:
                         logger.debug("Tool call received")
                         function_responses = []
                         for fc in response.tool_call.function_calls:
+                            if fc.name == "plan_capability":
+                                try:
+                                    handler = getattr(self, "capability_plan_handler", None)
+                                    if not self.authenticated or handler is None:
+                                        raise PermissionError("Authenticated planning session required")
+                                    result = await handler(dict(fc.args))
+                                except Exception as exc:
+                                    logger.exception("Capability planning failed")
+                                    result = {"ok": False, "error": str(exc)}
+                                function_responses.append(types.FunctionResponse(
+                                    id=fc.id, name=fc.name, response={"result": json.dumps(result, ensure_ascii=False)}))
+                                continue
                             logger.info(
                                 f"[FRIDAY TOOL] Called '{fc.name}': "
                                 f"{self.tool_description(fc.name)}"
@@ -2430,8 +2455,8 @@ class AudioLoop:
                                     weather_card = None
                                     try:
                                         weather_card = await asyncio.to_thread(weather_report_module.get_weather_data, city)
-                                    except Exception:
-                                        pass
+                                    except Exception as exc:
+                                        logger.warning("Weather lookup failed for %r: %s", city, exc)
                                     if weather_card and self.on_notification:
                                         self.on_notification({"category": "weather", "title": "Weather", "message": weather_card["summary"], "weather": weather_card})
                                     result_str = await asyncio.to_thread(
@@ -2686,8 +2711,8 @@ class AudioLoop:
                                     if isinstance(fields_raw, str) and fields_raw.strip():
                                         try:
                                             params["fields"] = json.loads(fields_raw)
-                                        except json.JSONDecodeError:
-                                            pass
+                                        except json.JSONDecodeError as exc:
+                                            logger.debug("browser_control fields were not valid JSON; passing raw value: %s", exc)
                                     self._plan_pending = True
                                     self.spawn_background_task(self.run_background_tool("browser_control", browser_control_module.browser_control, params))
                                     result_str = "Browser action started."
@@ -3285,8 +3310,8 @@ class AudioLoop:
                             local_start = start
                             try:
                                 local_start = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M %Z")
-                            except ValueError:
-                                pass
+                            except ValueError as exc:
+                                logger.debug("Could not localise calendar start time %r: %s", start, exc)
                             await self.notifications.notify("calendar_event", "Upcoming calendar event", f"{event.get('summary', 'Untitled')} starts at {local_start}.")
                 except Exception as error:
                     logger.exception("Google polling failed")
@@ -3414,8 +3439,8 @@ class AudioLoop:
                             _goal_ctx = _goal_engine.context()
                             if _goal_ctx:
                                 compact_context += "\n" + _goal_ctx
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Goal context unavailable at startup: %s", exc)
                         if compact_context != "Compact long-term memory:\n":
                             logger.debug("Loading compact long-term memory and recent conversation")
                             # P0.2: inject the persisted brain too — lessons learned + knowledge graph
@@ -3435,6 +3460,16 @@ class AudioLoop:
                     
                     else:
                         logger.info("Gemini Live connection restored")
+                        # Notify the server/frontend that the Gemini session reconnected,
+                        # so the client can show a brief "back online" indicator instead of
+                        # a chat message. The context restoration below still happens for
+                        # the model — this event is just for the UI.
+                        if self.on_session_restored:
+                            try:
+                                self.on_session_restored()
+                            except Exception:
+                                logger.exception("on_session_restored callback failed")
+
                         # Restore Context (global memory, same source used on fresh startup)
                         # Each reconnect starts a brand-new Live session with empty context, so
                         # durable facts (name, relationships, preferences, etc.) must be resent
@@ -3447,8 +3482,8 @@ class AudioLoop:
                             _goal_ctx = _goal_engine.context()
                             if _goal_ctx:
                                 compact_context += "\n" + _goal_ctx
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            logger.debug("Goal context unavailable on reconnect: %s", exc)
 
                         context_msg = "System Notification: Connection was lost and just re-established. Load this compact long-term memory silently and use it when relevant, then resume the conversation seamlessly:\n\n"
                         if compact_context != "Compact long-term memory:\n":
@@ -3464,8 +3499,8 @@ class AudioLoop:
                     try:
                         import model_router
                         model_router.record_success(MODEL)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Could not record model success: %s", exc)
                     
                     # Wait until stop event, or until the session task group exits (which happens on error)
                     # Actually, the TaskGroup context manager will exit if any tasks fail/cancel.

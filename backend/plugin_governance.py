@@ -41,6 +41,7 @@ def is_expired(governance: dict) -> bool:
     try:
         return datetime.fromisoformat(expires_at).astimezone(timezone.utc) <= datetime.now(timezone.utc)
     except (TypeError, ValueError):
+        logger.warning("Invalid governance expiry %r; treating as expired", expires_at)
         return True
 
 

@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import threading
+import socket
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -46,6 +47,8 @@ from memory_manager import MemoryManager
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
 from device_registry import DeviceRegistry
+from runtime_manager import RuntimeManager
+from handoff_store import HandoffStore
 from actions import agent_dispatcher as agent_dispatcher_module
 
 # Create a Socket.IO server with CORS configured for remote access
@@ -67,9 +70,11 @@ sio = socketio.AsyncServer(
     # Allow long-polling as fallback for networks that block WebSocket
     # This is important for mobile networks that may have restrictive proxies
     transports=['websocket', 'polling'],
-    # Increase ping timeout for mobile networks with higher latency
-    ping_timeout=60,
-    ping_interval=25,
+    # More forgiving ping settings for mobile/Tailscale networks.
+    # 90s timeout gives the client's built-in reconnection time to fire
+    # before the server drops the socket unnecessarily.
+    ping_timeout=90,
+    ping_interval=30,
     # Maximum buffer size for large file uploads (50MB)
     max_http_buffer_size=50 * 1024 * 1024,
 )
@@ -90,6 +95,136 @@ async def lifespan(_app):
 
 
 app = FastAPI(lifespan=lifespan)
+from capability_plan_store import CapabilityPlanStore
+from capability_plan_api import create_plan_router
+from capability_plan_drafts import PlanDraftService
+from capability_plan_implement import CapabilityImplementer
+
+capability_plan_store = CapabilityPlanStore(Path(BACKEND_DIR) / "capability_plans")
+app.include_router(create_plan_router(capability_plan_store, lambda: SERVER_TOKEN))
+
+
+def _model_generate(prompt: str):
+    import model_router
+    return model_router.generate_response(prompt, tier="background")
+
+
+_plan_draft_service = PlanDraftService(capability_plan_store, _model_generate)
+# Approval only records consent. This is the executor that actually builds,
+# verifies and registers the approved artifact, using the same builders the
+# live session uses so a built capability is immediately callable.
+_capability_implementer = CapabilityImplementer(
+    capability_plan_store, _model_generate, friday.custom_tool_builder, friday.agent_builder)
+
+
+def _plan_service(sid: str):
+    owner = (client_sessions.get(sid) or {}).get("plan_owner")
+    if not owner:
+        raise PermissionError("Planning requires a server token or a paired device credential")
+    if SETTINGS.get("face_auth_enabled", False) and not (authenticator and authenticator.authenticated):
+        raise PermissionError("Authentication required")
+    return _plan_draft_service, owner
+
+
+async def _draft_capability_for_sid(sid, data):
+    service, owner = _plan_service(sid)
+    if not isinstance(data, dict):
+        raise ValueError("Plan request must be an object")
+    record = await asyncio.to_thread(service.draft, data.get("request"), owner,
+                                     data.get("plan_id"), data.get("version"))
+    await sio.emit("capability_plan", record, room=sid)
+    return {"ok": True, "record": record, "message": "Explain this plan and wait for review. Execution is not available yet."}
+
+
+@sio.event
+async def capability_plan_request(sid, data):
+    try:
+        return await _draft_capability_for_sid(sid, data)
+    except Exception as exc:
+        logger.exception("Capability plan request failed")
+        return {"ok": False, "error": str(exc)}
+
+
+@sio.event
+async def capability_plan_decision(sid, data):
+    try:
+        service, owner = _plan_service(sid)
+        if not isinstance(data, dict):
+            raise ValueError("Decision must be an object")
+        record = await asyncio.to_thread(service.decide, data.get("plan_id"), owner,
+                                         data.get("version"), data.get("action"), data.get("content_hash"))
+        await sio.emit("capability_plan", record, room=sid)
+        return {"ok": True, "record": record}
+    except Exception as exc:
+        logger.exception("Capability plan decision failed")
+        return {"ok": False, "error": str(exc)}
+
+
+def _activate_capability(kind: str, artifact: str) -> str | None:
+    """Make a freshly verified artifact reachable by the live session.
+
+    Tools live in the shared ToolBuilder that the audio loop reads at call time,
+    so a verified tool needs no extra wiring. Agents also need the dispatcher so
+    scheduled runs resolve them instead of failing with 'Unknown agent type'.
+    """
+    if kind != "agent":
+        return None
+    try:
+        agent_dispatcher_module.dispatcher.register_agent(artifact, friday.agent_builder.load_callable(artifact))
+        return None
+    except Exception as exc:
+        logger.exception("Could not register verified agent %s", artifact)
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _implementation_message(result: dict) -> str:
+    status = result.get("status")
+    if result.get("ok"):
+        return f"{result.get('artifact')} was built, verified and registered, and is live now."
+    if status == "unsupported":
+        return result.get("error") or "This capability kind cannot be built yet."
+    if status == "reverted":
+        return result.get("error") or "The approval expired during the build, so it was rolled back."
+    if status == "failed":
+        return f"The build failed and nothing new is live. {result.get('error', '')}".strip()
+    return result.get("error") or "Implementation did not run."
+
+
+async def _implement_capability_for_sid(sid, data):
+    _, owner = _plan_service(sid)
+    if not isinstance(data, dict):
+        raise ValueError("Implementation request must be an object")
+    # Building runs a model call plus isolated subprocess tests, so keep it off
+    # the event loop. A concurrent cancel or edit is handled by the store.
+    result = await asyncio.to_thread(_capability_implementer.implement, data.get("plan_id"), owner,
+                                     data.get("version"), data.get("content_hash"))
+    record = result.get("record")
+    if record is None and result.get("status") in {"reverted", "rejected"}:
+        # The plan moved underneath the build (edited, cancelled, superseded).
+        # Push the current state so the card stops showing a stale "approved".
+        try:
+            record = capability_plan_store.get(data.get("plan_id"))
+        except Exception:
+            logger.warning("Could not refresh plan %s after a discarded build", data.get("plan_id"))
+    if record:
+        await sio.emit("capability_plan", record, room=sid)
+    implementation = result.get("implementation")
+    result["activation_error"] = _activate_capability(implementation.get("kind"), result.get("artifact")) \
+        if result.get("ok") and isinstance(implementation, dict) else None
+    result["message"] = _implementation_message(result)
+    return result
+
+
+@sio.event
+async def capability_plan_implement(sid, data):
+    try:
+        return await _implement_capability_for_sid(sid, data)
+    except Exception as exc:
+        logger.exception("Capability implementation failed")
+        return {"ok": False, "error": str(exc)}
+
+
+
 app_socketio = socketio.ASGIApp(sio, app)
 
 import signal
@@ -97,6 +232,11 @@ import signal
 # --- SHUTDOWN HANDLER ---
 def signal_handler(sig, frame):
     logger.info("Caught signal %s. Exiting gracefully...", sig)
+    # Cancel all device healthbeat tasks.
+    for task in _healthbeat_tasks.values():
+        if not task.done():
+            task.cancel()
+    _healthbeat_tasks.clear()
     # Clean up audio loop
     if audio_loop:
         try:
@@ -104,6 +244,15 @@ def signal_handler(sig, frame):
             audio_loop.stop()
         except Exception as e:
             logger.error("Error stopping audio loop: %s", e)
+    # Stop all per-device runtimes (phone, etc.) so they don't linger
+    # after the process restarts. Without this, a phone reconnecting after
+    # a server restart would find a stale runtime and get "Already Running".
+    runtime_manager.stop_all()
+    # Cancel all device healthbeat tasks.
+    for task in _healthbeat_tasks.values():
+        if not task.done():
+            task.cancel()
+    _healthbeat_tasks.clear()
     # Force kill
     logger.info("Force exiting...")
     os._exit(0)
@@ -115,6 +264,102 @@ signal.signal(signal.SIGTERM, signal_handler)
 audio_loop = None
 loop_task = None
 authenticator = None
+client_sessions = {}
+active_interaction_sid = None
+runtime_manager = RuntimeManager()
+handoff_summaries = {}
+handoff_store = HandoffStore(Path(ROOT_DIR) / "long_term_memory" / "conversation_handoffs.json")
+
+# Helper: get the AudioLoop for a session, with the same device-aware fallback
+# as user_input. Identified devices (those with a device_id) must use their own
+# runtime — only anonymous sessions fall back to the global audio_loop.
+def _audio_loop_for_session(sid):
+    runtime = runtime_for_sid(sid)
+    session_info = client_sessions.get(sid, {})
+    if runtime is not None:
+        return runtime.audio_loop
+    if not session_info.get("device_id"):
+        return audio_loop
+    return None
+
+# Track scheduled heartbeat tasks so we don't spawn duplicates.
+# Keyed by device_id — one health-monitor task per device runtime.
+_healthbeat_tasks: dict[str, asyncio.Task] = {}
+
+
+async def _device_healthbeat(device_id: str) -> None:
+    """Periodically check a device's AudioLoop health and warn if it crashed.
+
+    Runs every 30 seconds for the lifetime of the runtime. When the runtime
+    disappears from runtime_manager (cleaned up on disconnect/stop), the task
+    exits on the next check.
+    """
+    while True:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            return
+
+        runtime = runtime_manager.get(device_id)
+        if runtime is None:
+            # Runtime was removed (disconnect/stop) — task is done.
+            return
+
+        problems = runtime_manager.check_health()
+        for problem in problems:
+            if problem["device_id"] != device_id:
+                continue
+            if problem["issue"] == "crashed":
+                exc = problem.get("exception")
+                exc_str = f"{type(exc).__name__}: {exc}" if exc else "unknown error"
+                logger.error(
+                    "AudioLoop crashed for device_id=%s device_type=%s: %s",
+                    device_id, runtime.device_type, exc_str
+                )
+                # Notify connected clients for this device
+                session = client_sessions.get(
+                    next((s for s, sess in client_sessions.items()
+                          if sess.get("device_id") == device_id), None),
+                    {}
+                )
+                if session:
+                    try:
+                        await sio.emit(
+                            'error',
+                            {
+                                'msg': (
+                                    f"Friday's audio loop crashed on {runtime.device_type} "
+                                    f"({device_id}). Reconnecting may fix it."
+                                )
+                            },
+                            room=session.get("sid")
+                        )
+                    except Exception:
+                        logger.exception("healthbeat: failed to emit crash notification")
+            elif problem["issue"] == "no_task":
+                logger.warning(
+                    "AudioLoop has no task for device_id=%s device_type=%s",
+                    device_id, runtime.device_type
+                )
+
+
+def runtime_for_sid(sid):
+    session = client_sessions.get(sid, {})
+    device_id = session.get("device_id", sid)
+    runtime = runtime_manager.get(device_id)
+    if runtime is None and session.get("device_id"):
+        # Device identified itself but has no runtime — either AudioLoop never
+        # started, or it crashed. Log so it's visible in production.
+        logger.warning(
+            "runtime_for_sid: no runtime for identified device sid=%s device_id=%s",
+            sid, device_id
+        )
+    return runtime
+
+
+def runtime_loop_for_sid(sid):
+    runtime = runtime_for_sid(sid)
+    return runtime.audio_loop if runtime else audio_loop
 kasa_agent = KasaAgent()
 SETTINGS_FILE = "settings.json"
 
@@ -229,10 +474,17 @@ google_home = GoogleHomeBridge(google_account)
 paired_device_registry = DeviceRegistry(Path(ROOT_DIR) / "long_term_memory" / "paired_devices.json")
 
 async def ensure_audio_ready(sid, require_session=True):
-    if not audio_loop:
+    runtime = runtime_for_sid(sid)
+    # Identified devices must use their own runtime. Falling back to the
+    # desktop compatibility runtime is what caused phone messages to appear
+    # in the laptop conversation.
+    current_audio_loop = runtime.audio_loop if runtime else (
+        audio_loop if not client_sessions.get(sid, {}).get("device_id") else None
+    )
+    if not current_audio_loop:
         await sio.emit('error', {'msg': 'Friday is still starting. Try again in a moment.'}, room=sid)
         return False
-    if require_session and not audio_loop.session:
+    if require_session and not current_audio_loop.session:
         await sio.emit('error', {'msg': 'Friday is connected but the Gemini session is not ready yet.'}, room=sid)
         return False
     return True
@@ -315,13 +567,40 @@ async def delete_contact(sid, data):
 
 @sio.event
 async def connect(sid, environ, auth=None):
-    if SERVER_TOKEN:
-        provided_token = str((auth or {}).get("token", ""))
-        if not provided_token or not hmac.compare_digest(provided_token, SERVER_TOKEN):
+    client_sessions[sid] = {
+        "session_id": sid,
+        "device_id": str((auth or {}).get("device_id") or ("desktop" if not (auth or {}).get("device_token") else sid)),
+        "device_type": str((auth or {}).get("device_type") or ("android" if (auth or {}).get("device_token") else "desktop")),
+    }
+    auth = auth or {}
+    provided_token = str(auth.get("token", ""))
+    device_token = str(auth.get("device_token", ""))
+    pairing_session = str(auth.get("pairing_session", ""))
+    pairing_secret = str(auth.get("pairing_secret", ""))
+    pairing_allowed = paired_device_registry.is_valid_pairing_session(pairing_session, pairing_secret)
+    device_allowed = paired_device_registry.is_valid_token(device_token)
+    if SERVER_TOKEN and not (
+        provided_token and hmac.compare_digest(provided_token, SERVER_TOKEN)
+    ) and not pairing_allowed and not device_allowed:
             logger.warning("Rejected unauthenticated client: %s", sid)
             return False
+    import hashlib
+    if SERVER_TOKEN and provided_token and hmac.compare_digest(provided_token, SERVER_TOKEN):
+        client_sessions[sid]["plan_owner"] = "server_token_owner"
+    elif device_allowed:
+        client_sessions[sid]["plan_owner"] = "device:" + hashlib.sha256(device_token.encode()).hexdigest()
+    elif not SERVER_TOKEN:
+        # No shared identity from client-supplied device IDs or temporary pairing secrets.
+        peer = (environ.get("asgi.scope", {}).get("client") or (environ.get("REMOTE_ADDR"),))[0]
+        if peer in {"127.0.0.1", "::1"}:
+            client_sessions[sid]["plan_owner"] = "local-session:" + sid
+    # Remote planning requires a server token or a fully paired device credential.
     logger.info("Client connected: %s", sid)
     await sio.emit('status', {'msg': 'Connected to F.R.I.D.A.Y Backend'}, room=sid)
+    target_device_id = client_sessions[sid]["device_id"]
+    pending_handoff = handoff_summaries.pop(target_device_id, None) or handoff_store.pop(target_device_id)
+    if pending_handoff:
+        await sio.emit("conversation_handoff", pending_handoff, room=sid)
 
     global authenticator
     
@@ -361,12 +640,34 @@ async def connect(sid, environ, auth=None):
 @sio.event
 async def disconnect(sid):
     logger.info("Client disconnected: %s", sid)
-    if audio_loop:
-        audio_loop.cancel_pending_confirmations()
+    session = client_sessions.pop(sid, None)
+    if session is None:
+        logger.debug("disconnect: no session record for sid=%s (already cleaned up?)", sid)
+        return
+    device_id = session.get("device_id", "unknown")
+    runtime = runtime_for_sid(sid)
+    if runtime:
+        logger.info("disconnect: cleaning up runtime device_id=%s sid=%s", device_id, sid)
+        runtime.audio_loop.cancel_pending_confirmations()
+    else:
+        logger.info(
+            "disconnect: no runtime found for device_id=%s sid=%s "
+            "(AudioLoop already stopped or never started)",
+            device_id, sid
+        )
+    # Clean up the healthbeat task for this device if it exists.
+    if device_id in _healthbeat_tasks:
+        task = _healthbeat_tasks.pop(device_id)
+        if not task.done():
+            task.cancel()
 
 @sio.event
 async def start_audio(sid, data=None):
     global audio_loop, loop_task
+    device = client_sessions.get(sid, {})
+    runtime_id = device.get("device_id", sid)
+    device_type = device.get("device_type", "unknown")
+    existing_runtime = runtime_manager.get(runtime_id)
     
     # Optional: Block if not authenticated
     # Only block if auth is ENABLED and not authenticated
@@ -374,8 +675,8 @@ async def start_audio(sid, data=None):
         if authenticator and not authenticator.authenticated:
             logger.warning("Blocked start_audio: client is not authenticated")
             await sio.emit('error', {'msg': 'Authentication Required'})
-            if audio_loop:
-                audio_loop.cancel_pending_confirmations()
+            if existing_runtime:
+                existing_runtime.audio_loop.cancel_pending_confirmations()
             return
 
     logger.info("Starting audio loop")
@@ -387,48 +688,64 @@ async def start_audio(sid, data=None):
             device_index = data['device_index']
         if 'device_name' in data:
             device_name = data['device_name']
+
+    if client_sessions.get(sid) is not None:
+        client_sessions[sid]["audio_owner"] = True
             
     logger.info("Using input device: name=%r, index=%s", device_name, device_index)
     
-    if audio_loop:
-        if loop_task and (loop_task.done() or loop_task.cancelled()):
-             logger.warning("Audio loop task finished or was cancelled; restarting")
-             audio_loop.cancel_pending_confirmations()
-             audio_loop = None
-             loop_task = None
+    if existing_runtime:
+        if existing_runtime.loop_task and (existing_runtime.loop_task.done() or existing_runtime.loop_task.cancelled()):
+            logger.warning("Audio loop task finished or was cancelled; restarting")
+            runtime_manager.stop(runtime_id)
+            existing_runtime = None
         else:
-             logger.info("Audio loop already running; reconnecting client to session")
-             await sio.emit('status', {'msg': 'F.R.I.D.A.Y Already Running'})
-             return
+            logger.info("Audio loop already running; reconnecting client to session")
+            await sio.emit('status', {'msg': 'F.R.I.D.A.Y Already Running'}, room=sid)
+            await sio.emit('session_reconnected', {
+                'device_id': runtime_id,
+                'device_type': device_type,
+                'message': 'Friday is already running — reconnected to the existing session.'
+            }, room=sid)
+            return
 
 
     # Callback to send audio data to frontend
     def on_audio_data(data_bytes):
         # We need to schedule this on the event loop
         # This is high frequency, so we might want to downsample or batch if it's too much
-        asyncio.create_task(sio.emit('audio_data', {'data': list(data_bytes)}))
+        try:
+            asyncio.create_task(sio.emit('audio_data', {'data': list(data_bytes)}, room=sid))
+        except Exception:
+            logger.exception("on_audio_data: failed to emit for sid=%s", sid)
 
     # Callback to send CAL data to frontend
     def on_cad_data(data):
         info = f"{len(data.get('vertices', []))} vertices" if 'vertices' in data else f"{len(data.get('data', ''))} bytes (STL)"
         logger.debug("Sending CAD data to frontend: %s", info)
-        asyncio.create_task(sio.emit('cad_data', data))
+        asyncio.create_task(sio.emit('cad_data', data, room=sid))
 
     # Callback to send Browser data to frontend
     def on_web_data(data):
         logger.debug("Sending browser data to frontend: %s log chars", len(data.get("log", "")))
-        asyncio.create_task(sio.emit('browser_frame', data))
+        asyncio.create_task(sio.emit('browser_frame', data, room=sid))
         
     # Callback to send Transcription data to frontend
     def on_transcription(data):
         # data = {"sender": "User"|"FRIDAY", "text": "..."}
-        asyncio.create_task(sio.emit('transcription', data))
+        try:
+            asyncio.create_task(sio.emit('transcription', data, room=sid))
+        except Exception:
+            logger.exception("on_transcription: failed to emit for sid=%s", sid)
 
     # Callback to send Confirmation Request to frontend
     def on_tool_confirmation(data):
         # data = {"id": "uuid", "tool": "tool_name", "args": {...}}
         logger.info("Requesting confirmation for tool: %s", data.get("tool"))
-        asyncio.create_task(sio.emit('tool_confirmation_request', data))
+        try:
+            asyncio.create_task(sio.emit('tool_confirmation_request', data, room=sid))
+        except Exception:
+            logger.exception("on_tool_confirmation: failed to emit for sid=%s", sid)
 
     def on_confirmation_expired(data):
         logger.warning("Confirmation expired for tool: %s", data.get("tool"))
@@ -441,20 +758,20 @@ async def start_audio(sid, data=None):
         # - a dict with {status, attempt, max_attempts, error} (from CadAgent)
         if isinstance(status, dict):
             logger.debug("Sending CAD status: %s (attempt %s/%s)", status.get("status"), status.get("attempt"), status.get("max_attempts"))
-            asyncio.create_task(sio.emit('cad_status', status))
+            asyncio.create_task(sio.emit('cad_status', status, room=sid))
         else:
             # Legacy: simple string
             logger.debug("Sending CAD status: %s", status)
-            asyncio.create_task(sio.emit('cad_status', {'status': status}))
+            asyncio.create_task(sio.emit('cad_status', {'status': status}, room=sid))
 
     # Callback to send CAD thoughts to frontend (streaming)
     def on_cad_thought(thought_text):
-        asyncio.create_task(sio.emit('cad_thought', {'text': thought_text}))
+        asyncio.create_task(sio.emit('cad_thought', {'text': thought_text}, room=sid))
 
     # Callback to send Project Update to frontend
     def on_project_update(project_name):
         logger.info("Sending project update: %s", project_name)
-        asyncio.create_task(sio.emit('project_update', {'project': project_name}))
+        asyncio.create_task(sio.emit('project_update', {'project': project_name}, room=sid))
 
     # Callback to send Device Update to frontend
     previous_device_states = {}
@@ -462,7 +779,7 @@ async def start_audio(sid, data=None):
     def on_device_update(devices):
         # devices is a list of dicts
         logger.debug("Sending Kasa device update: %s devices", len(devices))
-        asyncio.create_task(sio.emit('kasa_devices', devices))
+        asyncio.create_task(sio.emit('kasa_devices', devices, room=sid))
         for device in devices:
             device_id = device.get("ip") or device.get("alias")
             state = device.get("is_on")
@@ -475,13 +792,18 @@ async def start_audio(sid, data=None):
     # Callback to send Error to frontend
     def on_error(msg):
         logger.error("Sending error to frontend: %s", msg)
-        asyncio.create_task(sio.emit('error', {'msg': msg}))
+        asyncio.create_task(sio.emit('error', {'msg': msg}, room=sid))
 
     def on_plan_update(plan):
-        asyncio.create_task(sio.emit('action_plan', plan))
+        asyncio.create_task(sio.emit('action_plan', plan, room=sid))
 
     def on_notification(notification):
-        asyncio.create_task(sio.emit('unified_notification', notification))
+        asyncio.create_task(sio.emit('unified_notification', notification, room=sid))
+
+    def on_session_restored():
+        asyncio.create_task(sio.emit('connection_restored', {
+            'message': 'Friday lost connection briefly and is back. The conversation continues.'
+        }, room=sid))
 
     def on_alert_settings_update(alert_settings):
         SETTINGS.update(alert_settings)
@@ -490,7 +812,7 @@ async def start_audio(sid, data=None):
     # Initialize FRIDAY
     try:
         logger.info("Initializing AudioLoop with device_index=%s", device_index)
-        audio_loop = friday.AudioLoop(
+        new_audio_loop = friday.AudioLoop(
             video_mode="none", 
             on_audio_data=on_audio_data,
             on_cad_data=on_cad_data,
@@ -506,21 +828,26 @@ async def start_audio(sid, data=None):
             on_alert_settings_update=on_alert_settings_update,
             on_plan_update=on_plan_update,
             on_notification=on_notification,
+            on_session_restored=on_session_restored,
             authenticated=(not SETTINGS.get("face_auth_enabled", False) or bool(authenticator and authenticator.authenticated)),
 
             input_device_index=device_index,
             input_device_name=device_name,
             kasa_agent=kasa_agent
         )
-        logger.info("AudioLoop initialized successfully")
+        async def live_capability_plan(data):
+            return await _draft_capability_for_sid(sid, data)
 
-        audio_loop.memory_manager.upload_retention_days = max(1, int(SETTINGS.get("upload_retention_days", 30)))
-        audio_loop.memory_manager.max_upload_storage_bytes = int(SETTINGS.get("max_upload_storage_mb", 1024)) * 1024 * 1024
-        audio_loop.memory_manager.cleanup_expired_uploads()
+        new_audio_loop.capability_plan_handler = live_capability_plan
+        logger.info("AudioLoop initialized successfully for %s", runtime_id)
+
+        new_audio_loop.memory_manager.upload_retention_days = max(1, int(SETTINGS.get("upload_retention_days", 30)))
+        new_audio_loop.memory_manager.max_upload_storage_bytes = int(SETTINGS.get("max_upload_storage_mb", 1024)) * 1024 * 1024
+        new_audio_loop.memory_manager.cleanup_expired_uploads()
 
         # Apply current permissions
-        audio_loop.update_permissions(SETTINGS["tool_permissions"])
-        audio_loop.system_monitor.configure(
+        new_audio_loop.update_permissions(SETTINGS["tool_permissions"])
+        new_audio_loop.system_monitor.configure(
             alerts_enabled=SETTINGS.get("system_alerts_enabled", True),
             muted_categories=set(SETTINGS.get("muted_alert_categories", [])),
             cooldowns=SETTINGS.get("alert_cooldowns", {}),
@@ -529,10 +856,30 @@ async def start_audio(sid, data=None):
         # Check initial mute state
         if data and data.get('muted', False):
             logger.info("Starting with audio paused")
-            audio_loop.set_paused(True)
+            new_audio_loop.set_paused(True)
 
         logger.info("Creating asyncio task for AudioLoop.run()")
-        loop_task = asyncio.create_task(audio_loop.run())
+        new_loop_task = asyncio.create_task(new_audio_loop.run())
+        runtime_manager.add(runtime_id, device_type, new_audio_loop, new_loop_task)
+        if runtime_id == "desktop" or audio_loop is None:
+            audio_loop = new_audio_loop
+            loop_task = new_loop_task
+
+        # Schedule a health monitor for this device's AudioLoop.
+        # If the loop crashes, the heartbeat will detect it within ~30s and
+        # emit an error to the connected client so the user isn't left wondering.
+        if runtime_id not in _healthbeat_tasks:
+            task = asyncio.create_task(_device_healthbeat(runtime_id))
+            _healthbeat_tasks[runtime_id] = task
+            logger.info("Healthbeat scheduled for device_id=%s", runtime_id)
+
+        logger.info(
+            "AudioLoop created: device_id=%s device_type=%s sid=%s "
+            "runtime_exists=%s transcription_room=%s",
+            runtime_id, device_type, sid,
+            runtime_manager.get(runtime_id) is not None,
+            sid  # each AudioLoop's on_transcription emits to its own sid
+        )
         
         # Add a done callback to catch silent failures in the loop
         def handle_loop_exit(task):
@@ -544,10 +891,10 @@ async def start_audio(sid, data=None):
                 logger.exception("Audio loop crashed")
                 # You could emit 'error' here if you have context
         
-        loop_task.add_done_callback(handle_loop_exit)
+        new_loop_task.add_done_callback(handle_loop_exit)
         
         logger.info("Emitting F.R.I.D.A.Y started status")
-        await sio.emit('status', {'msg': 'F.R.I.D.A.Y Started'})
+        await sio.emit('status', {'msg': 'F.R.I.D.A.Y Started'}, room=sid)
         
         # Send initial dashboard data
         async def send_initial_dashboard():
@@ -658,27 +1005,38 @@ async def monitor_tasks_loop():
 @sio.event
 async def stop_audio(sid):
     global audio_loop
-    if audio_loop:
-        audio_loop.stop() 
+    current_audio_loop = _audio_loop_for_session(sid)
+    runtime = runtime_for_sid(sid)
+    if current_audio_loop:
+        current_audio_loop.stop()
+        if runtime:
+            runtime_manager.remove(runtime.device_id)
         logger.info("Stopping audio loop")
-        audio_loop = None
-        await sio.emit('status', {'msg': 'F.R.I.D.A.Y Stopped'})
+        if current_audio_loop is audio_loop:
+            audio_loop = None
+        await sio.emit('status', {'msg': 'F.R.I.D.A.Y Stopped'}, room=sid)
+    else:
+        await sio.emit('error', {'msg': 'Friday is not running on this device'}, room=sid)
 
 @sio.event
 async def pause_audio(sid):
-    global audio_loop
-    if audio_loop:
-        audio_loop.set_paused(True)
+    current_audio_loop = _audio_loop_for_session(sid)
+    if current_audio_loop:
+        current_audio_loop.set_paused(True)
         logger.info("Pausing audio")
-        await sio.emit('status', {'msg': 'Audio Paused'})
+        await sio.emit('status', {'msg': 'Audio Paused'}, room=sid)
+    else:
+        await sio.emit('error', {'msg': 'Friday is not running on this device'}, room=sid)
 
 @sio.event
 async def resume_audio(sid):
-    global audio_loop
-    if audio_loop:
-        audio_loop.set_paused(False)
+    current_audio_loop = _audio_loop_for_session(sid)
+    if current_audio_loop:
+        current_audio_loop.set_paused(False)
         logger.info("Resuming audio")
-        await sio.emit('status', {'msg': 'Audio Resumed'})
+        await sio.emit('status', {'msg': 'Audio Resumed'}, room=sid)
+    else:
+        await sio.emit('error', {'msg': 'Friday is not running on this device'}, room=sid)
 
 @sio.event
 async def confirm_tool(sid, data):
@@ -688,8 +1046,10 @@ async def confirm_tool(sid, data):
     
     logger.debug("Received confirmation response for %s: %s", request_id, confirmed)
     
-    if audio_loop:
-        audio_loop.resolve_tool_confirmation(request_id, confirmed)
+    runtime = runtime_for_sid(sid)
+    current_audio_loop = _audio_loop_for_session(sid)
+    if current_audio_loop:
+        current_audio_loop.resolve_tool_confirmation(request_id, confirmed)
     else:
         logger.warning("Audio loop not active; cannot resolve confirmation")
 
@@ -724,35 +1084,77 @@ async def shutdown(sid, data=None):
 
 @sio.event
 async def user_input(sid, data):
+    """Handle text input from connected clients (chat box, mobile app, etc.).
+
+    Each device has its own AudioLoop and Gemini session. When a device sends
+    a message, the response must be routed back to that same device only.
+    Falling back to the desktop runtime for an identified device causes
+    phone messages to appear in the laptop conversation.
+    """
+    global active_interaction_sid
+    runtime = runtime_for_sid(sid)
+    session_info = client_sessions.get(sid, {})
+
+    # Match the same fallback logic as ensure_audio_ready():
+    # Identified devices (those with a device_id) must use their own runtime.
+    # Only fall back to the global audio_loop for anonymous sessions without a device_id.
+    if runtime is not None:
+        current_audio_loop = runtime.audio_loop
+    elif not session_info.get("device_id"):
+        current_audio_loop = audio_loop
+    else:
+        current_audio_loop = None
+        logger.warning(
+            "Rejected user_input from identified device with no runtime: "
+            "sid=%s device_id=%s — Friday may not have been started on this device.",
+            sid, session_info.get("device_id")
+        )
+
     text = data.get('text')
-    logger.debug("User input received: %r", text)
+    logger.debug("user_input: device_id=%s sid=%s text=%r",
+                 session_info.get("device_id"), sid, text)
     
     if not await ensure_audio_ready(sid):
-        if audio_loop:
-            audio_loop.cancel_pending_confirmations()
+        if current_audio_loop:
+            current_audio_loop.cancel_pending_confirmations()
         return
+
+    if client_sessions.get(sid) is not None:
+        client_sessions[sid]["last_interaction"] = datetime.now().isoformat(timespec="seconds")
+    active_interaction_sid = sid
 
     if text:
         logger.debug("Sending message to model: %r", text)
+
+        lowered_text = text.lower()
+        target_device_id = None
+        if "continue this conversation" in lowered_text or "send this to" in lowered_text:
+            if any(word in lowered_text for word in ("phone", "android", "mobile", "cell")):
+                target_device_id = next((item.get("device_id") for item in client_sessions.values() if item.get("device_type") == "android"), None)
+            elif any(word in lowered_text for word in ("desktop", "computer", "pc", "laptop")):
+                target_device_id = next((item.get("device_id") for item in client_sessions.values() if item.get("device_type") == "desktop"), None)
+        if target_device_id and target_device_id != client_sessions.get(sid, {}).get("device_id"):
+            await handoff_conversation(sid, {"target_device_id": target_device_id, "summary": text})
+            return
         
         # Log User Input to Project History
-        if audio_loop and audio_loop.project_manager:
-            audio_loop.project_manager.log_chat("User", text)
+        if current_audio_loop and current_audio_loop.project_manager:
+            current_audio_loop.project_manager.log_chat("User", text)
 
         # Log User Input to Global Memory (not project-scoped, never cleared)
-        if audio_loop and audio_loop.memory_manager:
-            audio_loop.memory_manager.append_message("User", text, project=audio_loop.project_manager.current_project)
-            asyncio.create_task(audio_loop.extract_important_facts("User", text))
+        if current_audio_loop and current_audio_loop.memory_manager:
+            current_audio_loop.memory_manager.append_message("User", text, project=current_audio_loop.project_manager.current_project)
+            asyncio.create_task(current_audio_loop.extract_important_facts("User", text))
 
         # Reset the proactive-speech silence timer
-        audio_loop.notify_activity()
+        current_audio_loop.notify_activity()
 
-        if audio_loop.openclaw_bridge.should_route(text):
+        if current_audio_loop.openclaw_bridge.should_route(text):
             await sio.emit('status', {'msg': 'OpenClaw is planning this request...'}, room=sid)
 
             async def run_openclaw_request():
                 try:
-                    plan = await asyncio.to_thread(audio_loop.openclaw_bridge.plan, text)
+                    plan = await asyncio.to_thread(current_audio_loop.openclaw_bridge.plan, text)
                     result = json.dumps(plan, ensure_ascii=False, indent=2)
                     await sio.emit('transcription', {'sender': 'FRIDAY', 'text': f"\nOpenClaw plan:\n{result}\n"}, room=sid)
                     await sio.emit('unified_notification', {
@@ -762,21 +1164,35 @@ async def user_input(sid, data):
                 except Exception as error:
                     await sio.emit('error', {'msg': f'OpenClaw planning failed: {error}'}, room=sid)
 
-            audio_loop.spawn_background_task(run_openclaw_request())
+            current_audio_loop.spawn_background_task(run_openclaw_request())
             return
 
         # Use the same 'send' method that worked for audio, as 'send_realtime_input' and 'send_client_content' seem unstable in this env
         # INJECT VIDEO FRAME IF AVAILABLE (VAD-style logic for Text Input)
-        if audio_loop and audio_loop.live_video_enabled and audio_loop._latest_image_payload:
+        if current_audio_loop and current_audio_loop.live_video_enabled and current_audio_loop._latest_image_payload:
             logger.debug("Piggybacking video frame with text input")
             try:
                 # Send frame first
-                await audio_loop.session.send(input=audio_loop._latest_image_payload, end_of_turn=False)
+                await current_audio_loop.session.send(input=current_audio_loop._latest_image_payload, end_of_turn=False)
             except Exception as e:
                 logger.exception("Failed to send piggyback frame")
                 
-        await audio_loop.session.send(input=text, end_of_turn=True)
-        logger.debug("Message sent to model successfully")
+        # The final send to Gemini. If the session drops, we want to know about it
+        # and tell the user rather than silently dying.
+        try:
+            await current_audio_loop.session.send(input=text, end_of_turn=True)
+            logger.debug("Message sent to model successfully")
+        except Exception as e:
+            logger.exception(
+                "session.send failed for device_id=%s sid=%s: %s",
+                session_info.get("device_id"), sid, e
+            )
+            await sio.emit(
+                'error',
+                {'msg': f"Friday lost connection to the AI service: {e}"},
+                room=sid
+            )
+            return
 
 import json
 from datetime import datetime
@@ -788,19 +1204,23 @@ from pathlib import Path
 async def video_frame(sid, data):
     # data should contain 'image' which is binary (blob) or base64 encoded
     image_data = data.get('image')
-    if image_data and audio_loop:
+    runtime = runtime_for_sid(sid)
+    current_audio_loop = runtime.audio_loop if runtime else audio_loop
+    if image_data and current_audio_loop:
         # We don't await this because we don't want to block the socket handler
         # But send_frame is async, so we create a task
-        asyncio.create_task(audio_loop.send_frame(image_data))
+        asyncio.create_task(current_audio_loop.send_frame(image_data))
 
 @sio.event
 async def set_live_video(sid, data):
     """Enable/disable continuous webcam streaming into the Gemini Live session."""
     enabled = bool((data or {}).get('enabled', False))
     logger.info("Live vision %s by client", "enabled" if enabled else "disabled")
-    if audio_loop:
-        audio_loop.set_live_video(enabled)
-    status = audio_loop.vision_status() if audio_loop else {
+    runtime = runtime_for_sid(sid)
+    current_audio_loop = runtime.audio_loop if runtime else audio_loop
+    if current_audio_loop:
+        current_audio_loop.set_live_video(enabled)
+    status = current_audio_loop.vision_status() if current_audio_loop else {
         'enabled': False,
         'session_ready': False,
         'paused': False,
@@ -813,7 +1233,9 @@ async def set_live_video(sid, data):
 @sio.event
 async def get_vision_status(sid):
     """Return explicit webcam and Gemini vision diagnostics to the client."""
-    status = audio_loop.vision_status() if audio_loop else {
+    runtime = runtime_for_sid(sid)
+    current_audio_loop = runtime.audio_loop if runtime else audio_loop
+    status = current_audio_loop.vision_status() if current_audio_loop else {
         'enabled': False,
         'session_ready': False,
         'paused': False,
@@ -884,6 +1306,7 @@ async def save_memory(sid, data):
 @sio.event
 async def upload_memory(sid, data):
     logger.info("Received memory upload request")
+    current_audio_loop = runtime_loop_for_sid(sid)
     try:
         memory_text = data.get('memory', '')
         if not memory_text:
@@ -892,7 +1315,7 @@ async def upload_memory(sid, data):
                 audio_loop.cancel_pending_confirmations()
             return
 
-        if not audio_loop:
+        if not current_audio_loop:
              logger.error("Audio loop is None; cannot load memory")
              await sio.emit('error', {'msg': "System not ready (Audio Loop inactive)"})
              return
@@ -904,7 +1327,7 @@ async def upload_memory(sid, data):
         logger.debug("Sending memory context to model")
         context_msg = f"System Notification: The user has uploaded a long-term memory file. Please load the following context into your understanding. The format is a text log of previous conversations:\n\n{memory_text}"
         
-        await audio_loop.session.send(input=context_msg, end_of_turn=True)
+        await current_audio_loop.session.send(input=context_msg, end_of_turn=True)
         logger.debug("Memory context sent successfully")
         await sio.emit('status', {'msg': 'Memory Loaded into Context'})
 
@@ -915,6 +1338,7 @@ async def upload_memory(sid, data):
 @sio.event
 async def process_uploaded_file(sid, data):
     """Process a file selected in the frontend without exposing its local path."""
+    current_audio_loop = runtime_loop_for_sid(sid)
     try:
         filename = Path(str(data.get('filename', 'uploaded_file'))).name
         encoded_file = data.get('data', '')
@@ -945,8 +1369,8 @@ async def process_uploaded_file(sid, data):
             'wallpaper_ready': metadata['mime_type'].startswith('image/'),
             'saved_path': str(uploaded_path),
         }, room=sid)
-        if metadata['mime_type'].startswith('image/') and audio_loop and audio_loop.session:
-            await audio_loop.session.send(
+        if metadata['mime_type'].startswith('image/') and current_audio_loop and current_audio_loop.session:
+            await current_audio_loop.session.send(
                 input=(
                     f"System Notification: The user uploaded an image and it is temporarily available at "
                     f"{uploaded_path}. If the user asks to set the uploaded image as wallpaper, use "
@@ -967,6 +1391,7 @@ async def process_uploaded_file(sid, data):
 @sio.event
 async def upload_file_for_awareness(sid, data):
     """Store an uploaded file and give the active model enough context to ask what to do."""
+    current_audio_loop = runtime_loop_for_sid(sid)
     try:
         filename = Path(str(data.get('filename', 'uploaded_file'))).name
         encoded_file = data.get('data', '')
@@ -984,9 +1409,9 @@ async def upload_file_for_awareness(sid, data):
         if mime_type.startswith('text/') or Path(filename).suffix.lower() in {'.txt', '.md', '.json', '.csv', '.py', '.js', '.jsx', '.ts', '.tsx', '.html', '.css'}:
             preview = file_bytes.decode('utf-8', errors='ignore')[:12000]
 
-        if audio_loop:
-            audio_loop.last_uploaded_file = str(saved_path)
-            if audio_loop.session:
+        if current_audio_loop:
+            current_audio_loop.last_uploaded_file = str(saved_path)
+            if current_audio_loop.session:
                 if mime_type.startswith('image/'):
                     await audio_loop.session.send(
                         input={'mime_type': mime_type, 'data': encoded_file},
@@ -1002,7 +1427,7 @@ async def upload_file_for_awareness(sid, data):
                 )
                 if preview:
                     awareness += f"\n\nFile content preview:\n{preview}"
-                await audio_loop.session.send(input=awareness, end_of_turn=True)
+                await current_audio_loop.session.send(input=awareness, end_of_turn=True)
 
         await sio.emit('file_processing_result', {
             'filename': filename,
@@ -1018,8 +1443,8 @@ async def discover_kasa(sid):
     logger.info("Received discover_kasa request")
     try:
         devices = await kasa_agent.discover_devices()
-        await sio.emit('kasa_devices', devices)
-        await sio.emit('status', {'msg': f"Found {len(devices)} Kasa devices"})
+        await sio.emit('kasa_devices', devices, room=sid)
+        await sio.emit('status', {'msg': f"Found {len(devices)} Kasa devices"}, room=sid)
         
         # Save to settings
         # devices is a list of full device info dicts. minimizing for storage.
@@ -1047,9 +1472,10 @@ async def discover_kasa(sid):
 async def iterate_cad(sid, data):
     # data: { prompt: "make it bigger" }
     prompt = data.get('prompt')
+    current_audio_loop = runtime_loop_for_sid(sid)
     logger.info("Received iterate_cad request: %r", prompt)
     
-    if not audio_loop or not audio_loop.cad_agent:
+    if not current_audio_loop or not current_audio_loop.cad_agent:
         await sio.emit('error', {'msg': "CAD Agent not available"})
         if audio_loop:
             audio_loop.cancel_pending_confirmations()
@@ -1061,8 +1487,8 @@ async def iterate_cad(sid, data):
         await sio.emit('cad_status', {'status': 'generating'})
         
         # Call the agent with project path
-        cad_output_dir = str(audio_loop.project_manager.get_current_project_path() / "cad")
-        result = await audio_loop.cad_agent.iterate_prototype(prompt, output_dir=cad_output_dir)
+        cad_output_dir = str(current_audio_loop.project_manager.get_current_project_path() / "cad")
+        result = await current_audio_loop.cad_agent.iterate_prototype(prompt, output_dir=cad_output_dir)
         
         if result:
             info = f"{len(result.get('data', ''))} bytes (STL)"
@@ -1070,7 +1496,7 @@ async def iterate_cad(sid, data):
             await sio.emit('cad_data', result)
             # Save to Project
             if 'file_path' in result:
-                saved_path = audio_loop.project_manager.save_cad_artifact(result['file_path'], prompt)
+                saved_path = current_audio_loop.project_manager.save_cad_artifact(result['file_path'], prompt)
                 if saved_path:
                     logger.info("Saved iterated CAD to %s", saved_path)
 
@@ -1086,9 +1512,10 @@ async def iterate_cad(sid, data):
 async def generate_cad(sid, data):
     # data: { prompt: "make a cube" }
     prompt = data.get('prompt')
+    current_audio_loop = runtime_loop_for_sid(sid)
     logger.info("Received generate_cad request: %r", prompt)
     
-    if not audio_loop or not audio_loop.cad_agent:
+    if not current_audio_loop or not current_audio_loop.cad_agent:
         await sio.emit('error', {'msg': "CAD Agent not available"})
         if audio_loop:
             audio_loop.cancel_pending_confirmations()
@@ -1099,8 +1526,8 @@ async def generate_cad(sid, data):
         await sio.emit('cad_status', {'status': 'generating'})
         
         # Use generate_prototype based on prompt with project path
-        cad_output_dir = str(audio_loop.project_manager.get_current_project_path() / "cad")
-        result = await audio_loop.cad_agent.generate_prototype(prompt, output_dir=cad_output_dir)
+        cad_output_dir = str(current_audio_loop.project_manager.get_current_project_path() / "cad")
+        result = await current_audio_loop.cad_agent.generate_prototype(prompt, output_dir=cad_output_dir)
         
         if result:
             info = f"{len(result.get('data', ''))} bytes (STL)"
@@ -1110,7 +1537,7 @@ async def generate_cad(sid, data):
 
             # Save to Project
             if 'file_path' in result:
-                saved_path = audio_loop.project_manager.save_cad_artifact(result['file_path'], prompt)
+                saved_path = current_audio_loop.project_manager.save_cad_artifact(result['file_path'], prompt)
                 if saved_path:
                     logger.info("Saved generated CAD to %s", saved_path)
 
@@ -1126,9 +1553,10 @@ async def generate_cad(sid, data):
 async def prompt_web_agent(sid, data):
     # data: { prompt: "find xyz" }
     prompt = data.get('prompt')
+    current_audio_loop = runtime_loop_for_sid(sid)
     logger.info("Received web agent prompt: %r", prompt)
     
-    if not audio_loop or not audio_loop.web_agent:
+    if not current_audio_loop or not current_audio_loop.web_agent:
         await sio.emit('error', {'msg': "Web Agent not available"})
         if audio_loop:
             audio_loop.cancel_pending_confirmations()
@@ -1147,7 +1575,7 @@ async def prompt_web_agent(sid, data):
         # But we want to catch errors here.
         
         # Based on typical agent design, run() is the entry point.
-        await audio_loop.web_agent.run(prompt)
+        await current_audio_loop.web_agent.run(prompt)
         
         await sio.emit('status', {'msg': 'Web Agent finished'})
         
@@ -1158,9 +1586,10 @@ async def prompt_web_agent(sid, data):
 @sio.event
 async def discover_printers(sid):
     logger.info("Received discover_printers request")
+    current_audio_loop = runtime_loop_for_sid(sid)
     
     # If audio_loop isn't ready yet, return saved printers from settings
-    if not audio_loop or not audio_loop.printer_agent:
+    if not current_audio_loop or not current_audio_loop.printer_agent:
         saved_printers = SETTINGS.get("printers", [])
         if saved_printers:
             # Convert saved printers to the expected format
@@ -1174,21 +1603,21 @@ async def discover_printers(sid):
                     "camera_url": p.get("camera_url")
                 })
             logger.info("Returning %s saved printers; audio loop not ready", len(printer_list))
-            await sio.emit('printer_list', printer_list)
+            await sio.emit('printer_list', printer_list, room=sid)
             if audio_loop:
                 audio_loop.cancel_pending_confirmations()
             return
         else:
-            await sio.emit('printer_list', [])
-            await sio.emit('status', {'msg': "Connect to F.R.I.D.A.Y to enable printer discovery"})
+            await sio.emit('printer_list', [], room=sid)
+            await sio.emit('status', {'msg': "Connect to F.R.I.D.A.Y to enable printer discovery"}, room=sid)
             if audio_loop:
                 audio_loop.cancel_pending_confirmations()
             return
         
     try:
-        printers = await audio_loop.printer_agent.discover_printers()
-        await sio.emit('printer_list', printers)
-        await sio.emit('status', {'msg': f"Found {len(printers)} printers"})
+        printers = await current_audio_loop.printer_agent.discover_printers()
+        await sio.emit('printer_list', printers, room=sid)
+        await sio.emit('status', {'msg': f"Found {len(printers)} printers"}, room=sid)
     except Exception as e:
         logger.exception("Error discovering printers")
         await sio.emit('error', {'msg': f"Printer Discovery Failed: {str(e)}"})
@@ -1275,9 +1704,10 @@ async def add_printer(sid, data):
 @sio.event
 async def print_stl(sid, data):
     logger.info("Received print_stl request: %s", data)
+    current_audio_loop = runtime_loop_for_sid(sid)
     # data: { stl_path: "path/to.stl" | "current", printer: "name_or_ip", profile: "optional" }
     
-    if not audio_loop or not audio_loop.printer_agent:
+    if not current_audio_loop or not current_audio_loop.printer_agent:
         await sio.emit('error', {'msg': "Printer Agent not available"})
         if audio_loop:
             audio_loop.cancel_pending_confirmations()
@@ -1298,12 +1728,12 @@ async def print_stl(sid, data):
         
         # Get current project path for resolution
         current_project_path = None
-        if audio_loop and audio_loop.project_manager:
-            current_project_path = str(audio_loop.project_manager.get_current_project_path())
+        if current_audio_loop and current_audio_loop.project_manager:
+            current_project_path = str(current_audio_loop.project_manager.get_current_project_path())
             logger.debug("Using project path: %s", current_project_path)
 
         # Resolve STL path before slicing so we can preview it
-        resolved_stl = audio_loop.printer_agent._resolve_file_path(stl_path, current_project_path)
+        resolved_stl = current_audio_loop.printer_agent._resolve_file_path(stl_path, current_project_path)
         
         if resolved_stl and os.path.exists(resolved_stl):
             # Open the STL in the CAD module for preview
@@ -1333,7 +1763,7 @@ async def print_stl(sid, data):
             if percent < 100:
                  await sio.emit('status', {'msg': f"Slicing: {percent}%"})
 
-        result = await audio_loop.printer_agent.print_stl(
+        result = await current_audio_loop.printer_agent.print_stl(
             stl_path, 
             printer_name, 
             profile,
@@ -1393,14 +1823,14 @@ async def control_kasa(sid, data):
                 'ip': ip,
                 'is_on': True if action == "on" else (False if action == "off" else None),
                 'brightness': data.get('value') if action == "brightness" else None,
-            })
+            }, room=sid)
  
         else:
-             await sio.emit('error', {'msg': f"Failed to control device {ip}"})
+             await sio.emit('error', {'msg': f"Failed to control device {ip}"}, room=sid)
 
     except Exception as e:
          logger.exception("Error controlling Kasa device")
-         await sio.emit('error', {'msg': f"Kasa Control Error: {str(e)}"})
+         await sio.emit('error', {'msg': f"Kasa Control Error: {str(e)}"}, room=sid)
 
 @sio.event
 async def get_settings(sid):
@@ -1415,14 +1845,103 @@ async def get_settings(sid):
     await sio.emit('openclaw_status', friday.openclaw_bridge.status(), room=sid)
 
 @sio.event
+async def get_runtime_sessions(sid):
+    """Return live desktop/phone runtimes without exposing private conversation data."""
+    sessions = []
+    for runtime in runtime_manager.all():
+        session = next(
+            (item for item in client_sessions.values() if item.get("device_id") == runtime.device_id),
+            {},
+        )
+        sessions.append({
+            "device_id": runtime.device_id,
+            "device_type": runtime.device_type,
+            "running": bool(runtime.loop_task and not runtime.loop_task.done()),
+            "session_ready": bool(getattr(runtime.audio_loop, "session", None)),
+            "connected": bool(session),
+        })
+    await sio.emit("runtime_sessions", sessions, room=sid)
+
+@sio.event
+async def stop_runtime_session(sid, data=None):
+    """Stop only the selected device runtime."""
+    device_id = str((data or {}).get("device_id", ""))
+    stopped = runtime_manager.stop(device_id)
+    await sio.emit("runtime_session_stopped", {"device_id": device_id, "stopped": stopped}, room=sid)
+
+@sio.event
+async def handoff_conversation(sid, data=None):
+    """Send an explicit, user-selected conversation summary to another device."""
+    payload = data or {}
+    target_id = str(payload.get("target_device_id", ""))
+    summary = str(payload.get("summary", "")).strip()
+    if not target_id or not summary:
+        await sio.emit("conversation_handoff_error", {"error": "A target device and summary are required."}, room=sid)
+        return
+    target_sid = next(
+        (client_sid for client_sid, session in client_sessions.items()
+         if session.get("device_id") == target_id),
+        None,
+    )
+    handoff = {
+        "from_device_id": client_sessions.get(sid, {}).get("device_id", sid),
+        "to_device_id": target_id,
+        "summary": summary[:12000],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    handoff_summaries[target_id] = handoff
+    if target_sid:
+        await sio.emit("conversation_handoff", handoff, room=target_sid)
+    else:
+        handoff_store.put(target_id, handoff)
+    await sio.emit("conversation_handoff_complete", {"target_device_id": target_id}, room=sid)
+
+@sio.event
 async def request_device_pairing(sid, data=None):
     """Create a short-lived code for a user-approved companion-device pairing."""
     try:
-        pairing = paired_device_registry.create_pairing_code((data or {}).get('ttl_seconds', 300))
-        await sio.emit('device_pairing_code', pairing, room=sid)
+        payload = data or {}
+        server_url = str(payload.get("server_url") or os.getenv("FRIDAY_PAIRING_URL") or _pairing_server_url())
+        pairing = paired_device_registry.create_pairing_session(server_url, payload.get('ttl_seconds', 300))
+        await sio.emit('device_pairing_qr', pairing, room=sid)
     except Exception as exc:
         logger.exception("Could not create device pairing code")
         await sio.emit('device_pairing_error', {'error': str(exc)}, room=sid)
+
+def _pairing_server_url() -> str:
+    """Advertise a phone-reachable remote address when possible.
+
+    Tailscale addresses are preferred so a phone can pair from outside the
+    home LAN. Set FRIDAY_PAIRING_URL explicitly when using another VPN or DNS.
+    """
+    try:
+        host_addresses = {info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+        tailscale = next(
+            (address for address in host_addresses if _is_tailscale_address(address)),
+            None,
+        )
+        if tailscale:
+            return f"http://{tailscale}:8000"
+    except OSError as exc:
+        logger.debug("Tailscale address lookup failed during pairing: %s", exc)
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("8.8.8.8", 80))
+        address = probe.getsockname()[0]
+        probe.close()
+        if address and not address.startswith("127."):
+            return f"http://{address}:8000"
+    except OSError as exc:
+        logger.debug("Local address probe failed during pairing: %s", exc)
+    return "http://localhost:8000"
+
+
+def _is_tailscale_address(address: str) -> bool:
+    try:
+        first, second, third, _ = (int(part) for part in address.split("."))
+        return first == 100 and 64 <= second <= 127
+    except (TypeError, ValueError):
+        return False
 
 @sio.event
 async def pair_device(sid, data):
@@ -1433,6 +1952,21 @@ async def pair_device(sid, data):
         await sio.emit('paired_devices', paired_device_registry.list_devices())
     except Exception as exc:
         await sio.emit('device_pairing_error', {'error': str(exc)}, room=sid)
+
+@sio.event
+async def pair_device_bootstrap(sid, data):
+    """Exchange a scanned QR session for the device's persistent token."""
+    try:
+        payload = data or {}
+        result = paired_device_registry.consume_pairing_session(
+            str(payload.get("session_id", "")),
+            str(payload.get("pairing_secret", "")),
+            payload,
+        )
+        await sio.emit("device_paired", result, room=sid)
+        await sio.emit("paired_devices", paired_device_registry.list_devices())
+    except Exception as exc:
+        await sio.emit("device_pairing_error", {"error": str(exc)}, room=sid)
 
 @sio.event
 async def device_heartbeat(sid, data):
@@ -1497,7 +2031,7 @@ async def get_agent_console(sid):
     }, room=sid)
 
 @sio.event
-async def get_autonomy_status(sid):
+async def get_autonomy_status(sid, data=None):
     if not audio_loop:
         await sio.emit('autonomy_status', {'proposals': [], 'security_findings': [], 'phases': {}, 'error': 'Friday runtime is not ready'}, room=sid)
         return
@@ -1678,7 +2212,7 @@ async def update_tool_permissions(sid, data):
 # New window component socket events
 
 @sio.event
-async def get_system_monitor(sid):
+async def get_system_monitor(sid, data=None):
     """Get current system metrics for SystemMonitorWindow."""
     from actions.system_monitor import get_system_status
     try:
@@ -2270,8 +2804,8 @@ def build_proactive_suggestions():
                     engine_suggestions = engine.get_suggestions() or []
                     if engine_suggestions:
                         suggestions.extend(engine_suggestions)
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Proactive engine suggestions unavailable: %s", exc)
 
         return suggestions
     except Exception as e:
@@ -2420,8 +2954,8 @@ async def _emit_reminder(r):
             "priority": "high",
         })
         await sio.emit("reminders_list", [x for x in _load_store("reminders", []) if not x.get("fired")])
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not emit reminder notification: %s", exc)
 
 # ── Computer control recorder ───────────────────────────────────────
 class _POINT(ctypes.Structure):
@@ -2432,14 +2966,14 @@ _RECSTATE = {"active": False, "actions": [], "stop_event": None, "thread": None,
 async def _emit_control_action(action):
     try:
         await sio.emit("control_action", action)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not emit control_action event: %s", exc)
 
 async def _emit_status_message(msg):
     try:
         await sio.emit("status", {"msg": msg})
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Could not emit status message: %s", exc)
 
 def _recorder_loop(stop_event):
     if sys.platform != "win32":
@@ -3178,6 +3712,176 @@ async def clear_recording(sid):
     except Exception as e:
         logger.exception("Error clearing recording")
         await sio.emit("status", {"msg": f"Clear failed: {e}"}, room=sid)
+
+# ──────────────────────────────────────────────
+#  Health check endpoint
+# ──────────────────────────────────────────────
+
+@app.get("/health")
+async def health_check():
+    """Return subsystem health for monitoring and the dashboard."""
+    subsystems: dict[str, Any] = {}
+    try:
+        subsystems["memory_manager"] = {"ok": True, "path": str(global_memory_manager.root_dir)}
+    except Exception as exc:
+        subsystems["memory_manager"] = {"ok": False, "error": str(exc)}
+    try:
+        subsystems["paired_devices"] = {"ok": True, "count": len(paired_device_registry.list_devices())}
+    except Exception as exc:
+        subsystems["paired_devices"] = {"ok": False, "error": str(exc)}
+    try:
+        subsystems["event_bus"] = _get_bus_stats()
+    except Exception:
+        subsystems["event_bus"] = {"ok": False}
+    try:
+        subsystems["model_router"] = _model_router_stats()
+    except Exception:
+        subsystems["model_router"] = {"ok": False}
+    all_ok = all(s.get("ok", False) for s in subsystems.values())
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "service": "F.R.I.D.A.Y Backend",
+        "subsystems": subsystems,
+        "audio_loop_running": audio_loop is not None,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+def _get_bus_stats() -> dict[str, Any]:
+    try:
+        from event_bus import get_event_bus
+        return {"ok": True, **get_event_bus().stats()}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def _model_router_stats() -> dict[str, Any]:
+    try:
+        from model_router import status as _s
+        result = _s()
+        return result
+    except Exception as exc:
+        logger.debug("model router stats failed: %s", exc)
+        return {"ok": False, "error": str(exc)}
+
+
+# ──────────────────────────────────────────────
+#  New Socket.IO event handlers
+# ──────────────────────────────────────────────
+
+@sio.event
+async def get_news(sid, data=None):
+    """Fetch news from a trusted source or category."""
+    payload = data or {}
+    source = payload.get("source", "bbc-news")
+    category = payload.get("category")
+    max_items = int(payload.get("max_items", 8))
+    try:
+        from connectors import get_news_connector
+        nc = get_news_connector()
+        if category:
+            items = await asyncio.to_thread(nc.fetch_category, category, max_items)
+        else:
+            items = await asyncio.to_thread(nc.fetch_headlines, source, max_items)
+        await sio.emit("news_data", {"ok": True, "items": [i.to_dict() for i in items]}, room=sid)
+    except Exception as exc:
+        logger.exception("get_news failed")
+        await sio.emit("news_data", {"ok": False, "error": str(exc)}, room=sid)
+
+
+@sio.event
+async def get_science(sid, data=None):
+    """Fetch recent science papers."""
+    payload = data or {}
+    category = payload.get("category", "cs.AI")
+    max_items = int(payload.get("max_items", 6))
+    try:
+        from connectors import get_science_connector
+        sc = get_science_connector()
+        items = await asyncio.to_thread(sc.fetch_papers, category, max_items)
+        await sio.emit("science_data", {"ok": True, "items": [i.to_dict() for i in items]}, room=sid)
+    except Exception as exc:
+        logger.exception("get_science failed")
+        await sio.emit("science_data", {"ok": False, "error": str(exc)}, room=sid)
+
+
+@sio.event
+async def get_local_devices(sid, data=None):
+    """Scan and return local devices."""
+    try:
+        from connectors import get_local_device_connector
+        ldc = get_local_device_connector()
+        kasa = audio_loop.kasa_agent if audio_loop else None
+        printer = audio_loop.printer_agent if audio_loop else None
+        devices = await asyncio.to_thread(ldc.scan, kasa, printer)
+        await sio.emit("local_devices", {"ok": True, "devices": [d.to_dict() for d in devices]}, room=sid)
+    except Exception as exc:
+        logger.exception("get_local_devices failed")
+        await sio.emit("local_devices", {"ok": False, "error": str(exc)}, room=sid)
+
+
+@sio.event
+@sio.event
+async def get_daily_briefing(sid, data=None):
+    """Generate and return a daily briefing."""
+    payload = data or {}
+    location = payload.get("location", "Johannesburg")
+    try:
+        from agents.daily_briefing_agent import get_daily_briefing_agent
+        from cognition.anomaly_detector import get_anomaly_detector
+        agent = get_daily_briefing_agent()
+        briefing = await agent.generate_briefing(
+            location=location,
+            task_manager=audio_loop.task_manager if audio_loop else None,
+            anomaly_detector=get_anomaly_detector(),
+            google_account=google_account if google_account.status()["connected"] else None,
+        )
+        await sio.emit("daily_briefing", {"ok": True, "briefing": briefing.to_dict()}, room=sid)
+    except Exception as exc:
+        logger.exception("get_daily_briefing failed")
+        await sio.emit("daily_briefing", {"ok": False, "error": str(exc)}, room=sid)
+
+
+@sio.event
+async def get_anomalies(sid, data=None):
+    """Return detected anomalies."""
+    payload = data or {}
+    severity = payload.get("severity")
+    try:
+        from cognition.anomaly_detector import get_anomaly_detector
+        detector = get_anomaly_detector()
+        anomalies = detector.get_anomalies(severity=severity)
+        await sio.emit("anomalies_list", {
+            "ok": True, "anomalies": [a.to_dict() for a in anomalies], "stats": detector.stats(),
+        }, room=sid)
+    except Exception as exc:
+        logger.exception("get_anomalies failed")
+        await sio.emit("anomalies_list", {"ok": False, "error": str(exc)}, room=sid)
+
+
+@sio.event
+async def create_automation(sid, data=None):
+    """Create a controlled automation task."""
+    payload = data or {}
+    try:
+        from agents.automation_agent import get_automation_agent
+        agent = get_automation_agent()
+        task = agent.create_task(payload.get("name", ""), payload.get("description", ""), payload.get("steps", []))
+        await sio.emit("automation_created", {"ok": True, "task": task.to_dict()}, room=sid)
+    except Exception as exc:
+        logger.exception("create_automation failed")
+        await sio.emit("automation_created", {"ok": False, "error": str(exc)}, room=sid)
+
+
+@sio.event
+async def refresh_device_token(sid, data=None):
+    """Refresh a paired device's token (token rotation)."""
+    try:
+        device = paired_device_registry.refresh_token(str((data or {}).get("device_token", "")))
+        await sio.emit("device_token_refreshed", {"ok": True, "device": device}, room=sid)
+    except Exception as exc:
+        await sio.emit("device_token_refresh_error", {"ok": False, "error": str(exc)}, room=sid)
+
 
 if __name__ == "__main__":
     # Bind host is configurable so Friday can be reached remotely:

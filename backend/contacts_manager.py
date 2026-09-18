@@ -22,22 +22,32 @@ class ContactsManager:
             with self.contacts_file.open("r", encoding="utf-8") as file:
                 data = json.load(file)
             return data if isinstance(data, dict) else {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load contacts from %s: %s", self.contacts_file, exc)
             return {}
 
     def _save(self, contacts: dict) -> None:
         temporary_file = self.contacts_file.with_suffix(".tmp")
-        with temporary_file.open("w", encoding="utf-8") as file:
-            json.dump(contacts, file, indent=2, ensure_ascii=False)
+        try:
+            with temporary_file.open("w", encoding="utf-8") as file:
+                json.dump(contacts, file, indent=2, ensure_ascii=False)
+        except OSError as exc:
+            logger.error("Could not write contacts to %s: %s", temporary_file, exc)
+            raise
         for attempt in range(3):
             try:
                 temporary_file.replace(self.contacts_file)
                 return
             except PermissionError:
                 if attempt == 2:
-                    self.contacts_file.write_text(json.dumps(contacts, indent=2, ensure_ascii=False), encoding="utf-8")
+                    try:
+                        self.contacts_file.write_text(json.dumps(contacts, indent=2, ensure_ascii=False), encoding="utf-8")
+                    except OSError as exc:
+                        logger.error("Could not save contacts to %s: %s", self.contacts_file, exc)
+                        raise
                     temporary_file.unlink(missing_ok=True)
                 else:
+                    logger.debug("Contacts file busy; retrying rename (attempt %s)", attempt + 1)
                     time.sleep(0.05 * (attempt + 1))
 
     @staticmethod

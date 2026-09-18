@@ -82,12 +82,14 @@ def _read_file(file_path: str) -> tuple[str, str]:
         return "", f"Could not read file: {e}"
 
 
-def _save_file(path: Path, content: str) -> str:
+def _save_file(path: Path, content: str, *, required: bool = False) -> str:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return f"Saved to: {path}"
     except Exception as e:
+        if required:
+            raise
         return f"Could not save: {e}"
 
 
@@ -98,10 +100,13 @@ def _preview(code: str, lines: int = 10) -> str:
     return preview + suffix
 
 
-def _has_error(output: str) -> bool:
-    error_signals = ["error", "exception", "traceback", "syntaxerror",
-                     "nameerror", "typeerror", "stderr", "failed", "crash"]
-    return any(s in output.lower() for s in error_signals)
+def _format_execution(result: dict) -> str:
+    status = "OK" if result["ok"] else "FAILED"
+    parts = [f"Execution {status} (exit code: {result['returncode']})."]
+    for key in ("stdout", "stderr", "error"):
+        if result.get(key):
+            parts.append(f"{key}:\n{result[key]}")
+    return "\n\n".join(parts)
 
 
 def _take_screenshot() -> Path | None:
@@ -191,7 +196,7 @@ Code:"""
     response = model.generate_content(prompt)
     code     = _clean_code(response.text)
     path     = _resolve_save_path(output_path, lang)
-    _save_file(path, code)
+    _save_file(path, code, required=True)
     return code, path
 
 
@@ -215,7 +220,9 @@ Fixed code:"""
     return _clean_code(response.text)
 
 
-def _run_file(path: Path, args: list, timeout: int) -> str:
+def _run_file(path: Path, args: list, timeout: int) -> dict:
+    outcome = {"ok": False, "returncode": None, "timed_out": False,
+               "stdout": "", "stderr": "", "error": ""}
     interpreters = {
         ".py":  [sys.executable],
         ".js":  ["node"],
@@ -227,28 +234,29 @@ def _run_file(path: Path, args: list, timeout: int) -> str:
     }
     interp = interpreters.get(path.suffix.lower())
     if not interp:
-        return f"No interpreter for {path.suffix}."
+        return {**outcome, "error": f"No interpreter for {path.suffix}."}
 
     try:
+        path = path.resolve()
         result = subprocess.run(
             interp + [str(path)] + (args or []),
             capture_output=True, text=True,
             encoding="utf-8", errors="replace",
             timeout=timeout, cwd=str(path.parent)
         )
-        output = result.stdout.strip()
-        error  = result.stderr.strip()
-        parts  = []
-        if output: parts.append(f"Output:\n{output}")
-        if error:  parts.append(f"Stderr:\n{error}")
-        return "\n\n".join(parts) if parts else "Executed with no output."
+        return {**outcome, "ok": result.returncode == 0,
+                "returncode": result.returncode,
+                "stdout": result.stdout, "stderr": result.stderr}
 
-    except subprocess.TimeoutExpired:
-        return f"Timed out after {timeout}s."
-    except FileNotFoundError:
-        return f"Interpreter not found: {interp[0]}."
-    except Exception as e:
-        return f"Execution error: {e}"
+    except subprocess.TimeoutExpired as exc:
+        def text(value):
+            return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else (value or "")
+        return {**outcome, "timed_out": True, "stdout": text(exc.stdout),
+                "stderr": text(exc.stderr), "error": f"Timed out after {timeout}s."}
+    except FileNotFoundError as exc:
+        return {**outcome, "error": f"Interpreter or working directory not found: {interp[0]}: {exc}"}
+    except Exception as exc:
+        return {**outcome, "error": f"Execution error: {exc}"}
 
 
 def _build(description, language, output_path, args, timeout, speak=None, player=None) -> str:
@@ -274,9 +282,10 @@ def _build(description, language, output_path, args, timeout, speak=None, player
         if player:
             player.write_log(f"[Code] Attempt {attempt}...")
 
-        last_output = _run_file(path, args, timeout)
+        execution = _run_file(path, args, timeout)
+        last_output = _format_execution(execution)
 
-        if not _has_error(last_output):
+        if execution["ok"]:
             msg = (
                 f"Build complete, sir. "
                 f"The code is working after {attempt} attempt{'s' if attempt > 1 else ''}. "
@@ -285,13 +294,16 @@ def _build(description, language, output_path, args, timeout, speak=None, player
             if speak: speak(msg)
             return f"{msg}\n\nOutput:\n{last_output}"
 
+        if attempt == MAX_BUILD_ATTEMPTS:
+            break
+
         logger.warning("Error on attempt %d, fixing...", attempt)
         if player:
             player.write_log(f"[Code] Fixing (attempt {attempt})...")
 
         try:
             code = _fix_code(code, last_output, description)
-            _save_file(path, code)
+            _save_file(path, code, required=True)
         except Exception as e:
             msg = f"Could not fix code on attempt {attempt}: {e}"
             if speak: speak(msg)
@@ -389,7 +401,7 @@ def _run_action(file_path, args, timeout, player) -> str:
         return f"File not found: {file_path}"
     if player:
         player.write_log(f"[Code] Running {p.name}...")
-    return _run_file(p, args, timeout)
+    return _format_execution(_run_file(p, args, timeout))
 
 
 def _optimize_action(file_path, code, language, output_path, player) -> str:

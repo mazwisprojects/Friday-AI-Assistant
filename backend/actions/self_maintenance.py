@@ -200,16 +200,64 @@ def capability_audit() -> dict:
     return {"path": str(registry_path), "tool_count": len(registry.get("tools", [])), "module_count": len(registry["backend_modules"])}
 
 
-def record_tool_failure(tool_name: str, error: str) -> None:
-    """Persist small failure counters so future repair runs can prioritize issues."""
+def _read_tool_failures() -> dict:
     try:
-        data = json.loads(_FAILURE_LOG.read_text(encoding="utf-8")) if _FAILURE_LOG.exists() else {}
-        entry = data.setdefault(tool_name, {"count": 0, "last_error": ""})
-        entry["count"] += 1
-        entry["last_error"] = str(error)[:500]
+        data = json.loads(_FAILURE_LOG.read_text(encoding="utf-8"))
+        return {name: entry for name, entry in data.items() if isinstance(entry, dict)} if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def record_tool_failure(tool_name: str, error: str) -> None:
+    """Keep the traceback tail and reopen failures for prioritized review."""
+    try:
+        data = _read_tool_failures()
+        entry = data.setdefault(tool_name, {})
+        count = entry.get("count", 0)
+        entry["count"] = (count if isinstance(count, int) else 0) + 1
+        entry["last_error"] = str(error)[-6000:]
+        entry["resolved"] = False
         _FAILURE_LOG.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except OSError:
         pass
+
+
+def attempt_source_fixes(compile_result: dict) -> list[dict]:
+    """Prioritize logged tools; only restore their validated source snapshots.
+
+    Core source and arbitrary paths from compiler output are never rewritten.
+    Results include unsuccessful attempts so reports do not imply all was fixed.
+    """
+    from tool_builder import ToolBuilder
+
+    failures = _read_tool_failures()
+    builder = ToolBuilder(str(_BACKEND_DIR))
+    results = []
+    output = "\n".join(str(compile_result.get(key, "")) for key in ("stdout", "stderr"))
+    pending = {name: entry for name, entry in failures.items() if not entry.get("resolved")}
+    # Compiler tracebacks may identify tools that have not failed at runtime yet.
+    for name, tool in builder.tools.items():
+        path = tool.get("module_path", "")
+        if path and str((_BACKEND_DIR / path).resolve()) in output:
+            pending.setdefault(name, {"count": 0, "last_error": output})
+    def priority(item):
+        count = item[1].get("count", 0)
+        return -(count if isinstance(count, int) else 0), item[0]
+    for name, entry in sorted(pending.items(), key=priority)[:10]:
+        try:
+            result = builder.debug_and_fix(name, entry.get("last_error", ""))
+        except Exception as error:
+            result = {"ok": False, "fixed": False, "error": str(error)}
+        results.append({"name": name, **result})
+        entry["last_repair"] = result
+        entry["resolved"] = bool(result.get("ok") and result.get("fixed"))
+        failures[name] = entry
+    if results:
+        try:
+            _FAILURE_LOG.write_text(json.dumps(failures, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return results
 
 
 def deprecation_audit() -> list[str]:
@@ -229,9 +277,10 @@ def deprecation_audit() -> list[str]:
 
 
 def self_heal() -> str:
-    """Recover dependency/build failures without modifying source code."""
+    """Restore validated tool source before falling back to dependency repair."""
     checks = [compile_check_backend(), run_backend_tests(), build_frontend()]
-    if all(result.get("ok") for result in checks):
+    pending_failures = any(not entry.get("resolved") for entry in _read_tool_failures().values())
+    if all(result.get("ok") for result in checks) and not pending_failures:
         return "Self-heal: all checks already pass. No repair was needed."
 
     backup_dir = _PROJECT_ROOT / ".friday-recovery" / datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -241,13 +290,29 @@ def self_heal() -> str:
         if source.exists():
             shutil.copy2(source, backup_dir / filename)
 
+    repair_results = attempt_source_fixes(checks[0])
+    source_fixes_applied = [result for result in repair_results if result.get("fixed") and result.get("ok")]
+    unresolved = max(
+        len(repair_results) - len(source_fixes_applied),
+        sum(not entry.get("resolved") for entry in _read_tool_failures().values()),
+    )
+    source_report = f"Source fixes applied: {len(source_fixes_applied)}; unresolved failures: {unresolved}."
+    if source_fixes_applied:
+        checks = [compile_check_backend(), run_backend_tests(), build_frontend()]
+    if all(result.get("ok") for result in checks):
+        status = "needs manual intervention" if unresolved else "recovered"
+        return "\n".join([f"Self-heal: {status}.", source_report,
+                          "All checks pass. Dependency repair skipped."])
+
+    # Dependency repair only when the checks still fail.
     python_install = install_python_dependencies()
     frontend_install = install_frontend_dependencies()
     checks_after = [compile_check_backend(), run_backend_tests(), build_frontend()]
-    status = "recovered" if all(result.get("ok") for result in checks_after) else "needs source-code repair"
+    status = "recovered" if all(result.get("ok") for result in checks_after) and not unresolved else "needs manual intervention"
     return "\n".join([
         f"Self-heal: {status}.",
         f"Recovery backup: {backup_dir}",
+        source_report,
         f"Dependency repair: Python={'OK' if python_install.get('ok') else 'FAILED'}, Frontend={'OK' if frontend_install.get('ok') else 'FAILED'}",
         f"Final checks: compile={'OK' if checks_after[0].get('ok') else 'FAILED'}, tests={'OK' if checks_after[1].get('ok') else 'FAILED'}, build={'OK' if checks_after[2].get('ok') else 'FAILED'}",
     ])

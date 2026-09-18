@@ -73,6 +73,10 @@
         <domain includeSubdomains="true">100.127.0.0</domain>
     </domain-config>
 
-    <!-- Production fallback: Block cleartext -->
-    <base-config cleartextTrafficPermitted="false" />
+    <!--
+        Friday currently uses HTTP inside the encrypted/private Tailscale or
+        home-LAN link. Android must allow this cleartext socket transport;
+        Tailscale supplies encryption for the remote path.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

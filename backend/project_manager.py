@@ -21,7 +21,10 @@ class ProjectManager:
         temp_path = self.projects_dir / "temp"
         if temp_path.exists():
             logger.info("Clearing temp project")
-            shutil.rmtree(temp_path)
+            try:
+                shutil.rmtree(temp_path)
+            except OSError as exc:
+                logger.warning("Could not clear temp project at %s: %s", temp_path, exc)
             
         # Ensure temp project receives fresh creation
         self.create_project("temp")
@@ -72,7 +75,7 @@ class ProjectManager:
     def save_cad_artifact(self, source_path: str, prompt: str):
         """Copies a generated CAD file to the project's 'cad' folder."""
         if not os.path.exists(source_path):
-            print(f"[ProjectManager] [ERR] Source file not found: {source_path}")
+            logger.error("Source file not found: %s", source_path)
             return None
 
         # Create a filename based on timestamp and prompt
@@ -85,10 +88,10 @@ class ProjectManager:
         
         try:
             shutil.copy2(source_path, dest_path)
-            print(f"[ProjectManager] Saved CAD artifact to: {dest_path}")
+            logger.info("Saved CAD artifact to: %s", dest_path)
             return str(dest_path)
-        except Exception as e:
-            print(f"[ProjectManager] [ERR] Failed to save artifact: {e}")
+        except OSError as e:
+            logger.error("Failed to save CAD artifact: %s", e)
             return None
 
     def get_project_context(self, max_file_size: int = 10000) -> str:
@@ -164,6 +167,6 @@ class ProjectManager:
                     continue
             return history
         except Exception as e:
-            print(f"[ProjectManager] [ERR] Failed to read chat history: {e}")
+            logger.warning("Failed to read chat history: %s", e)
             return []
 

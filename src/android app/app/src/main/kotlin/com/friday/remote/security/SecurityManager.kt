@@ -59,6 +59,21 @@ class SecurityManager @Inject constructor(
         sharedPreferences.edit().putString("device_id", deviceId).apply()
     }
 
+    fun getPairingSession(): String = sharedPreferences.getString("pairing_session", "") ?: ""
+
+    fun getPairingSecret(): String = sharedPreferences.getString("pairing_secret", "") ?: ""
+
+    fun setPairingBootstrap(session: String, secret: String) {
+        sharedPreferences.edit()
+            .putString("pairing_session", session)
+            .putString("pairing_secret", secret)
+            .apply()
+    }
+
+    fun clearPairingBootstrap() {
+        sharedPreferences.edit().remove("pairing_session").remove("pairing_secret").apply()
+    }
+
     fun isTlsEnabled(): Boolean {
         val enabled = sharedPreferences.getBoolean("tls_enabled", false)
         Log.d("FridaySecurity", "isTlsEnabled() = $enabled")

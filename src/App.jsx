@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useRef, lazy, Suspense } from 'react';
 import io from 'socket.io-client';
+import { QRCodeSVG } from 'qrcode.react';
 
 import TopAudioBar from './components/TopAudioBar';
 import ChatModule from './components/ChatModule';
 import ToolsModule from './components/ToolsModule';
-import { CalendarDays, CloudSun, FolderOpen, Mail, MapPinned, Mic, MicOff, Search, Settings, ShoppingBag, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock, Youtube } from 'lucide-react';
+import { Activity, Bot, BrainCircuit, CalendarDays, CloudSun, FolderOpen, Mail, MapPinned, Mic, MicOff, Search, Settings, ShoppingBag, X, Minus, Power, Video, VideoOff, Layout, Hand, Printer, Clock, Users, Youtube, QrCode } from 'lucide-react';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 // MemoryPrompt removed - memory is now actively saved to project
 import ConfirmationPopup from './components/ConfirmationPopup';
@@ -41,7 +42,9 @@ const YouTubeWindow = lazy(() => import('./components/YouTubeWindow'));
 const ContactsWindow = lazy(() => import('./components/ContactsWindow'));
 const OpenClawWindow = lazy(() => import('./components/OpenClawWindow'));
 
-const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:8000');
+const socket = io(import.meta.env.VITE_SOCKET_URL || 'http://localhost:8000', {
+    auth: { device_id: 'desktop', device_type: 'desktop' },
+});
 
 // Legacy action windows still access the shared client through window.socket.
 // Keep that compatibility bridge until all windows consume SocketContext directly.
@@ -94,6 +97,10 @@ function App() {
     const [confirmationRequest, setConfirmationRequest] = useState(null); // { id, tool, args }
     const [actionPlan, setActionPlan] = useState(null);
     const [kasaDevices, setKasaDevices] = useState([]);
+    const [pairingQr, setPairingQr] = useState(null);
+    const [pairingError, setPairingError] = useState('');
+    const [runtimeSessions, setRuntimeSessions] = useState([]);
+    const [showRuntimePanel, setShowRuntimePanel] = useState(false);
 
     // Printing workflow status (for top toolbar display)
     const [slicingStatus, setSlicingStatus] = useState({ active: false, percent: 0, message: '' });
@@ -384,6 +391,7 @@ function App() {
             socket.emit('get_settings');
             socket.emit('get_task_cards');
             socket.emit('get_vision_status');
+            socket.emit('get_runtime_sessions');
             if (isVideoOnRef.current) {
                 socket.emit('set_live_video', { enabled: true });
             }
@@ -464,6 +472,19 @@ function App() {
                 setIsCameraFlipped(settings.camera_flipped);
             }
             if (settings?.provider_routing) setProviderRouting(prev => ({ ...prev, ...settings.provider_routing }));
+        });
+        socket.on('device_pairing_qr', (payload) => {
+            setPairingError('');
+            setPairingQr(payload);
+        });
+        socket.on('device_pairing_error', (payload) => {
+            setPairingError(payload?.error || 'Could not create a pairing session.');
+        });
+        socket.on('runtime_sessions', (sessions) => setRuntimeSessions(Array.isArray(sessions) ? sessions : []));
+        socket.on('runtime_session_stopped', () => socket.emit('get_runtime_sessions'));
+        socket.on('conversation_handoff', (handoff) => {
+            const text = `Conversation handoff from ${handoff?.from_device_id || 'another device'}:\n\n${handoff?.summary || ''}`;
+            setMessages(prev => [...prev, { sender: 'System', text, time: new Date().toLocaleTimeString() }]);
         });
 
         socket.on('system_monitor_data', (data) => {
@@ -548,7 +569,11 @@ function App() {
         });
 
         // Handle streaming transcription
+        // Each device's AudioLoop emits transcription to its own Socket.IO room (room=sid),
+        // so the desktop should only receive transcriptions meant for it.
+        // This handler is defensive: it logs the sender so cross-device leaks are visible.
         socket.on('transcription', (data) => {
+            console.log('[transcription] sender=%s text=%s', data?.sender, data?.text?.slice(0, 80));
             setMessages(prev => {
                 const lastMsg = prev[prev.length - 1];
 
@@ -582,6 +607,13 @@ function App() {
         socket.on('confirmation_expired', (data) => {
             setConfirmationRequest((request) => request?.id === data.id ? null : request);
             addMessage('System', `Confirmation expired for ${data.tool}. The action was not executed.`);
+        });
+
+        // Connection restored after a Gemini session reconnect.
+        // Shows a brief system message in the chat so the user knows Friday was away briefly.
+        socket.on('connection_restored', (data) => {
+            console.log('[connection_restored]', data?.message);
+            addMessage('System', data?.message || 'Friday lost connection briefly and is back. The conversation continues.');
         });
 
         // Handle Print Window Request (from CadWindow)
@@ -747,6 +779,11 @@ function App() {
             socket.off('tool_confirmation_request');
             socket.off('confirmation_expired');
             socket.off('kasa_devices');
+            socket.off('device_pairing_qr');
+            socket.off('device_pairing_error');
+            socket.off('runtime_sessions');
+            socket.off('runtime_session_stopped');
+            socket.off('conversation_handoff');
             socket.off('printer_list');
             socket.off('slicing_progress');
             socket.off('print_status_update');
@@ -1527,6 +1564,20 @@ function App() {
         (a, b) => zIndexOrder.indexOf(a.id) - zIndexOrder.indexOf(b.id)
     );
 
+    const requestPairingQr = () => {
+        setPairingError('');
+        socket.emit('request_device_pairing', {
+            ttl_seconds: 300,
+        });
+    };
+
+    const refreshRuntimeSessions = () => socket.emit('get_runtime_sessions');
+    const stopRuntimeSession = (deviceId) => socket.emit('stop_runtime_session', { device_id: deviceId });
+    const handoffConversation = (deviceId) => {
+        const summary = messages.slice(-12).map((message) => `${message.sender}: ${message.text}`).join('\n');
+        socket.emit('handoff_conversation', { target_device_id: deviceId, summary });
+    };
+
 
 
     return (
@@ -1623,6 +1674,16 @@ function App() {
                     <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">TEXT {providerRouting.text_reasoning}</div>
                 </div>
 
+                {/* Telemetry relocated from the left rail */}
+                <div className="flex items-center gap-2 text-[10px] font-mono text-cyan-300/80" style={{ WebkitAppRegion: 'no-drag' }}>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">STATUS {status.toUpperCase()}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">MIC {isMuted ? 'MUTED' : 'LIVE'}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">CAM {isVideoOn ? 'ACTIVE' : 'STANDBY'}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">VISION {visionStatus.enabled ? (visionStatus.source || 'camera').toUpperCase() : 'OFF'}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">SESSION {visionStatus.session_ready ? 'READY' : 'WAITING'}</div>
+                    <div className="border border-cyan-500/20 bg-cyan-500/5 px-2 py-1 rounded">FRAMES {visionStatus.frames_sent || 0}/{visionStatus.frames_received || 0}</div>
+                </div>
+
                 {/* Top Visualizer (User Mic) */}
                 <div className="flex-1 flex justify-center mx-4">
                     <TopAudioBar audioData={micAudioData} />
@@ -1658,23 +1719,28 @@ function App() {
                 <div className="hud-edge-rail hud-edge-rail-left" aria-hidden="true" />
                 <div className="hud-edge-rail hud-edge-rail-right" aria-hidden="true" />
 
-                <aside className="hud-sidebar hud-sidebar-left" aria-label="System telemetry">
-                    <span className="hud-kicker">SYS // TELEMETRY</span>
-                    <div className="hud-sidebar-rule" />
-                    <span><b className={socketConnected ? 'hud-online' : 'hud-offline'}>{socketConnected ? 'ONLINE' : 'OFFLINE'}</b> / {status.toUpperCase()}</span>
-                    <span>MIC // {isMuted ? 'MUTED' : 'LIVE'}</span>
-                    <span>CAM // {isVideoOn ? 'ACTIVE' : 'STANDBY'}</span>
-                    <span>VISION // {visionStatus.enabled ? 'ACCEPTED' : 'OFF'}</span>
-                    <span>SOURCE // {(visionStatus.source || 'camera').toUpperCase()}</span>
-                    <span>SESSION // {visionStatus.session_ready ? 'READY' : 'WAITING'}</span>
-                    <span>FRAMES // {visionStatus.frames_sent || 0}/{visionStatus.frames_received || 0}</span>
-                    <span>CPU // {Math.round(systemStats.cpu_percent || 0)}%</span>
-                    <span>RAM // {Math.round(systemStats.ram_percent || 0)}%</span>
-                    <span>UP // {systemStats.uptime || '0h 0m'}</span>
-                </aside>
+                {/* Left rail kept as decorative edge — its telemetry moved to the topbar */}
+                <aside className="hud-sidebar hud-sidebar-left" aria-hidden="true" />
 
                 <aside className="hud-sidebar hud-sidebar-right" aria-label="Session controls">
                     <span className="hud-kicker">HUD // APPLICATIONS</span>
+                    <div className="hud-sidebar-rule" />
+                    <div className="hud-sidebar-actions hud-sidebar-apps">
+                        <button type="button" onClick={toggleMute}><Mic size={14} /><span>{isMuted ? 'Mic muted' : 'Mic live'}</span></button>
+                        <button type="button" onClick={toggleVideo}><Video size={14} /><span>{isVideoOn ? 'Cam live' : 'Cam off'}</span></button>
+                        <button type="button" onClick={() => setIsHandTrackingEnabled(!isHandTrackingEnabled)}><Hand size={14} /><span>{isHandTrackingEnabled ? 'Hands on' : 'Hands off'}</span></button>
+                        <button type="button" onClick={toggleKasaWindow}><Power size={14} /><span>{showKasaWindow ? 'Lights open' : 'Lights'}</span></button>
+                        <button type="button" onClick={togglePrinterWindow}><Printer size={14} /><span>{showPrinterWindow ? 'Printer on' : 'Printer'}</span></button>
+                        <button type="button" onClick={toggleCadWindow}><Layout size={14} /><span>{showCadWindow ? 'CAD open' : 'CAD'}</span></button>
+                        <button type="button" onClick={toggleBrowserWindow}><Search size={14} /><span>{showBrowserWindow ? 'Web open' : 'Web'}</span></button>
+                        <button type="button" onClick={() => setShowSettings(!showSettings)}><Settings size={14} /><span>{showSettings ? 'Setup' : 'Config'}</span></button>
+                        <button type="button" onClick={requestPairingQr}><QrCode size={14} /><span>Pair phone</span></button>
+                        <button type="button" onClick={() => { refreshRuntimeSessions(); setShowRuntimePanel(true); }}><Activity size={14} /><span>Sessions</span></button>
+                        <button type="button" onClick={() => toggleActionWindowWithPosition('processes')}><Activity size={14} /><span>{actionWindows.processes ? 'Processes live' : 'Processes'}</span></button>
+                        <button type="button" onClick={() => toggleActionWindowWithPosition('contacts')}><Users size={14} /><span>{actionWindows.contacts ? 'Contacts live' : 'Contacts'}</span></button>
+                        <button type="button" onClick={() => toggleActionWindowWithPosition('openclaw')}><Bot size={14} /><span>{actionWindows.openclaw ? 'OpenClaw live' : 'OpenClaw'}</span></button>
+                        <button type="button" onClick={() => toggleActionWindowWithPosition('memory')}><BrainCircuit size={14} /><span>{actionWindows.memory ? 'Memory live' : 'Memory'}</span></button>
+                    </div>
                     <div className="hud-sidebar-rule" />
                     <div className="hud-sidebar-actions">
                         <button type="button" onClick={() => openExternalApp('https://www.google.com/search?q=weather')}><CloudSun size={14} /><span>Google Weather</span></button>
@@ -1774,6 +1840,58 @@ function App() {
                     </ErrorBoundary>
                 )}
 
+                {pairingQr && (
+                    <div className="fixed inset-0 z-[110] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+                        <div className="w-full max-w-sm border border-cyan-400/40 bg-[#031218] p-5 text-cyan-100 shadow-[0_0_40px_rgba(34,211,238,0.2)]">
+                            <div className="mb-4 flex items-center justify-between border-b border-cyan-500/20 pb-3">
+                                <div>
+                                    <div className="text-xs uppercase tracking-[0.2em] text-cyan-400">Companion link</div>
+                                    <div className="mt-1 text-[10px] text-cyan-100/60">Scan once from the Friday mobile app</div>
+                                </div>
+                                <button type="button" onClick={() => setPairingQr(null)} className="text-cyan-400 hover:text-white" aria-label="Close pairing dialog"><X size={18} /></button>
+                            </div>
+                            <div className="flex justify-center bg-white p-4">
+                                <QRCodeSVG value={JSON.stringify(pairingQr)} size={230} level="M" includeMargin />
+                            </div>
+                            <div className="mt-4 space-y-1 text-[10px] text-cyan-100/70">
+                                <div>SERVER // {pairingQr.server_url}</div>
+                                <div>EXPIRES // {new Date(pairingQr.expires_at * 1000).toLocaleTimeString()}</div>
+                                <div className="text-cyan-300">The QR secret is one-use and expires automatically.</div>
+                                {pairingError && <div className="text-red-300">{pairingError}</div>}
+                            </div>
+                            <button type="button" onClick={requestPairingQr} className="mt-4 w-full border border-cyan-500/40 px-3 py-2 text-[10px] uppercase tracking-widest text-cyan-300 hover:bg-cyan-500/10">Regenerate QR</button>
+                        </div>
+                    </div>
+                )}
+
+                {showRuntimePanel && (
+                    <div className="fixed inset-0 z-[105] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+                        <div className="w-full max-w-md border border-cyan-400/40 bg-[#031218] p-5 text-cyan-100 shadow-[0_0_40px_rgba(34,211,238,0.2)]">
+                            <div className="mb-4 flex items-center justify-between border-b border-cyan-500/20 pb-3">
+                                <div>
+                                    <div className="text-xs uppercase tracking-[0.2em] text-cyan-400">Runtime sessions</div>
+                                    <div className="mt-1 text-[10px] text-cyan-100/60">Private live sessions by device</div>
+                                </div>
+                                <button type="button" onClick={() => setShowRuntimePanel(false)} className="text-cyan-400 hover:text-white" aria-label="Close runtime sessions"><X size={18} /></button>
+                            </div>
+                            <div className="space-y-2">
+                                {runtimeSessions.length === 0 && <div className="py-4 text-center text-[10px] text-cyan-100/50">No active runtimes</div>}
+                                {runtimeSessions.map((session) => (
+                                    <div key={session.device_id} className="flex items-center justify-between border border-cyan-500/20 bg-cyan-500/5 px-3 py-2">
+                                        <div className="min-w-0">
+                                            <div className="text-xs uppercase tracking-wider text-cyan-200">{session.device_id}</div>
+                                            <div className="text-[10px] text-cyan-100/60">{session.device_type} // {session.connected ? 'connected' : 'offline'} // {session.session_ready ? 'ready' : 'starting'}</div>
+                                        </div>
+                                        <button type="button" onClick={() => stopRuntimeSession(session.device_id)} className="border border-red-400/40 px-2 py-1 text-[9px] uppercase tracking-wider text-red-300 hover:bg-red-500/10">Stop</button>
+                                        <button type="button" onClick={() => handoffConversation(session.device_id)} className="ml-1 border border-cyan-400/40 px-2 py-1 text-[9px] uppercase tracking-wider text-cyan-300 hover:bg-cyan-500/10">Send chat</button>
+                                    </div>
+                                ))}
+                            </div>
+                            <button type="button" onClick={refreshRuntimeSessions} className="mt-4 w-full border border-cyan-500/40 px-3 py-2 text-[10px] uppercase tracking-widest text-cyan-300 hover:bg-cyan-500/10">Refresh</button>
+                        </div>
+                    </div>
+                )}
+
                 {/* CAD Window Overlay - Moved outside of Video so it can show independently */}
                 {showCadWindow && (
                     <ErrorBoundary>
@@ -1863,15 +1981,17 @@ function App() {
                 {/* Chat Module */}
                 {showActionMenu && (
                     <div className="absolute bottom-28 left-1/2 z-[80] grid grid-cols-2 gap-2 -translate-x-1/2 rounded-xl border border-cyan-500/30 bg-black/80 p-3 shadow-2xl backdrop-blur-xl">
-                        {actionWindowDefinitions.map(({ id }) => (
-                            <button
-                                key={id}
-                                onClick={() => toggleActionWindowWithPosition(id)}
-                                className={`rounded border px-3 py-2 text-left text-[10px] uppercase tracking-wider transition-colors ${actionWindows[id] ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200' : 'border-cyan-900/60 text-cyan-500 hover:border-cyan-500 hover:text-cyan-200'}`}
-                            >
-                                {id === 'files' ? 'File Manager' : id}
-                            </button>
-                        ))}
+                        {actionWindowDefinitions
+                            .filter(({ id }) => !['processes', 'contacts', 'openclaw', 'memory'].includes(id))
+                            .map(({ id }) => (
+                                <button
+                                    key={id}
+                                    onClick={() => toggleActionWindowWithPosition(id)}
+                                    className={`rounded border px-3 py-2 text-left text-[10px] uppercase tracking-wider transition-colors ${actionWindows[id] ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200' : 'border-cyan-900/60 text-cyan-500 hover:border-cyan-500 hover:text-cyan-200'}`}
+                                >
+                                    {id === 'files' ? 'File Manager' : id}
+                                </button>
+                            ))}
                     </div>
                 )}
 

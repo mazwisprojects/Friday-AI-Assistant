@@ -39,13 +39,17 @@ DEFAULT_CHAINS = {
 
 def _load_health() -> dict:
     try:
-        return json.loads(_STATE.read_text(encoding="utf-8"))
+        data = json.loads(_STATE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
 def _save_health(health: dict) -> None:
-    _STATE.parent.mkdir(parents=True, exist_ok=True)
-    _STATE.write_text(json.dumps(health, indent=1), encoding="utf-8")
+    try:
+        _STATE.parent.mkdir(parents=True, exist_ok=True)
+        _STATE.write_text(json.dumps(health, indent=1), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("Could not persist model health state to %s: %s", _STATE, exc)
 
 def chains() -> dict:
     """Configured chains: settings.json['model_routing'] overrides defaults (deduped, non-empty)."""
@@ -55,8 +59,8 @@ def chains() -> dict:
         for tier, models in raw.items():
             if isinstance(models, list) and models:
                 merged[tier] = [m for m in dict.fromkeys(str(x) for x in models) if m]
-    except (OSError, json.JSONDecodeError):
-        pass
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.debug("Could not read model_routing overrides from settings: %s", exc)
     return merged
 
 def is_model_error(error_text: str) -> bool:

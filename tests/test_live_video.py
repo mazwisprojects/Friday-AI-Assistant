@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from friday import AudioLoop, VIDEO_SEND_INTERVAL
+from friday import AUDIO_MIME_TYPE, AudioLoop, VIDEO_SEND_INTERVAL
 
 
 @pytest.fixture
@@ -33,6 +33,10 @@ def test_live_video_disabled_by_default(audio_loop):
     assert audio_loop._latest_image_payload is None
 
 
+def test_audio_mime_type_declares_capture_sample_rate():
+    assert AUDIO_MIME_TYPE == "audio/pcm;rate=16000"
+
+
 def test_set_live_video_toggles_flag(audio_loop):
     audio_loop.set_live_video(True)
     assert audio_loop.live_video_enabled is True
@@ -41,14 +45,32 @@ def test_set_live_video_toggles_flag(audio_loop):
     assert audio_loop.live_video_enabled is False
 
 
+def test_vision_status_reports_runtime_diagnostics(audio_loop):
+    status = audio_loop.vision_status()
+
+    assert status["enabled"] is False
+    assert status["session_ready"] is False
+    assert status["frames_received"] == 0
+    assert status["frames_sent"] == 0
+
+
 def test_set_live_video_disabled_resets_dedup_state(audio_loop):
     audio_loop.live_video_enabled = True
     audio_loop._last_sent_image_data = "abc123"
+    audio_loop._latest_image_payload = {"mime_type": "image/jpeg", "data": "stale"}
 
     audio_loop.set_live_video(False)
 
     assert audio_loop.live_video_enabled is False
     assert audio_loop._last_sent_image_data is None
+    assert audio_loop._latest_image_payload is None
+
+
+@pytest.mark.asyncio
+async def test_send_frame_ignores_frames_while_disabled(audio_loop):
+    await audio_loop.send_frame(b"should-not-be-retained")
+
+    assert audio_loop._latest_image_payload is None
 
 
 # ── _should_send_video_frame ─────────────────────────────────────────────

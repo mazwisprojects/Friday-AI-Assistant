@@ -7,6 +7,7 @@ without restarting the backend.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -14,6 +15,8 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class CapabilityEngine:
@@ -26,10 +29,15 @@ class CapabilityEngine:
         self._log_lock = threading.Lock()
 
     def refresh_tools(self):
-        self.tool_builder.tools.clear()
-        self.tool_builder.load()
-        self.tool_builder.discover_modules()
-        decs = self.tool_builder.declarations()
+        try:
+            self.tool_builder.tools.clear()
+            self.tool_builder.load()
+            self.tool_builder.discover_modules()
+            decs = self.tool_builder.declarations()
+        except Exception:
+            logger.exception("Tool refresh failed")
+            raise
+        logger.info("Refreshed %d tool(s)", len(decs))
         return {"tools": list(self.tool_builder.tools.keys()), "declarations": decs, "count": len(decs)}
 
     def refresh_agents(self):
@@ -62,7 +70,11 @@ class CapabilityEngine:
             if lang in ("cmd", "batch", "bat", "shell"):
                 return self._run_cmd(code, arguments, timeout)
             return {"ok": False, "error": f"Unsupported language {lang}. Use: python, powershell, node, cmd"}
+        except subprocess.TimeoutExpired:
+            logger.error("run_script timed out after %ss (language=%s)", timeout, lang)
+            return {"ok": False, "error": f"Script timed out after {timeout}s"}
         except Exception as e:
+            logger.exception("run_script failed (language=%s)", lang)
             return {"ok": False, "error": str(e)}
 
     def _run_python(self, code, arguments, timeout):
@@ -87,6 +99,7 @@ class CapabilityEngine:
             try:
                 parsed = json.loads(parts[1].strip())
             except json.JSONDecodeError:
+                logger.debug("Script output was not JSON; returning raw text")
                 parsed = parts[1].strip()
         return {"ok": result.returncode == 0, "stdout": output, "stderr": result.stderr, "result": parsed, "returncode": result.returncode, "language": language}
 
@@ -136,7 +149,8 @@ class CapabilityEngine:
         try:
             from actions import time_guard
             snapshot = time_guard.guard(str(module_path), "write_action") if module_path.exists() else None
-        except Exception:
+        except Exception as exc:
+            logger.warning("Snapshot guard failed for %s; continuing without snapshot: %s", module_path, exc)
             snapshot = None
         module_path.write_text(f'"""Auto-generated action module: {action_name}."""\n\n' + code.rstrip() + "\n", encoding="utf-8")
         return {"ok": True, "module": action_name, "path": str(module_path), "snapshot": snapshot}

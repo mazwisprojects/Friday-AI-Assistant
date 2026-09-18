@@ -1,11 +1,14 @@
 import os
 import sys
+import logging
 import platform
 import json
 from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 
 MAIN_GEMINI_MODEL = os.getenv(
@@ -50,13 +53,15 @@ def get_config_path() -> Path:
 
 def load_config() -> dict:
     """Load configuration from api_keys.json file."""
+    config_path = get_config_path()
+    if not config_path.exists():
+        return {}
     try:
-        config_path = get_config_path()
-        if config_path.exists():
-            return json.loads(config_path.read_text(encoding="utf-8"))
-    except Exception:
-        pass
-    return {}
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not load config from %s: %s", config_path, exc)
+        return {}
 
 
 def get_os_system() -> str:

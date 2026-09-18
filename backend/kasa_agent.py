@@ -1,5 +1,10 @@
 import asyncio
+import logging
+
 from kasa import Discover, SmartDevice, SmartBulb, SmartPlug
+
+logger = logging.getLogger(__name__)
+
 
 class KasaAgent:
     def __init__(self, known_devices=None):
@@ -9,7 +14,7 @@ class KasaAgent:
     async def initialize(self):
         """Initializes devices from the saved configuration."""
         if self.known_devices_config:
-            print(f"[KasaAgent] Initializing {len(self.known_devices_config)} known devices...")
+            logger.info("Initializing %s known Kasa device(s)", len(self.known_devices_config))
             tasks = []
             for d in self.known_devices_config:
                 if not d: continue
@@ -32,18 +37,22 @@ class KasaAgent:
             if dev:
                 await dev.update()
                 self.devices[ip] = dev
-                print(f"[KasaAgent] Loaded known device: {dev.alias} ({ip})")
+                logger.info("Loaded known Kasa device: %s (%s)", dev.alias, ip)
             else:
-                 print(f"[KasaAgent] Could not connect to known device at {ip}")
-        except Exception as e:
-            print(f"[KasaAgent] Error loading known device {ip}: {e}")
+                logger.warning("Could not connect to known Kasa device at %s", ip)
+        except Exception as exc:
+            logger.warning("Error loading known Kasa device %s: %s", ip, exc)
 
     async def discover_devices(self):
         """Discovers devices on the local network."""
-        print("Discovering Kasa devices (Broadcast)...")
+        logger.info("Discovering Kasa devices (broadcast)...")
         # Use explicit broadcast and slightly longer timeout for Windows reliability
-        found_devices = await Discover.discover(target="255.255.255.255", timeout=5)
-        print(f"[KasaAgent] Raw discovery found {len(found_devices)} devices.")
+        try:
+            found_devices = await Discover.discover(target="255.255.255.255", timeout=5)
+        except Exception as exc:
+            logger.error("Kasa broadcast discovery failed: %s", exc)
+            found_devices = {}
+        logger.info("Raw discovery found %s device(s)", len(found_devices))
         
         # We don't wipe self.devices completely, we merge/update
         # But if a device is NOT found, we might want to keep it if it was known?
@@ -51,7 +60,11 @@ class KasaAgent:
         # This implies we might want to mark them offline.
         
         for ip, dev in found_devices.items():
-            await dev.update()
+            try:
+                await dev.update()
+            except Exception as exc:
+                logger.warning("Could not refresh discovered Kasa device %s: %s", ip, exc)
+                continue
             self.devices[ip] = dev
             
         device_list = []
@@ -80,7 +93,7 @@ class KasaAgent:
             }
             device_list.append(device_info)
             
-        print(f"Total Kasa devices (found + cached): {len(device_list)}")
+        logger.info("Total Kasa devices (found + cached): %s", len(device_list))
         return device_list
 
     def get_device_by_alias(self, alias):
@@ -131,22 +144,25 @@ class KasaAgent:
             try:
                 await dev.turn_on()
                 await dev.update()
+                logger.info("Turned on Kasa device %s", target)
                 return True
-            except Exception as e:
-                print(f"Error turning on {target}: {e}")
+            except Exception as exc:
+                logger.error("Error turning on %s: %s", target, exc)
                 return False
         
         # Fallback: Try to discover single if it looks like an IP
         if target.count(".") == 3:
-             try:
+            try:
                 dev = await Discover.discover_single(target)
                 if dev:
                     self.devices[target] = dev
                     await dev.turn_on()
                     await dev.update()
+                    logger.info("Turned on Kasa device %s (discovered on demand)", target)
                     return True
-             except Exception:
-                 pass
+            except Exception as exc:
+                logger.warning("On-demand Kasa discovery failed for %s: %s", target, exc)
+        logger.warning("Kasa device not found for turn_on: %s", target)
         return False
 
     async def turn_off(self, target):
@@ -156,21 +172,24 @@ class KasaAgent:
             try:
                 await dev.turn_off()
                 await dev.update()
+                logger.info("Turned off Kasa device %s", target)
                 return True
-            except Exception as e:
-                print(f"Error turning off {target}: {e}")
+            except Exception as exc:
+                logger.error("Error turning off %s: %s", target, exc)
                 return False
         
         if target.count(".") == 3:
-             try:
+            try:
                 dev = await Discover.discover_single(target)
                 if dev:
                     self.devices[target] = dev
                     await dev.turn_off()
                     await dev.update()
+                    logger.info("Turned off Kasa device %s (discovered on demand)", target)
                     return True
-             except Exception:
-                 pass
+            except Exception as exc:
+                logger.warning("On-demand Kasa discovery failed for %s: %s", target, exc)
+        logger.warning("Kasa device not found for turn_off: %s", target)
         return False
 
     async def set_brightness(self, target, brightness):
@@ -180,15 +199,19 @@ class KasaAgent:
             try:
                 await dev.set_brightness(int(brightness))
                 await dev.update()
+                logger.info("Set brightness for %s to %s", target, brightness)
                 return True
-            except Exception as e:
-                 print(f"Error setting brightness for {target}: {e}")
+            except Exception as exc:
+                logger.error("Error setting brightness for %s: %s", target, exc)
+        else:
+            logger.warning("Kasa device %s does not support brightness", target)
         return False
 
     async def set_color(self, target, color_input):
         """Sets color by name or direct HSV tuple."""
         dev = self._resolve_device(target)
         if not dev or not dev.is_color:
+            logger.warning("Kasa device %s does not support color", target)
             return False
 
         hsv = None
@@ -202,9 +225,12 @@ class KasaAgent:
                 # Kasa expects Hue (0-360), Sat (0-100), Val (0-100)
                 await dev.set_hsv(int(hsv[0]), int(hsv[1]), int(hsv[2]))
                 await dev.update()
+                logger.info("Set color for %s to %s", target, color_input)
                 return True
-            except Exception as e:
-                 print(f"Error setting color for {target}: {e}")
+            except Exception as exc:
+                logger.error("Error setting color for %s: %s", target, exc)
+        else:
+            logger.warning("Unrecognised color value for %s: %r", target, color_input)
         return False
 
 # Standalone test
@@ -212,7 +238,7 @@ if __name__ == "__main__":
     async def main():
         agent = KasaAgent()
         await agent.discover_devices()
-        print("Devices:", agent.devices)
+        logger.info("Devices: %s", agent.devices)
         
         # Example Test
         # await agent.turn_on("Bedroom Light")

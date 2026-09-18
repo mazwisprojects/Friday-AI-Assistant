@@ -23,13 +23,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.navigation.NavHostController
 import com.friday.remote.network.FridaySocketManager
 import com.friday.remote.security.SecurityManager
 import com.friday.remote.ui.theme.FridayAccent
 import com.friday.remote.ui.theme.FridayGrey
 
 @Composable
-fun SettingsScreen(socketManager: FridaySocketManager, securityManager: SecurityManager) {
+fun SettingsScreen(
+    socketManager: FridaySocketManager,
+    securityManager: SecurityManager,
+    navController: NavHostController
+) {
     var url by remember { mutableStateOf(securityManager.getServerUrl()) }
     var token by remember { mutableStateOf(securityManager.getToken()) }
     var tls by remember { mutableStateOf(securityManager.isTlsEnabled()) }

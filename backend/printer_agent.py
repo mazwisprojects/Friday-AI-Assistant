@@ -346,10 +346,10 @@ class PrinterAgent:
                     path = result.stdout.strip().split('\n')[0]
                     print(f"[PRINTER] Found Slicer via PATH: {path}")
                     return path
-             except Exception:
-                pass
+             except Exception as exc:
+                logger.debug("Could not locate slicer %s on PATH: %s", binary, exc)
         
-        print("[PRINTER] Warning: No Slicer (Orca/Prusa) found. Slicing will fail.")
+        logger.warning("No Slicer (Orca/Prusa) found. Slicing will fail.")
         return None
 
     async def discover_printers(self, timeout: float = 5.0) -> List[Dict]:
@@ -442,9 +442,9 @@ class PrinterAgent:
                              print(f"[PRINTER DEBUG] Found OCTOPRINT at {host}:{port}")
                              return PrinterType.OCTOPRINT
                 except asyncio.TimeoutError:
-                     pass
-                except Exception:
-                     pass
+                     logger.debug("OctoPrint probe timed out for %s:%s", host, port)
+                except Exception as exc:
+                     logger.debug("OctoPrint probe failed for %s:%s: %s", host, port, exc)
                      
                 # Fallback: Check root for identification
                 try:

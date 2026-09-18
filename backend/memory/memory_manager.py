@@ -5,8 +5,11 @@ long-term MemoryManager (backend/memory_manager.py), since these modules need a
 mutable dict store (monitors, identity) rather than an append-only transcript log.
 """
 import json
+import logging
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MEMORY_PATH = _BASE_DIR / "long_term_memory" / "legacy_memory.json"
@@ -18,8 +21,10 @@ def load_memory() -> dict:
         return {}
     try:
         with _lock:
-            return json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
-    except Exception:
+            data = json.loads(MEMORY_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not load legacy memory from %s: %s", MEMORY_PATH, exc)
         return {}
 
 

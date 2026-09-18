@@ -23,6 +23,7 @@ class GoogleHomeBridge:
     def __init__(self, google_account: Any):
         self.google_account = google_account
         self.enterprise_id = os.getenv("GOOGLE_HOME_ENTERPRISE_ID", "default")
+        self.last_error = ""
 
     @property
     def available(self) -> bool:
@@ -43,12 +44,18 @@ class GoogleHomeBridge:
 
     def list_devices(self) -> list[dict[str, Any]]:
         """List Google Home / Smart Home devices visible to the connected account."""
-        service = self._smart_home_service()
-        parent = f"enterprises/{self.enterprise_id}"
-        result = service.enterprises().devices().list(parent=parent).execute()
-        devices = result.get("devices", [])
-        logger.info("Google Home discovered %s devices", len(devices))
-        return devices
+        try:
+            service = self._smart_home_service()
+            parent = f"enterprises/{self.enterprise_id}"
+            result = service.enterprises().devices().list(parent=parent).execute()
+            devices = result.get("devices", [])
+            self.last_error = ""
+            logger.info("Google Home discovered %s devices", len(devices))
+            return devices
+        except Exception as exc:  # API permissions/configuration must not break /status.
+            self.last_error = str(exc)
+            logger.warning("Google Home device listing unavailable: %s", exc)
+            return []
 
     def get_device(self, device_id: str) -> dict[str, Any]:
         """Fetch a single device by ID."""
@@ -90,9 +97,12 @@ class GoogleHomeBridge:
         return service.devices().reportStateAndNotification(body=payload).execute()
 
     def status(self) -> dict[str, Any]:
+        devices = self.list_devices() if self.available else []
         return {
             "connected": self.available,
             "enterprise_id": self.enterprise_id,
-            "device_count": len(self.list_devices()) if self.available else 0,
+            "device_count": len(devices),
             "provider": "google_home",
+            "ready": self.available and not self.last_error,
+            "error": self.last_error,
         }

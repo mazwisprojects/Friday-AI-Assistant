@@ -47,6 +47,7 @@ fun CameraScreen(socketManager: FridaySocketManager) {
     var isAuthenticated by remember { mutableStateOf(false) }
     var handTrackingStatus by remember { mutableStateOf("Hand tracking disabled") }
     var useFrontCamera by remember { mutableStateOf(false) }
+    val visionStatus by socketManager.visionStatus.collectAsState()
 
     // Biometric Authentication
     val biometricManager = BiometricManager.from(context)
@@ -207,6 +208,31 @@ fun CameraScreen(socketManager: FridaySocketManager) {
                 }
             }
 
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                    .padding(8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                FilterChip(
+                    selected = visionStatus.source == "camera",
+                    onClick = { socketManager.setVisionSource("camera") },
+                    label = { Text("Camera") }
+                )
+                FilterChip(
+                    selected = visionStatus.source == "screen",
+                    onClick = { socketManager.setVisionSource("screen") },
+                    label = { Text("Screen") }
+                )
+                Text(
+                    text = if (visionStatus.sessionReady) "LIVE" else "WAITING",
+                    color = if (visionStatus.sessionReady) Color(0xFF4CAF50) else Color(0xFFFFB74D),
+                    fontSize = 11.sp
+                )
+            }
+
             if (isHandTrackingEnabled) {
                 Card(
                     modifier = Modifier
@@ -221,6 +247,20 @@ fun CameraScreen(socketManager: FridaySocketManager) {
                         modifier = Modifier.padding(8.dp)
                     )
                 }
+            }
+
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                colors = CardDefaults.cardColors(containerColor = FridayGrey)
+            ) {
+                Text(
+                    text = "Vision ${if (visionStatus.enabled) "accepted" else "off"} · frames ${visionStatus.framesSent}/${visionStatus.framesReceived}",
+                    color = FridayAccent,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(8.dp)
+                )
             }
         }
 

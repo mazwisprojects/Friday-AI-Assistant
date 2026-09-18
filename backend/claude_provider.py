@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,23 +31,33 @@ class ClaudeProvider:
         if not self.available:
             raise RuntimeError("CLAUDE_API_KEY is not configured")
         prompt = contents if isinstance(contents, str) else "\n\n".join(str(item) for item in contents)
-        response = requests.post(
-            self.API_URL,
-            headers={
-                "x-api-key": self.api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": self.model,
-                "max_tokens": max(256, min(max_tokens, 200000)),
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=180,
-        )
-        response.raise_for_status()
-        data = response.json()
+        try:
+            response = requests.post(
+                self.API_URL,
+                headers={
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": self.model,
+                    "max_tokens": max(256, min(max_tokens, 200000)),
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=180,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            logger.error("Claude request failed (model=%s): %s", self.model, exc)
+            raise RuntimeError(f"Claude request failed: {exc}") from exc
+        try:
+            data = response.json()
+        except ValueError as exc:
+            logger.error("Claude returned a non-JSON response (model=%s): %s", self.model, exc)
+            raise RuntimeError("Claude returned an invalid response") from exc
         text = "".join(block.get("text", "") for block in data.get("content", []) if block.get("type") == "text")
+        if not text:
+            logger.warning("Claude returned an empty completion (model=%s)", self.model)
         return TextResponse(text=text)
 
 

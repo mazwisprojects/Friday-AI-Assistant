@@ -57,8 +57,9 @@ class CapabilityLearning:
                 try:
                     self.plugin_manager.dispatcher.quarantine_agent(name)
                     self._quarantined.add(name)
+                    logger.warning("Quarantined agent %s after %s failures", name, count)
                 except AttributeError:
-                    pass
+                    logger.debug("Dispatcher cannot quarantine agents; skipping %s", name)
 
     def _quarantine_security_findings(self, findings: list[dict]) -> None:
         for finding in findings:
@@ -67,8 +68,9 @@ class CapabilityLearning:
                 try:
                     self.plugin_manager.dispatcher.quarantine_agent(path.stem)
                     self._quarantined.add(path.stem)
+                    logger.warning("Quarantined agent %s after security finding", path.stem)
                 except AttributeError:
-                    pass
+                    logger.debug("Dispatcher cannot quarantine agents; skipping %s", path.stem)
 
     def security_scan(self) -> list[dict]:
         findings = []
@@ -116,14 +118,18 @@ class CapabilityLearning:
             data = json.loads(self.accepted_path.read_text(encoding="utf-8"))
             if isinstance(data, list) and all(isinstance(item, str) for item in data):
                 return set(data)
-        except (OSError, json.JSONDecodeError):
-            pass
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load accepted findings from %s: %s", self.accepted_path, exc)
         return set()
 
     def _save_accepted(self) -> None:
-        self.accepted_path.write_text(
-            json.dumps(sorted(self._accepted), indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        try:
+            self.accepted_path.write_text(
+                json.dumps(sorted(self._accepted), indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        except OSError as exc:
+            logger.error("Could not persist accepted findings to %s: %s", self.accepted_path, exc)
+            raise
 
     def mark_pattern_status(self, name: str, status: str) -> None:
         """Record where a learned pattern stands in the governance lifecycle.
@@ -157,14 +163,14 @@ class CapabilityLearning:
                 if entry.get("status") in {"done", "completed"}:
                     try:
                         self.plugin_manager.score(kind, name, True)
-                    except ValueError:
-                        pass
+                    except ValueError as exc:
+                        logger.debug("Could not record success score for %s: %s", name, exc)
                     self.ledger.mark_scored(entry["id"])
                 elif entry.get("status") == "failed":
                     try:
                         self.plugin_manager.score(kind, name, False)
-                    except ValueError:
-                        pass
+                    except ValueError as exc:
+                        logger.debug("Could not record failure score for %s: %s", name, exc)
                     self.ledger.mark_scored(entry["id"])
 
     def _load_proposals(self) -> list[dict]:
@@ -173,8 +179,13 @@ class CapabilityLearning:
         try:
             data = json.loads(self.proposals_path.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else []
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load capability proposals from %s: %s", self.proposals_path, exc)
             return []
 
     def _save_proposals(self, proposals: list[dict]) -> None:
-        self.proposals_path.write_text(json.dumps(proposals[-200:], indent=2, ensure_ascii=False), encoding="utf-8")
+        try:
+            self.proposals_path.write_text(json.dumps(proposals[-200:], indent=2, ensure_ascii=False), encoding="utf-8")
+        except OSError as exc:
+            logger.error("Could not persist capability proposals to %s: %s", self.proposals_path, exc)
+            raise

@@ -194,6 +194,14 @@ class FridaySocketManager @Inject constructor(
         val network: String?
     )
 
+    data class RuntimeSession(
+        val deviceId: String,
+        val deviceType: String,
+        val running: Boolean,
+        val sessionReady: Boolean,
+        val connected: Boolean
+    )
+
     data class Printer(
         val id: String,
         val name: String,
@@ -243,6 +251,7 @@ class FridaySocketManager @Inject constructor(
     private var socket: Socket? = null
     private var monitorJob: Job? = null
     private var heartbeatJob: Job? = null
+    private var pendingBootstrap: JSONObject? = null
     private var audioSink: AudioSink? = null
     private val _outbox = ArrayList<QueuedEvent>()
 
@@ -291,6 +300,9 @@ class FridaySocketManager @Inject constructor(
     private val _pairedDevice = MutableStateFlow<PairedDevice?>(null)
     val pairedDevice: StateFlow<PairedDevice?> = _pairedDevice
 
+    private val _runtimeSessions = MutableStateFlow<List<RuntimeSession>>(emptyList())
+    val runtimeSessions: StateFlow<List<RuntimeSession>> = _runtimeSessions
+
     private val _pairingError = MutableStateFlow("")
     val pairingError: StateFlow<String> = _pairingError
 
@@ -334,8 +346,17 @@ class FridaySocketManager @Inject constructor(
                 reconnectionDelayMax = 30000
                 reconnectionAttempts = Int.MAX_VALUE
                 timeout = 20000
-                transports = arrayOf("websocket", "polling")
-                auth = mapOf("token" to securityManager.getToken())
+                // Start with polling on Windows LANs; Engine.IO can upgrade to
+                // WebSocket after the authenticated connection is established.
+                transports = arrayOf("polling", "websocket")
+                auth = mapOf(
+                    "token" to securityManager.getToken(),
+                    "device_id" to securityManager.getDeviceId(),
+                    "device_type" to "android",
+                    "device_token" to securityManager.getDeviceToken(),
+                    "pairing_session" to securityManager.getPairingSession(),
+                    "pairing_secret" to securityManager.getPairingSecret()
+                )
             }
             
             android.util.Log.d("FridaySocket", "Creating IO.socket...")
@@ -351,6 +372,10 @@ class FridaySocketManager @Inject constructor(
                     AuthenticationState.AUTHENTICATED
                 }
                 flushOutbox()
+                pendingBootstrap?.let { bootstrap ->
+                    rawEmit("pair_device_bootstrap", bootstrap)
+                    pendingBootstrap = null
+                }
                 requestSystemMonitor()
                 requestTaskCards()
                 requestAutonomyStatus()
@@ -359,7 +384,9 @@ class FridaySocketManager @Inject constructor(
                 requestPrinters()
                 requestGoogleAccountStatus()
                 requestPairedDevices()
+                requestRuntimeSessions()
                 requestVisionStatus()
+                emit("start_audio", JSONObject())
                 startMonitor()
             }
             
@@ -382,6 +409,7 @@ class FridaySocketManager @Inject constructor(
                 if (message.contains("unauthorized") || message.contains("authentication") || message.contains("token")) {
                     _authenticationState.value = AuthenticationState.REJECTED
                 }
+                _pairingError.value = "Could not connect to Friday: ${args?.firstOrNull() ?: "connection error"}"
                 _connectionState.value = ConnectionState.ERROR
             }
             
@@ -402,12 +430,21 @@ class FridaySocketManager @Inject constructor(
                 requestPrinters()
                 requestGoogleAccountStatus()
                 requestPairedDevices()
+                requestRuntimeSessions()
                 requestVisionStatus()
                 startMonitor()
             }
             
             socket?.on("reconnect_error") { args ->
-                android.util.Log.e("FridaySocket", "❌ Reconnect error: ${args?.contentToString()}")
+                android.util.Log.e("FridaySocket", " Reconnect error: ${args?.contentToString()}")
+            }
+            socket?.on("session_reconnected") { args ->
+                android.util.Log.i("FridaySocket", " Session reconnected - existing audio session is alive")
+            }
+            socket?.on("connection_restored") { args ->
+                val msg = args?.firstOrNull()?.toString() ?: "Friday is back online."
+                android.util.Log.i("FridaySocket", " Connection restored: $msg")
+                addMessage(msg, false, true)
             }
             
             socket?.on("reconnect_failed") {
@@ -438,6 +475,9 @@ class FridaySocketManager @Inject constructor(
             socket?.on("device_paired") { args -> onDevicePaired(args) }
             socket?.on("device_pairing_error") { args -> onDevicePairingError(args) }
             socket?.on("device_heartbeat_ack") { args -> onDeviceHeartbeat(args) }
+            socket?.on("runtime_sessions") { args -> onRuntimeSessions(args) }
+            socket?.on("conversation_handoff") { args -> onConversationHandoff(args) }
+            socket?.on("conversation_handoff_error") { args -> onConversationHandoffError(args) }
             socket?.on("kasa_devices") { args -> onKasaDevices(args) }
             socket?.on("printer_list") { args -> onPrinters(args) }
             socket?.on("system_alert") { args -> onSystemAlert(args) }
@@ -645,6 +685,20 @@ class FridaySocketManager @Inject constructor(
         emit("list_paired_devices", JSONObject())
     }
 
+    fun requestRuntimeSessions() {
+        emit("get_runtime_sessions", JSONObject())
+    }
+
+    fun handoffConversation(targetDeviceId: String) {
+        val summary = _messages.value.takeLast(12).joinToString("\n") { message ->
+            "${if (message.isFromUser) "User" else "Friday"}: ${message.text}"
+        }
+        emit("handoff_conversation", JSONObject().apply {
+            put("target_device_id", targetDeviceId)
+            put("summary", summary)
+        })
+    }
+
     fun pairDevice(code: String) {
         _pairingError.value = ""
         emit("pair_device", JSONObject().apply {
@@ -656,6 +710,37 @@ class FridaySocketManager @Inject constructor(
             put("battery", batteryPercent())
             put("network", networkType())
         })
+    }
+
+    fun consumeQrPayload(rawPayload: String) {
+        try {
+            val payload = JSONObject(rawPayload)
+            val serverUrl = payload.optString("server_url", "")
+            val session = payload.optString("session_id", "")
+            val secret = payload.optString("pairing_secret", "")
+            if (serverUrl.isBlank() || session.isBlank() || secret.isBlank()) {
+                _pairingError.value = "This is not a valid Friday pairing QR."
+                return
+            }
+            securityManager.setServerUrl(serverUrl)
+            securityManager.setPairingBootstrap(session, secret)
+            securityManager.setDeviceId(localDeviceId())
+            _pairingError.value = ""
+            pendingBootstrap = JSONObject().apply {
+                put("session_id", session)
+                put("pairing_secret", secret)
+                put("device_id", localDeviceId())
+                put("name", "Friday ${Build.MODEL}")
+                put("platform", "android")
+                put("model", Build.MODEL)
+                put("battery", batteryPercent())
+                put("network", networkType())
+            }
+            disconnect()
+            connect()
+        } catch (_: Exception) {
+            _pairingError.value = "Could not read the pairing QR."
+        }
     }
 
     fun connectGoogleAccount() {
@@ -705,8 +790,12 @@ class FridaySocketManager @Inject constructor(
 
     private fun onStatus(args: Array<Any?>) {
         if (args.isEmpty()) return
-        val data = args[0] as JSONObject
-        val msg = data.optString("msg", data.optString("text", "System"))
+        val value = args[0]
+        val msg = when (value) {
+            is JSONObject -> value.optString("msg", value.optString("text", "System"))
+            is String -> value
+            else -> value?.toString() ?: "System"
+        }
         if (msg.isNotEmpty()) addMessage(msg, false, true)
     }
 
@@ -1060,6 +1149,7 @@ class FridaySocketManager @Inject constructor(
             val device = data.getJSONObject("device")
             securityManager.setDeviceId(data.optString("device_id", localDeviceId()))
             securityManager.setDeviceToken(data.optString("device_token", ""))
+            securityManager.clearPairingBootstrap()
             _pairingError.value = ""
             onDeviceHeartbeat(arrayOf(device))
             addMessage("This phone is paired with Friday.", false, true)
@@ -1071,6 +1161,38 @@ class FridaySocketManager @Inject constructor(
     private fun onDevicePairingError(args: Array<Any?>) {
         if (args.isEmpty()) return
         _pairingError.value = (args[0] as? JSONObject)?.optString("error", "Pairing failed") ?: "Pairing failed"
+    }
+
+    private fun onRuntimeSessions(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val array = args[0] as? JSONArray ?: return
+        val sessions = ArrayList<RuntimeSession>(array.length())
+        for (i in 0 until array.length()) {
+            val item = array.optJSONObject(i) ?: continue
+            sessions.add(RuntimeSession(
+                deviceId = item.optString("device_id", ""),
+                deviceType = item.optString("device_type", "unknown"),
+                running = item.optBoolean("running", false),
+                sessionReady = item.optBoolean("session_ready", false),
+                connected = item.optBoolean("connected", false),
+            ))
+        }
+        _runtimeSessions.value = sessions
+    }
+
+    private fun onConversationHandoff(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        val item = args[0] as? JSONObject ?: return
+        addMessage(
+            "Conversation handoff from ${item.optString("from_device_id", "another device")}:\n\n${item.optString("summary", "")}",
+            false,
+            true,
+        )
+    }
+
+    private fun onConversationHandoffError(args: Array<Any?>) {
+        if (args.isEmpty()) return
+        addMessage("Handoff failed: ${(args[0] as? JSONObject)?.optString("error", "unknown error")}", false, true)
     }
 
     private fun onDeviceHeartbeat(args: Array<Any?>) {

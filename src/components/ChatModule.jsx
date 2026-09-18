@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from 'react';
+import CapabilityPlanCard from './CapabilityPlanCard';
 
 const ChatModule = ({
     messages,
@@ -132,6 +133,7 @@ const ChatModule = ({
                         <div className="text-gray-300 mt-1 leading-relaxed">{msg.text}</div>
                     </div>
                 ))}
+                <CapabilityPlanCard />
                 <div ref={messagesEndRef} />
             </div>
 

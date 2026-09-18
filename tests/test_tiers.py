@@ -88,4 +88,5 @@ passed = sum(1 for _, ok, _ in results if ok)
 for name, ok, extra in results:
     print(("PASS" if ok else "FAIL"), name, extra)
 print("%d/%d passed" % (passed, len(results)))
-sys.exit(0 if passed == len(results) else 1)
+if __name__ == "__main__":
+    sys.exit(0 if passed == len(results) else 1)

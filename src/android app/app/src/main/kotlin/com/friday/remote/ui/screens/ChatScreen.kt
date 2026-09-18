@@ -34,9 +34,12 @@ import java.io.InputStream
 fun ChatScreen(socketManager: FridaySocketManager) {
     val messages by socketManager.messages.collectAsState()
     val actionPlan by socketManager.actionPlan.collectAsState()
+    val runtimeSessions by socketManager.runtimeSessions.collectAsState()
     var textState by remember { mutableStateOf("") }
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
     var attachedFileName by remember { mutableStateOf<String?>(null) }
+    var targetMenuOpen by remember { mutableStateOf(false) }
+    var pendingTarget by remember { mutableStateOf<FridaySocketManager.RuntimeSession?>(null) }
     val context = LocalContext.current
 
     val filePickerLauncher = rememberLauncherForActivityResult(
@@ -49,6 +52,22 @@ fun ChatScreen(socketManager: FridaySocketManager) {
     }
 
     Column(modifier = Modifier.fillMaxSize()) {
+        pendingTarget?.let { target ->
+            AlertDialog(
+                onDismissRequest = { pendingTarget = null },
+                title = { Text("Send conversation?") },
+                text = { Text("Send the recent chat summary to ${target.deviceType} (${target.deviceId})?") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        socketManager.handoffConversation(target.deviceId)
+                        pendingTarget = null
+                    }) { Text("Send") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingTarget = null }) { Text("Cancel") }
+                },
+            )
+        }
         // Action Plan Display
         actionPlan?.let { plan ->
             ActionPlanCard(plan, socketManager)
@@ -113,6 +132,25 @@ fun ChatScreen(socketManager: FridaySocketManager) {
                 .padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            val targets = runtimeSessions.filter { it.connected && it.deviceType != "android" }
+            if (targets.isNotEmpty()) {
+                Box {
+                    TextButton(onClick = { targetMenuOpen = true }) {
+                        Text("Send chat", color = FridayAccent, fontSize = 11.sp)
+                    }
+                    DropdownMenu(expanded = targetMenuOpen, onDismissRequest = { targetMenuOpen = false }) {
+                        targets.forEach { target ->
+                            DropdownMenuItem(
+                                text = { Text("${target.deviceType}: ${target.deviceId}") },
+                                onClick = {
+                                    targetMenuOpen = false
+                                    pendingTarget = target
+                                },
+                            )
+                        }
+                    }
+                }
+            }
             IconButton(onClick = { filePickerLauncher.launch("*/*") }) {
                 Icon(Icons.Default.AttachFile, contentDescription = "Attach file", tint = FridayAccent)
             }

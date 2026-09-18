@@ -24,13 +24,18 @@ class TaskManager:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else []
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load tasks from %s: %s", self.path, exc)
             return []
 
     def _save(self, tasks: list[dict]) -> None:
-        temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(tasks, indent=2, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(self.path)
+        try:
+            temporary = self.path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(tasks, indent=2, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self.path)
+        except OSError as exc:
+            logger.error("Could not persist tasks to %s: %s", self.path, exc)
+            raise
 
     def create(self, title: str, due: str = "", priority: str = "normal", project: str = "", notes: str = "", calendar_link: str = "", email_link: str = "", recurrence: str = "") -> dict:
         if not title.strip():

@@ -1,5 +1,6 @@
 import json
 import hashlib
+import logging
 import os
 import re
 import shutil
@@ -8,6 +9,8 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryManager:
@@ -86,11 +89,15 @@ class MemoryManager:
         self._write_count += 1
         if self._write_count % self.BACKUP_EVERY_WRITES != 0:
             return
-        backup_path = self.backup_dir / datetime.now().strftime("memory_%Y%m%d_%H%M%S")
-        backup_path.mkdir(parents=True, exist_ok=True)
-        for source in (self.index_file, self.facts_file, self.upload_index_file):
-            if source.exists():
-                shutil.copy2(source, backup_path / source.name)
+        try:
+            backup_path = self.backup_dir / datetime.now().strftime("memory_%Y%m%d_%H%M%S")
+            backup_path.mkdir(parents=True, exist_ok=True)
+            for source in (self.index_file, self.facts_file, self.upload_index_file):
+                if source.exists():
+                    shutil.copy2(source, backup_path / source.name)
+            logger.info("Memory backup written to %s", backup_path)
+        except OSError as exc:
+            logger.warning("Memory backup failed: %s", exc)
 
     def _append_jsonl(self, path: Path, entry: dict):
         with path.open("a", encoding="utf-8", newline="") as file:
@@ -119,6 +126,7 @@ class MemoryManager:
                         records.append(record)
                 except json.JSONDecodeError:
                     # Ignore incomplete/corrupt records and keep recoverable history.
+                    logger.debug("Skipping corrupt record in %s", path)
                     continue
         return records
 
@@ -154,8 +162,8 @@ class MemoryManager:
         try:
             from actions import semantic_memory as _sem
             _sem.ingest_chat(sender, text, project)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Semantic memory ingest skipped: %s", exc)
 
     @staticmethod
     def _normalize_confidence(value) -> float:

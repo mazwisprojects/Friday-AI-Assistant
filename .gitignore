@@ -49,3 +49,9 @@ out/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test / runtime artifacts
+.pytest_*/
+test-results/
+logs/*.log
+tests/nonexistent

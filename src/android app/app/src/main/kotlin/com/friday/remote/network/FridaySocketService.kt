@@ -20,7 +20,17 @@ class FridaySocketService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d("FridaySocket", "Service onCreate() - starting foreground service")
-        startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            startForeground(NOTIFICATION_ID, createNotification())
+        } catch (error: SecurityException) {
+            Log.e("FridaySocket", "Android rejected foreground service permissions", error)
+            stopSelf()
+            return
+        } catch (error: IllegalStateException) {
+            Log.e("FridaySocket", "Android rejected foreground service startup", error)
+            stopSelf()
+            return
+        }
         Log.d("FridaySocket", "Service calling socketManager.connect()")
         socketManager.connect()
     }

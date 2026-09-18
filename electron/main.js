@@ -37,30 +37,39 @@ function createWindow() {
 
     const loadFrontend = (retries = 3) => {
         const url = isDev ? 'http://localhost:5173' : null;
-        const loadPromise = isDev
-            ? mainWindow.loadURL(url)
-            : mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
+        // Dev-only: wipe the renderer's HTTP cache so a restarted Vite server can
+        // never leave the app stuck on a stale module bundle (react-refresh keeps
+        // the last good module graph otherwise).
+        const beginLoad = isDev
+            ? mainWindow.webContents.session.clearCache()
+                .catch((e) => console.warn(`Cache clear failed (continuing): ${e.message}`))
+            : Promise.resolve();
+        beginLoad.then(() => {
+            const loadPromise = isDev
+                ? mainWindow.loadURL(url)
+                : mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
 
-        loadPromise
-            .then(() => {
-                console.log('Frontend loaded successfully!');
-                windowWasShown = true;
-                mainWindow.show();
-                if (isDev) {
-                    mainWindow.webContents.openDevTools();
-                }
-            })
-            .catch((err) => {
-                console.error(`Failed to load frontend: ${err.message}`);
-                if (retries > 0) {
-                    console.log(`Retrying in 1 second... (${retries} retries left)`);
-                    setTimeout(() => loadFrontend(retries - 1), 1000);
-                } else {
-                    console.error('Failed to load frontend after all retries. Keeping window open.');
+            loadPromise
+                .then(() => {
+                    console.log('Frontend loaded successfully!');
                     windowWasShown = true;
-                    mainWindow.show(); // Show anyway so user sees something
-                }
-            });
+                    mainWindow.show();
+                    if (isDev) {
+                        mainWindow.webContents.openDevTools();
+                    }
+                })
+                .catch((err) => {
+                    console.error(`Failed to load frontend: ${err.message}`);
+                    if (retries > 0) {
+                        console.log(`Retrying in 1 second... (${retries} retries left)`);
+                        setTimeout(() => loadFrontend(retries - 1), 1000);
+                    } else {
+                        console.error('Failed to load frontend after all retries. Keeping window open.');
+                        windowWasShown = true;
+                        mainWindow.show(); // Show anyway so user sees something
+                    }
+                });
+        });
     };
 
     loadFrontend();

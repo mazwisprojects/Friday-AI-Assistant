@@ -95,7 +95,11 @@ class AutonomyPipeline:
     def _generate_capability(self, proposal: dict) -> dict:
         """Turn an approved usage-pattern proposal into a real governed agent."""
         target = proposal["name"]
-        agent_name = f"workflow_{target}"
+        # Collapse runaway nesting from earlier generations: a capability whose
+        # name is itself a wrapped workflow must not grow another prefix.
+        while target.startswith("workflow_workflow_"):
+            target = target[len("workflow_"):]
+        agent_name = f"workflow_{target}" if not target.startswith("workflow_") else target
         code = (
             "def run(goal, repo_path, log, cancel_event, context=None):\n"
             f"    log(\"Executing governed workflow for '{target}'\")\n"

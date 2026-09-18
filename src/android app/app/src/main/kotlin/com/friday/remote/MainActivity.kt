@@ -36,6 +36,7 @@ import com.friday.remote.ui.screens.GoogleServicesScreen
 import com.friday.remote.ui.screens.KasaScreen
 import com.friday.remote.ui.screens.PrinterScreen
 import com.friday.remote.ui.screens.RemindersScreen
+import com.friday.remote.ui.screens.PairingScreen
 import com.friday.remote.ui.screens.SettingsScreen
 import com.friday.remote.ui.screens.TasksScreen
 import com.friday.remote.ui.screens.WeatherScreen
@@ -63,7 +64,18 @@ class MainActivity : ComponentActivity() {
         
         val serviceIntent = Intent(this, FridaySocketService::class.java)
         android.util.Log.d("FridayApp", "Starting FridaySocketService...")
-        startForegroundService(serviceIntent)
+        try {
+            startForegroundService(serviceIntent)
+        } catch (error: SecurityException) {
+            // Some Android builds reject foreground services until their
+            // notification/device permissions are granted. Keep the app usable
+            // and let the socket manager connect from the activity instead.
+            android.util.Log.e("FridayApp", "Foreground service unavailable; using activity connection", error)
+            socketManager.connect()
+        } catch (error: IllegalStateException) {
+            android.util.Log.e("FridayApp", "Foreground service could not start; using activity connection", error)
+            socketManager.connect()
+        }
 
         setContent {
             FridayTheme {
@@ -174,7 +186,7 @@ fun MainApp(
                 composable("chat") { ChatScreen(socketManager) }
                 composable("files") { FileManagementScreen(socketManager) }
                 composable("camera") { CameraScreen(socketManager) }
-                composable("settings") { SettingsScreen(socketManager, securityManager) }
+                composable("settings") { SettingsScreen(socketManager, securityManager, navController) }
                 composable("weather") { WeatherScreen(socketManager) }
                 composable("google") { GoogleServicesScreen(socketManager) }
                 composable("kasa") { KasaScreen(socketManager) }
@@ -183,6 +195,7 @@ fun MainApp(
                 composable("autonomy") { AutonomyScreen(socketManager) }
                 composable("tasks") { TasksScreen(socketManager) }
                 composable("reminders") { RemindersScreen(socketManager) }
+                composable("pairing") { PairingScreen(socketManager) }
             }
         }
     }
@@ -392,6 +405,7 @@ fun DrawerContent(
         Triple("Chat", Icons.AutoMirrored.Filled.Chat, "chat"),
         Triple("Files", Icons.Default.FolderOpen, "files"),
         Triple("Camera", Icons.Default.CameraAlt, "camera"),
+        Triple("Pair phone", Icons.Default.QrCodeScanner, "pairing"),
         Triple("Settings", Icons.Default.Settings, "settings"),
         Triple("Weather", Icons.Default.Cloud, "weather"),
         Triple("Google Services", Icons.Default.Assistant, "google"),
@@ -401,6 +415,7 @@ fun DrawerContent(
         Triple("Autonomy", Icons.Default.Memory, "autonomy"),
         Triple("Tasks", Icons.Default.Assistant, "tasks"),
         Triple("Reminders", Icons.Default.Notifications, "reminders")
+
     )
 
     Column(

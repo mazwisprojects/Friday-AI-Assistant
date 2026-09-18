@@ -25,12 +25,17 @@ class ExecutionLedger:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             return data if isinstance(data, list) else []
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not load execution ledger from %s: %s", self.path, exc)
             return []
 
     def _save(self, entries: list[dict]) -> None:
         temporary = self.path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(entries[-self.limit:], indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        try:
+            temporary.write_text(json.dumps(entries[-self.limit:], indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        except OSError as exc:
+            logger.error("Could not write execution ledger to %s: %s", temporary, exc)
+            raise
         # Windows: a freshly written file can be held open for a moment by
         # antivirus/indexing, making the atomic rename fail with
         # PermissionError. Retry briefly so history entries are never lost.
@@ -38,8 +43,9 @@ class ExecutionLedger:
             try:
                 temporary.replace(self.path)
                 return
-            except PermissionError:
+            except PermissionError as exc:
                 if attempt == 3:
+                    logger.error("Could not replace execution ledger at %s: %s", self.path, exc)
                     raise
                 time.sleep(0.1 * (attempt + 1))
 

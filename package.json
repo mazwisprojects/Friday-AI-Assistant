@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && npx electron .\"",
     "build": "vite build",
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
     "start": "npx electron ."
   },
   "keywords": [],
@@ -19,6 +21,7 @@
     "clsx": "^2.1.0",
     "framer-motion": "^11.0.0",
     "lucide-react": "^0.300.0",
+    "qrcode.react": "^4.2.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "socket.io-client": "^4.7.4",
@@ -26,6 +29,7 @@
     "three": "^0.160.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.17",
     "concurrently": "^8.2.2",

@@ -337,6 +337,15 @@ body {
   pointer-events: auto;
 }
 
+.hud-sidebar-apps {
+  margin-bottom: 8px;
+}
+
+.hud-sidebar-apps button {
+  min-height: 42px;
+  background: rgba(8, 47, 65, 0.28);
+}
+
 .hud-sidebar-actions button {
   display: flex;
   min-height: 48px;

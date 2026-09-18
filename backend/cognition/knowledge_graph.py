@@ -22,8 +22,10 @@ class Entity:
     id: str
     name: str
     entity_type: str = "thing"
+    description: str = ""
     properties: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -174,7 +176,7 @@ class KnowledgeGraph:
                 json.dump(data, fh, indent=1)
             return True
         except Exception as e:
-            logger.debug("Knowledge graph save failed: %s", e)
+            logger.warning("Knowledge graph save failed (%s): %s", path, e)
             return False
 
     def load(self, storage_path: str | None = None) -> bool:
@@ -205,7 +207,7 @@ class KnowledgeGraph:
             ]
             return True
         except Exception as e:
-            logger.debug("Knowledge graph load failed: %s", e)
+            logger.warning("Knowledge graph load failed (%s): %s", path, e)
             return False
 
     async def add_knowledge(self, fact: dict[str, Any]) -> None:
@@ -258,8 +260,9 @@ class KnowledgeGraph:
                 result.metadata["semantic_memories"] = memories[:5]
                 if not relevant and memories:
                     result.confidence = 0.6
-        except Exception:
-            pass
+        except Exception as e:
+            # Semantic memory is an optional enrichment; log and continue.
+            logger.debug("Semantic memory enrichment unavailable: %s", e)
         return result
 
     async def _extract_entities(self, fact: dict[str, Any]) -> list[Entity]:

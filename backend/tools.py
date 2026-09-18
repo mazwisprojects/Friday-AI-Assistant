@@ -783,7 +783,21 @@ read_file_tool = {
     }
 }
 
+plan_capability_tool = {
+    "name": "plan_capability",
+    "description": "Use FIRST when the user requests a new tool, agent, workflow or app. Drafts or revises a saved plan with risks, advantages and tests. Explain the returned plan aloud and wait for user review. Cannot approve or execute. For edits supply the plan ID and version. Never bypass review via scripts or other builders.",
+    "parameters": {"type": "OBJECT", "properties": {
+        "request": {"type": "STRING", "description": "User goal or requested plan edits"},
+        "plan_id": {"type": "STRING"}, "version": {"type": "INTEGER"}
+    }, "required": ["request"]}
+}
+
+# Direct build calls are paused; the Live planner must not promise automatic execution.
+build_agent_tool["description"] = "Direct build paused. Use plan_capability for a reviewed plan first."
+build_custom_tool["description"] = "Direct build paused. Use plan_capability for a reviewed plan first."
+
 tools_list = [{"function_declarations": [
+    plan_capability_tool,
     generate_cad_prototype_tool,
     write_file_tool,
     read_directory_tool,
